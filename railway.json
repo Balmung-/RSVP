@@ -2,8 +2,9 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
   "deploy": {
-    "startCommand": "npx prisma db push --accept-data-loss --skip-generate; node server.js",
+    "startCommand": "node ./node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate || echo 'db push skipped/failed — continuing'; node server.js",
     "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE"
   }
 }
