@@ -101,6 +101,36 @@ Keep Vercel as the origin. Put Cloudflare in front for WAF, rate-limiting, and c
 - **Migrations.** First-time deploy uses `prisma db push`. Once schema stabilizes, create a baseline with `npx prisma migrate dev --name init` and switch the Railway start command to `prisma migrate deploy`.
 - **Security headers.** CSP-lite, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, HSTS — set in `next.config.js`.
 
+## Scheduled stages (Phase 2)
+
+A campaign can have any number of **stages** — invite → reminder → last-call → thanks — each with its own audience (`all`, `non_responders`, `attending`, `declined`), channels, and template overrides. Stages are scheduled to a timezone-aware moment and fired by a tick endpoint.
+
+### Wiring the tick
+
+1. Set `CRON_SECRET` (`openssl rand -hex 32`) in your app service.
+2. Point any scheduler at `POST https://<app>/api/cron/tick` with header `Authorization: Bearer <CRON_SECRET>`, on a minute-ish cadence.
+
+Railway: **+ Create → Cron Job → Scheduled**. Command:
+
+```
+curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron/tick"
+```
+
+Schedule: `* * * * *` (every minute). Attach `CRON_SECRET` and `APP_URL` to the cron service as env vars.
+
+Alternatively: Vercel cron, GitHub Actions on a schedule, cron-job.org, or any other HTTP scheduler. The endpoint is idempotent — concurrent ticks can't double-send because each stage is claimed via a CAS (pending → running).
+
+### How a stage runs
+
+1. `dispatchDueStages()` selects stages with `status = pending` and `scheduledFor <= now`, limit 20.
+2. Each stage is claimed atomically (CAS), then rendered against its audience with its own template overrides falling back to the campaign's.
+3. For each recipient × channel, a fresh `Invitation` row is written; failures go to `status = failed` without blocking the rest.
+4. On completion the stage stores `sentCount / skippedCount / failedCount` and emits an `EventLog` entry.
+
+### Run now
+
+Any pending stage has a **Run now** button on the campaign detail page — useful to fire a reminder immediately if the operator doesn't want to wait for the cron.
+
 ## Architecture
 
 ```

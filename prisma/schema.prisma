@@ -30,8 +30,40 @@ model Campaign {
   invitees      Invitee[]
   invitations   Invitation[]
   responses     Response[]
+  stages        CampaignStage[]
 
   @@index([status])
+}
+
+// A scheduled touchpoint within a campaign. Stages stack into a flow:
+// invite → reminder → last_call → thanks. Each stage has its own audience,
+// channels, and (optional) template overrides. The dispatcher wakes any stage
+// whose scheduledFor is in the past and whose status is still "pending".
+model CampaignStage {
+  id            String    @id @default(cuid())
+  campaignId    String
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  kind          String    // invite | reminder | last_call | thanks | custom
+  name          String?
+  order         Int       @default(0)
+  scheduledFor  DateTime
+  channels      String    @default("email,sms") // comma-sep subset of [email, sms]
+  audience      String    @default("all")       // all | non_responders | attending | declined
+  subjectEmail  String?
+  templateEmail String?
+  templateSms   String?
+  status        String    @default("pending")   // pending | running | completed | failed | skipped
+  startedAt     DateTime?
+  completedAt   DateTime?
+  sentCount     Int       @default(0)
+  skippedCount  Int       @default(0)
+  failedCount   Int       @default(0)
+  error         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([campaignId, order])
+  @@index([status, scheduledFor])
 }
 
 // An Invitee is a person. Phone/email are normalized and unique per campaign.

@@ -6,6 +6,7 @@ import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
 import { InviteeTable } from "@/components/InviteeTable";
 import { InviteePanel } from "@/components/InviteePanel";
+import { StageTimeline } from "@/components/StageTimeline";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import {
@@ -15,6 +16,7 @@ import {
   resendSelection,
   deleteInvitee,
 } from "@/lib/campaigns";
+import { listStages, runStageNow } from "@/lib/stages";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +78,14 @@ async function bulkDelete(campaignId: string, formData: FormData) {
   redirect(`/campaigns/${campaignId}`);
 }
 
+async function runStageAction(campaignId: string, formData: FormData) {
+  "use server";
+  if (!isAuthed()) redirect("/login");
+  const stageId = String(formData.get("stageId"));
+  if (stageId) await runStageNow(stageId, campaignId);
+  redirect(`/campaigns/${campaignId}`);
+}
+
 const statusTone = {
   draft: "wait",
   active: "live",
@@ -111,7 +121,7 @@ export default async function CampaignDetail({
       : {}),
   };
 
-  const [stats, totalInvitees, invitees] = await Promise.all([
+  const [stats, totalInvitees, invitees, stages] = await Promise.all([
     campaignStats(c.id),
     prisma.invitee.count({ where }),
     prisma.invitee.findMany({
@@ -121,6 +131,7 @@ export default async function CampaignDetail({
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
+    listStages(c.id),
   ]);
 
   // Drawer payload (separate query because the selected invitee may be on a
@@ -172,6 +183,7 @@ export default async function CampaignDetail({
   const singleDeleteBound = singleDelete.bind(null, c.id);
   const bulkResendBound = bulkResend.bind(null, c.id);
   const bulkDeleteBound = bulkDelete.bind(null, c.id);
+  const runStageBound = runStageAction.bind(null, c.id);
 
   return (
     <Shell
@@ -254,6 +266,8 @@ export default async function CampaignDetail({
         deleteBulkAction={bulkDeleteBound}
       />
       <Pagination page={page} pageSize={PAGE_SIZE} total={totalInvitees} hrefFor={hrefFor} />
+
+      <StageTimeline campaignId={c.id} stages={stages} runNowAction={runStageBound} />
 
       {showDrawer ? (
         <InviteePanel
