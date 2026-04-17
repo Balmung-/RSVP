@@ -26,6 +26,7 @@ export function CampaignHeader({
   campaign,
   sendAction,
   sendSummary,
+  duplicateAction,
   canWrite,
   canDelete,
   headcount,
@@ -41,6 +42,7 @@ export function CampaignHeader({
     alreadyEmailSent: number;
     alreadySmsSent: number;
   };
+  duplicateAction: () => Promise<void>;
   canWrite: boolean;
   canDelete: boolean;
   headcount: number;
@@ -105,6 +107,11 @@ export function CampaignHeader({
                 <MenuItem as="link" href={`/campaigns/${campaign.id}/import`}>
                   <MenuRow icon="upload" label="Import CSV" />
                 </MenuItem>
+                <form action={duplicateAction}>
+                  <MenuItem as="button">
+                    <MenuRow icon="copy" label="Duplicate campaign" />
+                  </MenuItem>
+                </form>
               </>
             ) : null}
             <MenuSeparator />

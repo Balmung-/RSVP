@@ -18,6 +18,8 @@ import {
   findDuplicates,
 } from "@/lib/campaigns";
 import { listStages, runStageNow } from "@/lib/stages";
+import { duplicateCampaign } from "@/lib/campaign-duplicate";
+import { setFlash } from "@/lib/flash";
 import {
   createQuestion,
   deleteQuestion,
@@ -104,6 +106,14 @@ async function runStageAction(campaignId: string, formData: FormData) {
   const stageId = String(formData.get("stageId"));
   if (stageId) await runStageNow(stageId, campaignId);
   redirect(`/campaigns/${campaignId}?tab=schedule`);
+}
+
+async function duplicateAction(campaignId: string) {
+  "use server";
+  await requireRole("editor");
+  const newId = await duplicateCampaign(campaignId);
+  setFlash({ kind: "success", text: "Campaign duplicated", detail: "Fresh invitee list, same settings." });
+  redirect(`/campaigns/${newId}`);
 }
 
 // Content tab actions ------------------------------------------------
@@ -291,6 +301,7 @@ export default async function CampaignWorkspace({
         campaign={campaign}
         sendAction={sendAction}
         sendSummary={sendSummary}
+        duplicateAction={duplicateAction.bind(null, campaign.id)}
         canWrite={canWrite}
         canDelete={canDelete}
         headcount={stats.headcount}

@@ -33,6 +33,7 @@ type Props = {
   existing: {
     attending: boolean;
     guestsCount: number;
+    guestNames: string[];
     message: string;
     eventOptionId: string | null;
     answers: Record<string, string>;
@@ -75,6 +76,7 @@ export default function RsvpForm({
 
   if (showDone) {
     const showQr = attending === true && admissionQrDataUrl;
+    const showIcs = attending === true;
     return (
       <div className="mt-10 text-center" role="status" aria-live="polite">
         <div className="inline-flex items-center gap-2 text-signal-live text-sm">
@@ -82,6 +84,18 @@ export default function RsvpForm({
           <span>{L.rsvp.thankYou}</span>
         </div>
         <p className="text-sm text-ink-500 mt-2">{L.rsvp.received}</p>
+
+        {showIcs ? (
+          <div className="mt-6">
+            <a
+              href={`/api/rsvp/${token}/ics`}
+              download
+              className="btn btn-soft"
+            >
+              {locale === "ar" ? "إضافة إلى التقويم" : "Add to calendar"}
+            </a>
+          </div>
+        ) : null}
 
         {showQr ? (
           <div className="mt-8 flex flex-col items-center">
@@ -104,7 +118,7 @@ export default function RsvpForm({
 
         <button
           onClick={() => setEditing(true)}
-          className="mt-6 text-xs text-ink-400 hover:text-ink-900 underline-offset-4 hover:underline"
+          className="mt-8 text-xs text-ink-400 hover:text-ink-900 underline-offset-4 hover:underline"
           type="button"
         >
           {L.rsvp.update}
@@ -200,30 +214,51 @@ export default function RsvpForm({
       ) : null}
 
       {attending === true && guestsAllowed > 0 ? (
-        <div className="flex items-center justify-between border-t border-ink-100 pt-6">
-          <label className="text-sm text-ink-700" id="guests-label">
-            {L.rsvp.guests}
-          </label>
-          <div className="inline-flex items-center gap-3" aria-labelledby="guests-label">
-            <button
-              type="button"
-              onClick={() => setGuests((g) => Math.max(0, g - 1))}
-              className="h-8 w-8 rounded-full border border-ink-200 text-ink-600 hover:border-ink-900 hover:text-ink-900 transition-colors"
-              aria-label={locale === "ar" ? "إنقاص عدد المرافقين" : "Decrease guests"}
-            >
-              −
-            </button>
-            <span className="w-8 text-center tabular-nums font-medium" aria-live="polite">{guests}</span>
-            <button
-              type="button"
-              onClick={() => setGuests((g) => Math.min(guestsAllowed, g + 1))}
-              className="h-8 w-8 rounded-full border border-ink-200 text-ink-600 hover:border-ink-900 hover:text-ink-900 transition-colors"
-              aria-label={locale === "ar" ? "زيادة عدد المرافقين" : "Increase guests"}
-            >
-              +
-            </button>
-            <span className="text-xs text-ink-400">/ {guestsAllowed}</span>
+        <div className="border-t border-ink-100 pt-6 flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <label className="text-sm text-ink-700" id="guests-label">
+              {L.rsvp.guests}
+            </label>
+            <div className="inline-flex items-center gap-3" aria-labelledby="guests-label">
+              <button
+                type="button"
+                onClick={() => setGuests((g) => Math.max(0, g - 1))}
+                className="h-8 w-8 rounded-full border border-ink-200 text-ink-600 hover:border-ink-900 hover:text-ink-900 transition-colors"
+                aria-label={locale === "ar" ? "إنقاص عدد المرافقين" : "Decrease guests"}
+              >
+                −
+              </button>
+              <span className="w-8 text-center tabular-nums font-medium" aria-live="polite">{guests}</span>
+              <button
+                type="button"
+                onClick={() => setGuests((g) => Math.min(guestsAllowed, g + 1))}
+                className="h-8 w-8 rounded-full border border-ink-200 text-ink-600 hover:border-ink-900 hover:text-ink-900 transition-colors"
+                aria-label={locale === "ar" ? "زيادة عدد المرافقين" : "Increase guests"}
+              >
+                +
+              </button>
+              <span className="text-xs text-ink-400">/ {guestsAllowed}</span>
+            </div>
           </div>
+
+          {guests > 0 ? (
+            <div className="flex flex-col gap-2">
+              <div className="text-micro uppercase tracking-wider text-ink-400">
+                {locale === "ar" ? "أسماء المرافقين" : "Guest names"}
+              </div>
+              {Array.from({ length: guests }).map((_, i) => (
+                <input
+                  key={i}
+                  name={`guest_${i}`}
+                  type="text"
+                  maxLength={120}
+                  placeholder={locale === "ar" ? `الضيف ${i + 1}` : `Guest ${i + 1}`}
+                  defaultValue={existing?.guestNames?.[i] ?? ""}
+                  className="field"
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

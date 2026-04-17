@@ -18,17 +18,18 @@ async function submit(_prev: SubmitResult | null, formData: FormData): Promise<S
   const message = String(formData.get("message") ?? "");
   const eventOptionId = String(formData.get("eventOptionId") ?? "") || null;
 
-  // Collect q_<id> form fields into an answers map.
+  // Collect q_<id> answers + guest_<i> names.
   const answers: Record<string, string | string[]> = {};
+  const guestNames: string[] = [];
   formData.forEach((value, key) => {
-    if (!key.startsWith("q_")) return;
-    const qid = key.slice(2);
-    if (answers[qid] == null) {
-      answers[qid] = String(value);
-    } else if (Array.isArray(answers[qid])) {
-      (answers[qid] as string[]).push(String(value));
-    } else {
-      answers[qid] = [answers[qid] as string, String(value)];
+    if (key.startsWith("q_")) {
+      const qid = key.slice(2);
+      if (answers[qid] == null) answers[qid] = String(value);
+      else if (Array.isArray(answers[qid])) (answers[qid] as string[]).push(String(value));
+      else answers[qid] = [answers[qid] as string, String(value)];
+    } else if (key.startsWith("guest_")) {
+      const idx = parseInt(key.slice(6), 10);
+      if (Number.isFinite(idx)) guestNames[idx] = String(value);
     }
   });
 
@@ -41,6 +42,7 @@ async function submit(_prev: SubmitResult | null, formData: FormData): Promise<S
     token,
     attending,
     guestsCount,
+    guestNames: guestNames.filter(Boolean),
     message,
     eventOptionId,
     answers,
@@ -191,6 +193,7 @@ export default async function RsvpPage({
                   ? {
                       attending: inv.response.attending,
                       guestsCount: inv.response.guestsCount,
+                      guestNames: (inv.response.guestNames ?? "").split(/\r?\n/).filter(Boolean),
                       message: inv.response.message ?? "",
                       eventOptionId: inv.response.eventOptionId ?? null,
                       answers: Object.fromEntries(inv.response.answers.map((a) => [a.questionId, a.value])),

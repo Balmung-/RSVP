@@ -23,6 +23,7 @@ export async function submitResponse(params: {
   token: string;
   attending: boolean;
   guestsCount?: number;
+  guestNames?: string[];
   message?: string;
   eventOptionId?: string | null;
   answers?: Record<string, string | string[]>;
@@ -42,6 +43,13 @@ export async function submitResponse(params: {
   if (c.rsvpDeadline && c.rsvpDeadline < new Date()) return { ok: false, reason: "deadline" };
 
   const guests = Math.max(0, Math.min(params.guestsCount ?? 0, inv.guestsAllowed));
+  const guestNames = params.attending
+    ? (params.guestNames ?? [])
+        .map((n) => n.trim().slice(0, 120))
+        .filter(Boolean)
+        .slice(0, guests)
+        .join("\n") || null
+    : null;
 
   // Validate custom answers against the questions that apply for this state.
   const applicable = filterForState(c.questions, params.attending);
@@ -65,6 +73,7 @@ export async function submitResponse(params: {
         inviteeId: inv.id,
         attending: params.attending,
         guestsCount: params.attending ? guests : 0,
+        guestNames,
         message: params.message?.slice(0, 2000) || null,
         ip: params.ip,
         userAgent: params.userAgent?.slice(0, 300),
@@ -73,6 +82,7 @@ export async function submitResponse(params: {
       update: {
         attending: params.attending,
         guestsCount: params.attending ? guests : 0,
+        guestNames,
         message: params.message?.slice(0, 2000) || null,
         respondedAt: new Date(),
         eventOptionId,

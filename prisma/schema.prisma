@@ -200,6 +200,7 @@ model Response {
   invitee        Invitee      @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
   attending      Boolean
   guestsCount    Int          @default(0)
+  guestNames     String?      // newline-joined list of plus-one names
   message        String?
   ip             String?
   userAgent      String?

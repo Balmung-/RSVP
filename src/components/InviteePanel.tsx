@@ -139,6 +139,18 @@ export function InviteePanel({
               </div>
             ) : null}
             <div className="text-xs text-ink-400 mt-0.5">{fmt.format(response.respondedAt)}</div>
+            {response.guestNames ? (
+              <div className="mt-3 rounded-lg bg-ink-50 px-3 py-2">
+                <div className="text-micro uppercase text-ink-500 mb-1">Guests</div>
+                <ul className="text-body text-ink-800 space-y-0.5">
+                  {response.guestNames.split(/\r?\n/).filter(Boolean).map((n, i) => (
+                    <li key={i} className="tabular-nums">
+                      <span className="text-ink-400 me-2">{i + 1}.</span>{n}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {response.message ? (
               <p className="mt-2 text-sm text-ink-600 whitespace-pre-wrap border-l-2 border-ink-200 pl-3">
                 {response.message}
