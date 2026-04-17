@@ -6,6 +6,8 @@ import { teamsEnabled } from "@/lib/teams";
 import { readAdminLocale, adminDict } from "@/lib/adminLocale";
 import { Icon, type IconName } from "./Icon";
 import { Toast } from "./Toast";
+import { CommandPalette } from "./CommandPalette";
+import { CommandHint } from "./CommandHint";
 
 // The dominant canvas. Edges are quiet: a thin rail, a thin top seam.
 // Pages can set `compactTitle` when they render their own display-size
@@ -87,7 +89,10 @@ export async function Shell({
             <div className="min-w-0 flex items-baseline gap-3">
               <div className="text-mini text-ink-400 truncate">{crumb ?? title}</div>
             </div>
-            <div className="flex items-center gap-2 shrink-0">{actions}</div>
+            <div className="flex items-center gap-2 shrink-0">
+              <CommandHint />
+              {actions}
+            </div>
           </header>
         ) : (
           <header className="flex items-center justify-between px-10 py-6 border-b border-ink-100 bg-ink-0">
@@ -95,12 +100,16 @@ export async function Shell({
               {crumb ? <div className="text-mini text-ink-400 mb-1 truncate">{crumb}</div> : null}
               <h1 className="text-section text-ink-900 truncate">{title}</h1>
             </div>
-            <div className="flex items-center gap-2 shrink-0">{actions}</div>
+            <div className="flex items-center gap-2 shrink-0">
+              <CommandHint />
+              {actions}
+            </div>
           </header>
         )}
         <div className="flex-1 px-10 py-10">{children}</div>
       </main>
       {flash ? <Toast flash={flash} /> : null}
+      <CommandPalette isAdmin={isAdmin} teamsOn={showTeams} />
     </div>
   );
 }
