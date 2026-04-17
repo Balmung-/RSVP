@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { Campaign } from "@prisma/client";
+import type { Campaign, Team } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
 import { FileInput } from "./FileInput";
 
@@ -11,11 +11,13 @@ export function CampaignForm({
   action,
   submitLabel,
   cancelHref,
+  teams,
 }: {
   campaign?: Campaign | null;
   action: (fd: FormData) => Promise<void> | void;
   submitLabel: string;
   cancelHref: string;
+  teams?: Team[];
 }) {
   return (
     <form action={action} className="panel max-w-3xl p-10 grid grid-cols-2 gap-6">
@@ -38,7 +40,17 @@ export function CampaignForm({
           placeholder="Diplomatic Quarter, Riyadh"
         />
       </Field>
-      <Field label="Locale">
+      {teams && teams.length > 0 ? (
+        <Field label="Team">
+          <select name="teamId" className="field" defaultValue={campaign?.teamId ?? ""}>
+            <option value="">Office-wide</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </Field>
+      ) : null}
+      <Field label="Locale" className={teams && teams.length > 0 ? "" : ""}>
         <select name="locale" className="field" defaultValue={campaign?.locale ?? "en"}>
           <option value="en">English</option>
           <option value="ar">العربية</option>

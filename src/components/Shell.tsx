@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { consumeFlash } from "@/lib/flash";
+import { teamsEnabled } from "@/lib/teams";
 import { Icon, type IconName } from "./Icon";
 import { Toast } from "./Toast";
 
@@ -25,6 +26,7 @@ export async function Shell({
   const me = await getCurrentUser();
   const isAdmin = hasRole(me, "admin");
   const flash = consumeFlash();
+  const showTeams = teamsEnabled() && isAdmin;
 
   return (
     <div className="min-h-screen grid grid-cols-[240px_1fr]">
@@ -39,7 +41,8 @@ export async function Shell({
           <NavLink href="/" icon="dashboard">Overview</NavLink>
           <NavLink href="/campaigns" icon="calendar-check">Campaigns</NavLink>
           <NavLink href="/contacts" icon="users">Contacts</NavLink>
-          {isAdmin ? <NavLink href="/users" icon="user-plus">Team</NavLink> : null}
+          {showTeams ? <NavLink href="/teams" icon="tag">Teams</NavLink> : null}
+          {isAdmin ? <NavLink href="/users" icon="user-plus">People</NavLink> : null}
           {isAdmin ? <NavLink href="/events" icon="list">Events</NavLink> : null}
         </nav>
         <div className="mt-auto pt-4 border-t border-ink-100">

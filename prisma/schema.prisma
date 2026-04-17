@@ -32,6 +32,10 @@ model Campaign {
   brandLogoUrl  String?
   brandHeroUrl  String?
 
+  // Optional team scoping. null = office-wide.
+  teamId        String?
+  team          Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
   invitees      Invitee[]
   invitations   Invitation[]
   responses     Response[]
@@ -41,6 +45,7 @@ model Campaign {
   eventOptions  EventOption[]
 
   @@index([status])
+  @@index([teamId])
 }
 
 // Per-campaign custom question asked on the RSVP page.
@@ -300,6 +305,41 @@ model FileUpload {
   @@index([createdAt])
 }
 
+// --- Teams -----------------------------------------------------
+
+// Optional org unit. When TEAMS_ENABLED is on, admins carve the office
+// into desks (Royal Protocol, Media, International Relations…). A
+// campaign can be office-wide (teamId = null) or scoped to a team.
+// Membership is many-to-many; users can belong to multiple teams.
+model Team {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  color       String?
+  description String?
+  archivedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships TeamMembership[]
+  campaigns   Campaign[]
+
+  @@index([slug])
+}
+
+model TeamMembership {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   @default("member") // lead | member | guest
+  createdAt DateTime @default(now())
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
 // --- Identity --------------------------------------------------
 
 // Admin users. One row per human. `passwordHash` is nullable for SSO-only
@@ -316,6 +356,7 @@ model User {
   lastLoginAt  DateTime?
   sessions     Session[]
   eventLog     EventLog[]
+  teams        TeamMembership[]
 
   @@index([email])
 }

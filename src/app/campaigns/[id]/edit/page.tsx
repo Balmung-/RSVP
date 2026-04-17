@@ -7,6 +7,7 @@ import { prisma } from "@/lib/db";
 import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
+import { teamsEnabled } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,9 @@ async function updateCampaign(id: string, formData: FormData) {
       brandColor,
       brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
       brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
+      ...(teamsEnabled()
+        ? { teamId: String(formData.get("teamId") ?? "").trim() || null }
+        : {}),
     },
   });
   redirect(`/campaigns/${id}`);
@@ -70,6 +74,9 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
+  const teams = teamsEnabled()
+    ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+    : [];
   const bound = updateCampaign.bind(null, c.id);
   const boundDelete = deleteCampaign.bind(null, c.id);
 
@@ -91,6 +98,7 @@ export default async function EditCampaign({ params }: { params: { id: string } 
         action={bound}
         submitLabel="Save changes"
         cancelHref={`/campaigns/${c.id}`}
+        teams={teams}
       />
       <form action={boundDelete} className="mt-8 max-w-3xl">
         <ConfirmButton

@@ -5,6 +5,7 @@ import { CampaignForm } from "@/components/CampaignForm";
 import { prisma } from "@/lib/db";
 import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
+import { teamsEnabled } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,8 @@ async function createCampaign(formData: FormData) {
   const locale = rawLocale === "ar" ? "ar" : "en";
   const rawColor = String(formData.get("brandColor") ?? "").trim();
   const brandColor = /^#[0-9A-Fa-f]{3,8}$/.test(rawColor) ? rawColor : null;
+  const teamIdRaw = String(formData.get("teamId") ?? "").trim();
+  const teamId = teamIdRaw && teamsEnabled() ? teamIdRaw : null;
   const c = await prisma.campaign.create({
     data: {
       name,
@@ -31,6 +34,7 @@ async function createCampaign(formData: FormData) {
       brandColor,
       brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
       brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
+      teamId,
     },
   });
   redirect(`/campaigns/${c.id}`);
@@ -51,9 +55,17 @@ function safeUrl(raw: string): string | null {
 
 export default async function NewCampaign() {
   if (!(await isAuthed())) redirect("/login");
+  const teams = teamsEnabled()
+    ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+    : [];
   return (
     <Shell title="New campaign" crumb={<Link href="/campaigns">Campaigns</Link>}>
-      <CampaignForm action={createCampaign} submitLabel="Create campaign" cancelHref="/campaigns" />
+      <CampaignForm
+        action={createCampaign}
+        submitLabel="Create campaign"
+        cancelHref="/campaigns"
+        teams={teams}
+      />
     </Shell>
   );
 }
