@@ -4,9 +4,17 @@ import { Shell } from "@/components/Shell";
 import { Stat } from "@/components/Stat";
 import { Badge } from "@/components/Badge";
 import { Pagination } from "@/components/Pagination";
+import { InviteeTable } from "@/components/InviteeTable";
+import { InviteePanel } from "@/components/InviteePanel";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
-import { campaignStats, sendCampaign } from "@/lib/campaigns";
+import {
+  campaignStats,
+  sendCampaign,
+  resendSingle,
+  resendSelection,
+  deleteInvitee,
+} from "@/lib/campaigns";
 
 export const dynamic = "force-dynamic";
 
@@ -31,14 +39,57 @@ async function setStatus(formData: FormData) {
   redirect(`/campaigns/${id}`);
 }
 
-const statusTone = { draft: "wait", active: "live", sending: "hold", closed: "muted", archived: "muted" } as const;
+async function singleResend(campaignId: string, formData: FormData) {
+  "use server";
+  if (!isAuthed()) redirect("/login");
+  const inviteeId = String(formData.get("inviteeId"));
+  const channel = String(formData.get("channel")) as "email" | "sms";
+  if (channel !== "email" && channel !== "sms") redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
+  await resendSingle(campaignId, inviteeId, channel);
+  redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
+}
+
+async function singleDelete(campaignId: string, formData: FormData) {
+  "use server";
+  if (!isAuthed()) redirect("/login");
+  const inviteeId = String(formData.get("inviteeId"));
+  await deleteInvitee(campaignId, inviteeId);
+  redirect(`/campaigns/${campaignId}`);
+}
+
+async function bulkResend(campaignId: string, formData: FormData) {
+  "use server";
+  if (!isAuthed()) redirect("/login");
+  const ids = formData.getAll("id").map(String).filter(Boolean);
+  const channel = String(formData.get("channel")) as "email" | "sms";
+  if (ids.length === 0 || (channel !== "email" && channel !== "sms")) redirect(`/campaigns/${campaignId}`);
+  await resendSelection(campaignId, ids, { channels: [channel], onlyUnsent: false });
+  redirect(`/campaigns/${campaignId}`);
+}
+
+async function bulkDelete(campaignId: string, formData: FormData) {
+  "use server";
+  if (!isAuthed()) redirect("/login");
+  const ids = formData.getAll("id").map(String).filter(Boolean);
+  if (ids.length === 0) redirect(`/campaigns/${campaignId}`);
+  await prisma.invitee.deleteMany({ where: { campaignId, id: { in: ids } } });
+  redirect(`/campaigns/${campaignId}`);
+}
+
+const statusTone = {
+  draft: "wait",
+  active: "live",
+  sending: "hold",
+  closed: "muted",
+  archived: "muted",
+} as const;
 
 export default async function CampaignDetail({
   params,
   searchParams,
 }: {
   params: { id: string };
-  searchParams: { page?: string; q?: string };
+  searchParams: { page?: string; q?: string; invitee?: string };
 }) {
   if (!isAuthed()) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
@@ -72,12 +123,55 @@ export default async function CampaignDetail({
     }),
   ]);
 
+  // Drawer payload (separate query because the selected invitee may be on a
+  // different page than the current table view).
+  const drawerInvitee = searchParams.invitee
+    ? await prisma.invitee.findUnique({
+        where: { id: searchParams.invitee },
+        include: { response: true, invitations: true },
+      })
+    : null;
+  const showDrawer = drawerInvitee && drawerInvitee.campaignId === c.id;
+
   const hrefFor = (p: number) => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     qs.set("page", String(p));
     return `/campaigns/${c.id}?${qs.toString()}`;
   };
+  const baseHref = (() => {
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    if (page !== 1) qs.set("page", String(page));
+    const s = qs.toString();
+    return `/campaigns/${c.id}?${s ? s + "&" : ""}`;
+  })();
+  const closeDrawerHref = (() => {
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    if (page !== 1) qs.set("page", String(page));
+    return `/campaigns/${c.id}${qs.toString() ? "?" + qs.toString() : ""}`;
+  })();
+
+  const rows = invitees.map((i) => ({
+    id: i.id,
+    fullName: i.fullName,
+    title: i.title,
+    organization: i.organization,
+    email: i.email,
+    phoneE164: i.phoneE164,
+    guestsAllowed: i.guestsAllowed,
+    emailSent: i.invitations.some((x) => x.channel === "email" && x.status !== "failed"),
+    smsSent: i.invitations.some((x) => x.channel === "sms" && x.status !== "failed"),
+    response: i.response
+      ? { attending: i.response.attending, guestsCount: i.response.guestsCount }
+      : null,
+  }));
+
+  const singleResendBound = singleResend.bind(null, c.id);
+  const singleDeleteBound = singleDelete.bind(null, c.id);
+  const bulkResendBound = bulkResend.bind(null, c.id);
+  const bulkDeleteBound = bulkDelete.bind(null, c.id);
 
   return (
     <Shell
@@ -91,14 +185,12 @@ export default async function CampaignDetail({
       }
       actions={
         <>
-          <a
-            href={`/api/campaigns/${c.id}/export`}
-            className="btn-ghost"
-          >
-            Export CSV
-          </a>
-          <Link href={`/campaigns/${c.id}/import`} className="btn-ghost">Import contacts</Link>
+          <Link href={`/campaigns/${c.id}/edit`} className="btn-ghost">Edit</Link>
+          <Link href={`/campaigns/${c.id}/invitees/new`} className="btn-ghost">Add invitee</Link>
+          <Link href={`/campaigns/${c.id}/import`} className="btn-ghost">Import</Link>
           <Link href={`/campaigns/${c.id}/duplicates`} className="btn-ghost">Duplicates</Link>
+          <Link href={`/campaigns/${c.id}/test`} className="btn-ghost">Test send</Link>
+          <a href={`/api/campaigns/${c.id}/export`} className="btn-ghost">Export</a>
           <form action={sendAction} className="inline-flex items-center gap-2">
             <input type="hidden" name="id" value={c.id} />
             <label className="sr-only" htmlFor="send-channel">Channel</label>
@@ -154,76 +246,27 @@ export default async function CampaignDetail({
         />
       </form>
 
-      <div className="panel rail overflow-hidden">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Name</th>
-              <th scope="col">Email</th>
-              <th scope="col">Phone</th>
-              <th scope="col">Channels</th>
-              <th scope="col">Response</th>
-              <th scope="col" className="text-right">Guests</th>
-            </tr>
-          </thead>
-          <tbody>
-            {invitees.length === 0 ? (
-              <tr>
-                <td colSpan={6}>
-                  <div className="py-20 text-center text-ink-400">
-                    {q ? "No matches." : (
-                      <>
-                        No invitees yet.{" "}
-                        <Link href={`/campaigns/${c.id}/import`} className="text-ink-900 hover:underline">
-                          Import a list
-                        </Link>
-                        .
-                      </>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ) : (
-              invitees.map((i) => {
-                const emailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
-                const smsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
-                const r = i.response;
-                const tone = r ? (r.attending ? "live" : "fail") : "wait";
-                const label = r ? (r.attending ? "attending" : "declined") : "pending";
-                return (
-                  <tr key={i.id}>
-                    <td>
-                      <div className="font-medium text-ink-900">{i.fullName}</div>
-                      {i.title || i.organization ? (
-                        <div className="text-xs text-ink-400 mt-0.5">
-                          {[i.title, i.organization].filter(Boolean).join(" · ")}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className="text-ink-600">{i.email ?? <span className="text-ink-300">—</span>}</td>
-                    <td className="text-ink-600 tabular-nums">{i.phoneE164 ?? <span className="text-ink-300">—</span>}</td>
-                    <td>
-                      <div className="flex items-center gap-2 text-xs text-ink-500">
-                        <span className={emailSent ? "text-signal-live" : "text-ink-300"} title={emailSent ? "email sent" : "not sent"}>email</span>
-                        <span className="text-ink-300">·</span>
-                        <span className={smsSent ? "text-signal-live" : "text-ink-300"} title={smsSent ? "sms sent" : "not sent"}>sms</span>
-                      </div>
-                    </td>
-                    <td>
-                      <Badge tone={tone}>{label}</Badge>
-                    </td>
-                    <td className="text-right tabular-nums text-ink-600">
-                      {r?.attending ? r.guestsCount : 0}
-                      <span className="text-ink-300"> / {i.guestsAllowed}</span>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      <InviteeTable
+        invitees={rows}
+        baseHref={baseHref}
+        selectedInviteeId={showDrawer ? drawerInvitee!.id : undefined}
+        resendBulkAction={bulkResendBound}
+        deleteBulkAction={bulkDeleteBound}
+      />
       <Pagination page={page} pageSize={PAGE_SIZE} total={totalInvitees} hrefFor={hrefFor} />
+
+      {showDrawer ? (
+        <InviteePanel
+          campaign={c}
+          invitee={drawerInvitee!}
+          response={drawerInvitee!.response ?? null}
+          invitations={drawerInvitee!.invitations}
+          closeHref={closeDrawerHref}
+          appUrl={process.env.APP_URL ?? ""}
+          resendAction={singleResendBound}
+          deleteAction={singleDeleteBound}
+        />
+      ) : null}
     </Shell>
   );
 }

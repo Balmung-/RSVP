@@ -193,6 +193,157 @@ export async function sendCampaign(
   return { locked: false as const, email, sms, skipped, failed };
 }
 
+// Create / update a single invitee via the admin UI. Returns the row or an
+// error reason. Dedup across the campaign is enforced by the unique index;
+// we catch it and translate to a stable error code.
+export type InviteeMutationInput = {
+  fullName: string;
+  title?: string | null;
+  organization?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  locale?: "en" | "ar" | null;
+  tags?: string | null;
+  notes?: string | null;
+  guestsAllowed?: number;
+};
+
+export type InviteeMutationResult =
+  | { ok: true; inviteeId: string }
+  | { ok: false; reason: "missing_name" | "missing_contact" | "duplicate" | "not_found" | "invalid_phone" | "invalid_email" };
+
+function normalizeInput(input: InviteeMutationInput, defaultCountry: "SA" = "SA"): {
+  fullName: string;
+  title: string | null;
+  organization: string | null;
+  email: string | null;
+  phoneE164: string | null;
+  locale: string | null;
+  tags: string | null;
+  notes: string | null;
+  guestsAllowed: number;
+} | { error: InviteeMutationResult } {
+  const fullName = input.fullName.trim().slice(0, 200);
+  if (!fullName) return { error: { ok: false, reason: "missing_name" } };
+  const rawEmail = (input.email ?? "").trim();
+  const rawPhone = (input.phone ?? "").trim();
+  const email = normalizeEmail(rawEmail);
+  if (rawEmail && !email) return { error: { ok: false, reason: "invalid_email" } };
+  const phoneE164 = normalizePhone(rawPhone, defaultCountry);
+  if (rawPhone && !phoneE164) return { error: { ok: false, reason: "invalid_phone" } };
+  if (!email && !phoneE164) return { error: { ok: false, reason: "missing_contact" } };
+  return {
+    fullName,
+    title: (input.title ?? "").trim().slice(0, 100) || null,
+    organization: (input.organization ?? "").trim().slice(0, 200) || null,
+    email,
+    phoneE164,
+    locale: input.locale ?? null,
+    tags: (input.tags ?? "").trim().slice(0, 500) || null,
+    notes: (input.notes ?? "").trim().slice(0, 2000) || null,
+    guestsAllowed: Math.max(0, Math.min(20, Math.floor(input.guestsAllowed ?? 0))),
+  };
+}
+
+export async function createInvitee(
+  campaignId: string,
+  input: InviteeMutationInput,
+): Promise<InviteeMutationResult> {
+  const norm = normalizeInput(input);
+  if ("error" in norm) return norm.error;
+  const key = dedupKey(norm.email, norm.phoneE164);
+  try {
+    const row = await prisma.invitee.create({
+      data: {
+        campaignId,
+        ...norm,
+        dedupKey: key,
+        rsvpToken: newRsvpToken(),
+      },
+    });
+    return { ok: true, inviteeId: row.id };
+  } catch (e) {
+    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    throw e;
+  }
+}
+
+export async function updateInvitee(
+  inviteeId: string,
+  input: InviteeMutationInput,
+  expectedCampaignId?: string,
+): Promise<InviteeMutationResult> {
+  const existing = await prisma.invitee.findUnique({ where: { id: inviteeId } });
+  if (!existing) return { ok: false, reason: "not_found" };
+  if (expectedCampaignId && existing.campaignId !== expectedCampaignId) {
+    // Defense in depth — the bound server action already restricts to the
+    // rendered campaign, but a caller mismatch should never corrupt data.
+    return { ok: false, reason: "not_found" };
+  }
+  const norm = normalizeInput(input);
+  if ("error" in norm) return norm.error;
+  const key = dedupKey(norm.email, norm.phoneE164);
+  try {
+    await prisma.invitee.update({
+      where: { id: inviteeId },
+      data: { ...norm, dedupKey: key },
+    });
+    return { ok: true, inviteeId };
+  } catch (e) {
+    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    throw e;
+  }
+}
+
+export async function deleteInvitee(campaignId: string, inviteeId: string): Promise<void> {
+  await prisma.invitee.deleteMany({ where: { id: inviteeId, campaignId } });
+}
+
+// Resend to a single invitee on one channel. Used from the invitee drawer.
+// Creates a fresh Invitation row regardless of prior attempts.
+export async function resendSingle(
+  campaignId: string,
+  inviteeId: string,
+  channel: "email" | "sms",
+): Promise<{ ok: boolean; error?: string }> {
+  const [campaign, invitee] = await Promise.all([
+    prisma.campaign.findUnique({ where: { id: campaignId } }),
+    prisma.invitee.findUnique({ where: { id: inviteeId } }),
+  ]);
+  if (!campaign || !invitee || invitee.campaignId !== campaignId) {
+    return { ok: false, error: "not_found" };
+  }
+  const r = channel === "email" ? await sendEmail(campaign, invitee) : await sendSms(campaign, invitee);
+  return r.ok ? { ok: true } : { ok: false, error: r.error };
+}
+
+// Bulk resend to a list of invitees on the chosen channels. Respects
+// onlyUnsent per-(invitee, channel) pair.
+export async function resendSelection(
+  campaignId: string,
+  inviteeIds: string[],
+  opts: { channels: Array<"email" | "sms">; onlyUnsent: boolean },
+): Promise<{ email: number; sms: number; skipped: number; failed: number }> {
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+  if (!campaign) return { email: 0, sms: 0, skipped: 0, failed: 0 };
+  const invitees = await prisma.invitee.findMany({
+    where: { campaignId, id: { in: inviteeIds } },
+    include: { invitations: true },
+  });
+  let email = 0, sms = 0, skipped = 0, failed = 0;
+  for (const i of invitees) {
+    for (const ch of opts.channels) {
+      const has = i.invitations.some((x) => x.channel === ch && x.status !== "failed");
+      const hasAddr = ch === "email" ? !!i.email : !!i.phoneE164;
+      if (!hasAddr) { skipped++; continue; }
+      if (opts.onlyUnsent && has) { skipped++; continue; }
+      const r = ch === "email" ? await sendEmail(campaign, i) : await sendSms(campaign, i);
+      if (r.ok) { if (ch === "email") email++; else sms++; } else failed++;
+    }
+  }
+  return { email, sms, skipped, failed };
+}
+
 export async function findDuplicates(campaignId: string) {
   const invitees = await prisma.invitee.findMany({ where: { campaignId } });
   const byName = new Map<string, typeof invitees>();
