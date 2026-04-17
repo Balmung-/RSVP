@@ -89,8 +89,14 @@ export async function updateStage(
   return { updated: res.count > 0 };
 }
 
+// Delete only if not currently running. A running stage deletion would strand
+// the dispatcher mid-loop (the final status UPDATE would throw RecordNotFound)
+// and leak invitations with no audit trail.
 export async function deleteStage(stageId: string, campaignId: string) {
-  await prisma.campaignStage.deleteMany({ where: { id: stageId, campaignId } });
+  const res = await prisma.campaignStage.deleteMany({
+    where: { id: stageId, campaignId, status: { not: "running" } },
+  });
+  return { deleted: res.count > 0 };
 }
 
 export async function listStages(campaignId: string) {
@@ -149,7 +155,15 @@ async function runStage(stage: CampaignStage): Promise<void> {
   const invitees = await prisma.invitee.findMany({ where, include: { invitations: true } });
 
   let sent = 0, skipped = 0, failed = 0;
+  const isNonResponders = stage.audience === "non_responders";
   for (const i of invitees) {
+    // Re-check response right before send to close the race where an invitee
+    // RSVPs while the stage is iterating — we don't want a reminder landing
+    // seconds after they replied.
+    if (isNonResponders) {
+      const fresh = await prisma.response.findUnique({ where: { inviteeId: i.id } });
+      if (fresh) { skipped++; continue; }
+    }
     for (const ch of channels) {
       const addr = ch === "email" ? i.email : i.phoneE164;
       if (!addr) { skipped++; continue; }

@@ -32,7 +32,7 @@ async function save(campaignId: string, stageId: string, formData: FormData) {
   if (channels.length === 0 || !when) {
     redirect(`/campaigns/${campaignId}/stages/${stageId}/edit?e=invalid`);
   }
-  await updateStage(stageId, campaignId, {
+  const res = await updateStage(stageId, campaignId, {
     kind,
     name: String(formData.get("name") ?? "").trim() || null,
     scheduledFor: when!,
@@ -42,13 +42,19 @@ async function save(campaignId: string, stageId: string, formData: FormData) {
     templateEmail: String(formData.get("templateEmail") ?? "").trim() || null,
     templateSms: String(formData.get("templateSms") ?? "").trim() || null,
   });
+  if (!res.updated) {
+    redirect(`/campaigns/${campaignId}/stages/${stageId}/edit?e=locked`);
+  }
   redirect(`/campaigns/${campaignId}`);
 }
 
 async function remove(campaignId: string, stageId: string) {
   "use server";
   if (!isAuthed()) redirect("/login");
-  await deleteStage(stageId, campaignId);
+  const res = await deleteStage(stageId, campaignId);
+  if (!res.deleted) {
+    redirect(`/campaigns/${campaignId}/stages/${stageId}/edit?e=running`);
+  }
   redirect(`/campaigns/${campaignId}`);
 }
 
@@ -70,8 +76,13 @@ export default async function EditStage({
   const error =
     searchParams.e === "invalid"
       ? "Pick at least one channel and a valid fire time."
-      : null;
+      : searchParams.e === "locked"
+        ? "This stage moved to running or completed while you were editing — changes were not saved."
+        : searchParams.e === "running"
+          ? "This stage is running right now; wait for it to finish before deleting."
+          : null;
   const locked = s.status === "running" || s.status === "completed";
+  const running = s.status === "running";
 
   return (
     <Shell
@@ -102,9 +113,11 @@ export default async function EditStage({
           />
         )}
       </div>
-      <form action={boundDelete} className="mt-6 max-w-3xl">
-        <ConfirmButton prompt="Delete this stage?">Delete stage</ConfirmButton>
-      </form>
+      {running ? null : (
+        <form action={boundDelete} className="mt-6 max-w-3xl">
+          <ConfirmButton prompt="Delete this stage?">Delete stage</ConfirmButton>
+        </form>
+      )}
     </Shell>
   );
 }
