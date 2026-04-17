@@ -19,6 +19,7 @@ async function runImport(formData: FormData) {
     dupW: String(report.duplicatesWithin),
     dupE: String(report.duplicatesExisting),
     bad: String(report.invalid),
+    capped: String(report.capped),
   });
   redirect(`/campaigns/${id}?${qs.toString()}`);
 }

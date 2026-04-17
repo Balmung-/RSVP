@@ -12,7 +12,8 @@ async function removeInvitee(formData: FormData) {
   if (!isAuthed()) redirect("/login");
   const id = String(formData.get("id"));
   const campaignId = String(formData.get("campaignId"));
-  await prisma.invitee.delete({ where: { id } });
+  // deleteMany scoped by campaignId — defends against spoofed id from another campaign.
+  await prisma.invitee.deleteMany({ where: { id, campaignId } });
   redirect(`/campaigns/${campaignId}/duplicates`);
 }
 

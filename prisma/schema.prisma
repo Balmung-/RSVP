@@ -46,7 +46,7 @@ model Invitee {
   phoneE164      String?     // +9665XXXXXXXX
   locale         String?     // overrides campaign locale
   tags           String?     // comma-separated tags
-  rsvpToken      String      @unique @default(cuid())
+  rsvpToken      String      @unique @default(cuid(2))
   guestsAllowed  Int         @default(0)
   notes          String?
   dedupKey       String      // hash(email|phoneE164)
@@ -77,6 +77,7 @@ model Invitation {
   createdAt   DateTime  @default(now())
 
   @@index([campaignId, channel, status])
+  @@index([providerId])
 }
 
 // A Response captures the invitee's RSVP answer. One per invitee.

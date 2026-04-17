@@ -1,7 +1,7 @@
 import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
-// Low surface. Five pure functions. One dedup hash. No class ceremony.
+// Pure functions. One dedup hash. One CSV parser. One CSV cell sanitizer.
 
 export function normalizeEmail(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -14,50 +14,87 @@ export function normalizePhone(
   defaultCountry: CountryCode = "SA",
 ): string | null {
   if (!raw) return null;
-  // strip common local formats before parsing
   const cleaned = raw.replace(/[^\d+]/g, "");
   const parsed = parsePhoneNumberFromString(cleaned, defaultCountry);
   if (!parsed || !parsed.isValid()) return null;
   return parsed.number; // E.164
 }
 
-// One key per person: email OR phone — normalized, hashed. Missing → random (no collision).
+// One key per person. Missing both → random (CSPRNG, 96 bits).
 export function dedupKey(email: string | null, phone: string | null): string {
+  if (!email && !phone) return "none:" + randomBytes(12).toString("hex");
   const seed = (email ?? "") + "|" + (phone ?? "");
-  if (!email && !phone) return "none:" + createHash("sha1").update(Math.random().toString()).digest("hex").slice(0, 12);
   return createHash("sha1").update(seed).digest("hex").slice(0, 24);
 }
 
-// Parse CSV/TSV — forgiving of delimiters, quoted fields, BOM.
+// Defuse CSV formula injection: cells starting with =, +, -, @, \t, \r get a
+// leading apostrophe. Excel / Numbers / Sheets all respect this.
+export function csvCell(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  const needsEscape = /^[=+\-@\t\r]/.test(s);
+  const safe = needsEscape ? "'" + s : s;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+export function csvRow(cells: readonly unknown[]): string {
+  return cells.map(csvCell).join(",");
+}
+
+// Parse CSV/TSV with quoted fields, embedded newlines, doubled quotes, BOM.
+// Returns an array of rows keyed by the lowercased header.
 export function parseContactsText(text: string): Array<Record<string, string>> {
   const t = text.replace(/^\uFEFF/, "");
-  const lines = t.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return [];
-  const delim = lines[0].includes("\t") ? "\t" : ",";
-  const split = (line: string) => {
-    const out: string[] = [];
-    let cur = "";
-    let q = false;
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
+  const rows: string[][] = [];
+  let cur = "";
+  let field: string[] = [];
+  let inQuotes = false;
+  let delim: "," | "\t" | null = null;
+
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inQuotes) {
       if (c === '"') {
-        if (q && line[i + 1] === '"') {
+        if (t[i + 1] === '"') {
           cur += '"';
           i++;
-        } else q = !q;
-      } else if (c === delim && !q) {
-        out.push(cur);
-        cur = "";
-      } else cur += c;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += c;
+      }
+      continue;
     }
-    out.push(cur);
-    return out.map((s) => s.trim());
-  };
-  const header = split(lines[0]).map((h) => h.toLowerCase().replace(/\s+/g, "_"));
-  return lines.slice(1).map((line) => {
-    const cols = split(line);
+    if (c === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (!delim && (c === "," || c === "\t")) delim = c;
+    if (delim && c === delim) {
+      field.push(cur);
+      cur = "";
+      continue;
+    }
+    if (c === "\r") continue;
+    if (c === "\n") {
+      field.push(cur);
+      cur = "";
+      if (field.some((f) => f.length > 0)) rows.push(field);
+      field = [];
+      continue;
+    }
+    cur += c;
+  }
+  if (cur.length > 0 || field.length > 0) {
+    field.push(cur);
+    if (field.some((f) => f.length > 0)) rows.push(field);
+  }
+
+  if (rows.length === 0) return [];
+  const header = rows[0].map((h) => h.trim().toLowerCase().replace(/\s+/g, "_"));
+  return rows.slice(1).map((cols) => {
     const row: Record<string, string> = {};
-    header.forEach((h, i) => (row[h] = cols[i] ?? ""));
+    header.forEach((h, i) => (row[h] = (cols[i] ?? "").trim()));
     return row;
   });
 }

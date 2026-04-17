@@ -1,24 +1,30 @@
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
-import { findInviteeByToken, submitResponse } from "@/lib/rsvp";
+import { findInviteeByToken, submitResponse, type SubmitResult } from "@/lib/rsvp";
+import { rateLimit } from "@/lib/ratelimit";
 import { t, type Locale } from "@/lib/i18n";
 import RsvpForm from "./form";
 
 export const dynamic = "force-dynamic";
 
-async function submit(formData: FormData) {
+async function submit(_prev: SubmitResult | null, formData: FormData): Promise<SubmitResult> {
   "use server";
-  const token = String(formData.get("token"));
+  const token = String(formData.get("token") ?? "");
   const attending = String(formData.get("attending")) === "yes";
   const guestsCount = Number(formData.get("guestsCount") ?? 0);
   const message = String(formData.get("message") ?? "");
   const h = headers();
-  await submitResponse({
+  const ip = h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
+
+  const rl = rateLimit(`rsvp:${ip}`, { capacity: 6, refillPerSec: 0.1 });
+  if (!rl.ok) return { ok: false, reason: "rate_limited" };
+
+  return submitResponse({
     token,
     attending,
     guestsCount,
     message,
-    ip: h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? undefined,
+    ip,
     userAgent: h.get("user-agent") ?? undefined,
   });
 }
@@ -34,12 +40,9 @@ export default async function RsvpPage({
   if (!inv) notFound();
 
   const qsLocale = (searchParams.lang ?? "").toLowerCase();
+  const fromInvitee = inv.locale ?? inv.campaign.locale ?? "en";
   const locale: Locale =
-    (qsLocale === "ar" || qsLocale === "en"
-      ? qsLocale
-      : (inv.locale ?? inv.campaign.locale ?? "en")) === "ar"
-      ? "ar"
-      : "en";
+    (qsLocale === "ar" || qsLocale === "en" ? qsLocale : fromInvitee) === "ar" ? "ar" : "en";
 
   const L = t(locale);
   const closed =
@@ -50,8 +53,9 @@ export default async function RsvpPage({
   return (
     <div
       dir={L.dir}
+      lang={locale}
       className="min-h-screen bg-ink-50 flex items-center justify-center px-6 py-20"
-      style={{ fontFamily: 'var(--font-sans)' }}
+      style={{ fontFamily: "var(--font-sans)" }}
     >
       <div className="w-full max-w-xl">
         <div className="flex items-center gap-2 justify-center mb-10 text-ink-400">
@@ -69,9 +73,7 @@ export default async function RsvpPage({
             <h1 className="text-2xl sm:text-3xl font-medium tracking-tightest text-ink-900">
               {inv.campaign.name}
             </h1>
-            {inv.campaign.venue ? (
-              <p className="text-sm text-ink-500 mt-2">{inv.campaign.venue}</p>
-            ) : null}
+            {inv.campaign.venue ? <p className="text-sm text-ink-500 mt-2">{inv.campaign.venue}</p> : null}
             {inv.campaign.eventAt ? (
               <p className="text-sm text-ink-500 mt-1 tabular-nums">
                 {formatWhen(inv.campaign.eventAt, locale)}
@@ -124,6 +126,7 @@ function formatWhen(d: Date, locale: Locale) {
     return new Intl.DateTimeFormat(locale === "ar" ? "ar-SA" : "en-GB", {
       dateStyle: "long",
       timeStyle: "short",
+      timeZone: process.env.APP_TIMEZONE ?? "Asia/Riyadh",
     }).format(d);
   } catch {
     return d.toISOString();

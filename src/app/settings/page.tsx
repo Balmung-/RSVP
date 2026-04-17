@@ -17,6 +17,9 @@ export default function Settings() {
   const appUrl = process.env.APP_URL ?? "—";
   const brand = process.env.APP_BRAND ?? "—";
   const locale = process.env.DEFAULT_LOCALE ?? "en";
+  const timezone = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
+  const webhookReady = !!process.env.WEBHOOK_SIGNING_SECRET;
+  const strictHealth = process.env.HEALTH_REQUIRE_DB === "true";
 
   return (
     <Shell title="Settings">
@@ -28,6 +31,9 @@ export default function Settings() {
           <Row label="App URL" value={appUrl} />
           <Row label="Brand" value={brand} />
           <Row label="Default locale" value={locale} />
+          <Row label="Timezone" value={timezone} />
+          <Row label="Delivery webhook" value={webhookReady ? "configured" : "disabled"} live={webhookReady} />
+          <Row label="Strict health" value={strictHealth ? "on" : "off"} live={strictHealth} />
         </div>
         <p className="text-xs text-ink-400 mt-8 leading-relaxed">
           Providers are configured via environment variables — see{" "}

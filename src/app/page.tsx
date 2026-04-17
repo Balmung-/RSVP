@@ -8,7 +8,20 @@ import { campaignStats } from "@/lib/campaigns";
 
 export const dynamic = "force-dynamic";
 
-const statusTone = { draft: "wait", active: "live", closed: "muted", archived: "muted" } as const;
+const statusTone = {
+  draft: "wait",
+  active: "live",
+  sending: "hold",
+  closed: "muted",
+  archived: "muted",
+} as const;
+
+const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
+const dateFmt = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: TZ,
+});
 
 export default async function CampaignsPage() {
   if (!isAuthed()) redirect("/login");
@@ -37,13 +50,13 @@ export default async function CampaignsPage() {
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Event</th>
-                <th className="text-right">Invited</th>
-                <th className="text-right">Responded</th>
-                <th className="text-right">Attending</th>
-                <th className="text-right">Headcount</th>
-                <th>Status</th>
+                <th scope="col">Name</th>
+                <th scope="col">Event</th>
+                <th scope="col" className="text-right">Invited</th>
+                <th scope="col" className="text-right">Responded</th>
+                <th scope="col" className="text-right">Attending</th>
+                <th scope="col" className="text-right">Headcount</th>
+                <th scope="col">Status</th>
               </tr>
             </thead>
             <tbody>
@@ -56,7 +69,7 @@ export default async function CampaignsPage() {
                     {c.venue ? <div className="text-xs text-ink-400 mt-0.5">{c.venue}</div> : null}
                   </td>
                   <td className="text-ink-600 tabular-nums">
-                    {c.eventAt ? c.eventAt.toISOString().slice(0, 16).replace("T", " ") : "—"}
+                    {c.eventAt ? dateFmt.format(c.eventAt) : "—"}
                   </td>
                   <td className="text-right tabular-nums">{stats.total}</td>
                   <td className="text-right tabular-nums text-ink-700">

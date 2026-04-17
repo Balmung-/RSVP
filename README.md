@@ -89,6 +89,18 @@ Keep Vercel as the origin. Put Cloudflare in front for WAF, rate-limiting, and c
 | Data residency (future)        | Azure KSA / on-prem     | Code is provider-agnostic — migration is a deploy target change   |
 | Public CDN / WAF (optional)    | Cloudflare (in front)   | Sharp signal layer; leaves the app tier alone                     |
 
+## Operating notes
+
+- **Timezone.** `datetime-local` inputs are parsed in `APP_TIMEZONE` (default `Asia/Riyadh`, fixed +03:00). Event times display in the same zone everywhere. If you deploy outside KSA, set `APP_TIMEZONE` to a supported zone in `src/lib/time.ts`.
+- **Strict health.** After `DATABASE_URL` is wired, set `HEALTH_REQUIRE_DB=true` so `/api/health` returns 503 on DB outage and Railway surfaces it.
+- **Server actions behind a proxy.** If the app sits behind a proxy that rewrites the Host header (e.g. a custom domain through Cloudflare), set `ALLOWED_ORIGINS="https://your-domain"` or server actions may 403.
+- **Delivery webhook.** `POST /api/webhooks/delivery` requires `WEBHOOK_SIGNING_SECRET`. Each provider webhook must be wrapped by a small relay that re-signs the body (`x-signature: hex(HMAC_SHA256(body, secret))`). Allowed statuses: `delivered | failed | bounced`.
+- **Double-send protection.** `sendCampaign` flips the campaign status to `sending` via a check-and-set; concurrent clicks become no-ops.
+- **Rate limit.** `/rsvp/[token]` submissions are rate-limited per client IP (in-memory token bucket, 6 burst / 6 per minute). For multi-replica deploys, swap the Map for Redis in `src/lib/ratelimit.ts`.
+- **CSV injection.** `src/lib/contact.csvCell` prefixes any cell starting with `= + - @` to neutralize Excel formula execution on export.
+- **Migrations.** First-time deploy uses `prisma db push`. Once schema stabilizes, create a baseline with `npx prisma migrate dev --name init` and switch the Railway start command to `prisma migrate deploy`.
+- **Security headers.** CSP-lite, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, HSTS — set in `next.config.js`.
+
 ## Architecture
 
 ```
@@ -132,7 +144,7 @@ prisma/
 
 ### RSVP flow
 
-Invitee receives a signed URL: `${APP_URL}/rsvp/${rsvpToken}`. Token is a `cuid`, lookup-only. Deadline + campaign status gate submission. Responses upsert — invitee can change their reply until close.
+Invitee receives a signed URL: `${APP_URL}/rsvp/${rsvpToken}`. Token is a `cuid2` (128 bits of CSPRNG), lookup-only. Deadline + campaign status gate submission. Responses upsert — invitee can change their reply until close. Submissions rate-limited per IP.
 
 ### Duplicate detection
 

@@ -4,6 +4,7 @@ import { sendEmail, sendSms } from "./delivery";
 import type { Prisma } from "@prisma/client";
 
 const COUNTRY = (process.env.DEFAULT_COUNTRY ?? "SA") as "SA";
+const MAX_IMPORT_ROWS = 10_000;
 
 export type ImportRow = {
   full_name?: string;
@@ -26,17 +27,22 @@ export type ImportReport = {
   duplicatesWithin: number;
   duplicatesExisting: number;
   invalid: number;
+  capped: boolean;
   warnings: Array<{ row: number; reason: string }>;
 };
 
 export async function importInvitees(campaignId: string, text: string): Promise<ImportReport> {
-  const rows = parseContactsText(text) as ImportRow[];
+  const rowsAll = parseContactsText(text) as ImportRow[];
+  const capped = rowsAll.length > MAX_IMPORT_ROWS;
+  const rows = capped ? rowsAll.slice(0, MAX_IMPORT_ROWS) : rowsAll;
+
   const report: ImportReport = {
-    total: rows.length,
+    total: rowsAll.length,
     created: 0,
     duplicatesWithin: 0,
     duplicatesExisting: 0,
     invalid: 0,
+    capped,
     warnings: [],
   };
 
@@ -45,7 +51,7 @@ export async function importInvitees(campaignId: string, text: string): Promise<
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const fullName = (r.full_name || r.name || "").trim();
+    const fullName = (r.full_name || r.name || "").trim().slice(0, 200);
     const email = normalizeEmail(r.email);
     const phone = normalizePhone(r.phone || r.mobile || "", COUNTRY);
     if (!fullName) {
@@ -68,14 +74,14 @@ export async function importInvitees(campaignId: string, text: string): Promise<
     batch.push({
       campaignId,
       fullName,
-      title: (r.title || "").trim() || null,
-      organization: (r.organization || r.org || "").trim() || null,
+      title: (r.title || "").trim().slice(0, 100) || null,
+      organization: (r.organization || r.org || "").trim().slice(0, 200) || null,
       email,
       phoneE164: phone,
-      locale: (r.locale || "").trim().toLowerCase() || null,
-      tags: (r.tags || "").trim() || null,
-      notes: (r.notes || "").trim() || null,
-      guestsAllowed: clampInt(r.guests, 0, 10, 0),
+      locale: (r.locale || "").trim().toLowerCase().slice(0, 5) || null,
+      tags: (r.tags || "").trim().slice(0, 500) || null,
+      notes: (r.notes || "").trim().slice(0, 2000) || null,
+      guestsAllowed: clampInt(r.guests, 0, 20, 0),
       dedupKey: key,
     });
   }
@@ -109,35 +115,44 @@ function clampInt(s: string | undefined, min: number, max: number, def: number) 
 }
 
 export async function campaignStats(campaignId: string) {
-  const [total, responded, attending, declined, sentEmail, sentSms] = await Promise.all([
+  const [total, responded, attending, declined, sentEmail, sentSms, guestsAgg] = await Promise.all([
     prisma.invitee.count({ where: { campaignId } }),
     prisma.response.count({ where: { campaignId } }),
     prisma.response.count({ where: { campaignId, attending: true } }),
     prisma.response.count({ where: { campaignId, attending: false } }),
     prisma.invitation.count({ where: { campaignId, channel: "email", status: { in: ["sent", "delivered"] } } }),
     prisma.invitation.count({ where: { campaignId, channel: "sms", status: { in: ["sent", "delivered"] } } }),
+    prisma.response.aggregate({ where: { campaignId, attending: true }, _sum: { guestsCount: true } }),
   ]);
-  const guests = await prisma.response.aggregate({
-    where: { campaignId, attending: true },
-    _sum: { guestsCount: true },
-  });
+  const guests = guestsAgg._sum.guestsCount ?? 0;
   return {
     total,
     responded,
     pending: total - responded,
     attending,
     declined,
-    guests: guests._sum.guestsCount ?? 0,
-    headcount: attending + (guests._sum.guestsCount ?? 0),
+    guests,
+    headcount: attending + guests,
     sentEmail,
     sentSms,
   };
 }
 
+// Atomic send. Uses a CAS on Campaign.status to guarantee single concurrent run.
+// draft|active → sending; on completion → active (or closed if deadline passed).
+// If CAS fails (another send is in flight) we return { locked: true }.
 export async function sendCampaign(
   campaignId: string,
   opts: { channel: "email" | "sms" | "both"; onlyUnsent: boolean } = { channel: "both", onlyUnsent: true },
 ) {
+  const acquired = await prisma.campaign.updateMany({
+    where: { id: campaignId, status: { in: ["draft", "active"] } },
+    data: { status: "sending" },
+  });
+  if (acquired.count === 0) {
+    return { locked: true as const, email: 0, sms: 0, skipped: 0, failed: 0 };
+  }
+
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
   const invitees = await prisma.invitee.findMany({
     where: { campaignId },
@@ -146,32 +161,37 @@ export async function sendCampaign(
 
   let email = 0, sms = 0, skipped = 0, failed = 0;
 
-  for (const i of invitees) {
-    const hasEmailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
-    const hasSmsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
+  try {
+    for (const i of invitees) {
+      const hasEmailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
+      const hasSmsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
 
-    if ((opts.channel === "email" || opts.channel === "both") && i.email) {
-      if (opts.onlyUnsent && hasEmailSent) skipped++;
-      else {
-        const r = await sendEmail(campaign, i);
-        if (r.ok) email++; else failed++;
+      if ((opts.channel === "email" || opts.channel === "both") && i.email) {
+        if (opts.onlyUnsent && hasEmailSent) skipped++;
+        else {
+          const r = await sendEmail(campaign, i);
+          if (r.ok) email++; else failed++;
+        }
+      }
+      if ((opts.channel === "sms" || opts.channel === "both") && i.phoneE164) {
+        if (opts.onlyUnsent && hasSmsSent) skipped++;
+        else {
+          const r = await sendSms(campaign, i);
+          if (r.ok) sms++; else failed++;
+        }
       }
     }
-    if ((opts.channel === "sms" || opts.channel === "both") && i.phoneE164) {
-      if (opts.onlyUnsent && hasSmsSent) skipped++;
-      else {
-        const r = await sendSms(campaign, i);
-        if (r.ok) sms++; else failed++;
-      }
-    }
+  } finally {
+    await prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: "active" },
+    });
   }
 
-  return { email, sms, skipped, failed };
+  return { locked: false as const, email, sms, skipped, failed };
 }
 
 export async function findDuplicates(campaignId: string) {
-  // Exact-key dupes would already be blocked by @@unique — this surfaces *cross-key*
-  // suspects: same name, or same phone with different email, etc. Read-only.
   const invitees = await prisma.invitee.findMany({ where: { campaignId } });
   const byName = new Map<string, typeof invitees>();
   const byPhone = new Map<string, typeof invitees>();
