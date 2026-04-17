@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 async function createCampaign(formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) return;
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
@@ -47,8 +47,8 @@ function safeUrl(raw: string): string | null {
   }
 }
 
-export default function NewCampaign() {
-  if (!isAuthed()) redirect("/login");
+export default async function NewCampaign() {
+  if (!(await isAuthed())) redirect("/login");
   return (
     <Shell title="New campaign" crumb={<Link href="/">Campaigns</Link>}>
       <CampaignForm action={createCampaign} submitLabel="Create campaign" cancelHref="/" />

@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 async function removeInvitee(formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("id"));
   const campaignId = String(formData.get("campaignId"));
   // deleteMany scoped by campaignId — defends against spoofed id from another campaign.
@@ -18,7 +18,7 @@ async function removeInvitee(formData: FormData) {
 }
 
 export default async function DuplicatesPage({ params }: { params: { id: string } }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const groups = await findDuplicates(c.id);

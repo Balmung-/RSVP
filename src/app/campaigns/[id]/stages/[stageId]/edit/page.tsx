@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 
 async function save(campaignId: string, stageId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const kindRaw = String(formData.get("kind") ?? "invite");
   const kind = (STAGE_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as StageKind) : "invite";
   const audRaw = String(formData.get("audience") ?? "all");
@@ -50,7 +50,7 @@ async function save(campaignId: string, stageId: string, formData: FormData) {
 
 async function remove(campaignId: string, stageId: string) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const res = await deleteStage(stageId, campaignId);
   if (!res.deleted) {
     redirect(`/campaigns/${campaignId}/stages/${stageId}/edit?e=running`);
@@ -65,7 +65,7 @@ export default async function EditStage({
   params: { id: string; stageId: string };
   searchParams: { e?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const [c, s] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: params.id } }),
     prisma.campaignStage.findUnique({ where: { id: params.stageId } }),

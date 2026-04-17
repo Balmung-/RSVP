@@ -183,4 +183,10 @@ Invitee receives a signed URL: `${APP_URL}/rsvp/${rsvpToken}`. Token is a `cuid2
 
 ## Auth
 
-Single-password HMAC cookie by default. The surface in `src/lib/auth.ts` is tiny — `authenticate`, `issueSession`, `clearSession`, `isAuthed`. Swap to SAML, OIDC, or Nafath (KSA national SSO) by reimplementing those four; no callers change.
+Real user accounts with roles — `admin | editor | viewer`. Scrypt password hashes (`node:crypto`, no native deps), server-side sessions (a row in `Session`), cookie holds a signed session id for integrity.
+
+- **First login.** On the first sign-in attempt, if no users exist and `ADMIN_PASSWORD` is set, the app seeds an admin user `admin@local` with that password. Sign in as that account, then invite your team at `/users`.
+- **Role capabilities.** `admin` = everything + team management, `editor` = campaigns + send, `viewer` = read-only. Enforced via `hasRole(user, role)` at route entry. Admin-only links (Team, Events) are hidden from other roles in the sidebar.
+- **Session revocation.** Password reset, account disable, and account delete all call `session.deleteMany({ where: { userId } })` — existing tabs are logged out on next request.
+- **Audit trail.** Every admin mutation goes through `logAction` (`src/lib/audit.ts`) which auto-populates `actorId` from the current session. Admins can browse the log with filters at `/events`.
+- **Nafath SSO.** `/api/auth/nafath/{start,callback}` are wired stubs that return `501 nafath_not_implemented` when `NAFATH_CLIENT_ID` is set, or `503 nafath_not_configured` when it isn't. The surface is stable — swap in the OIDC dance inside those two routes and add a "Sign in with Nafath" button on `/login`; no other callers change.

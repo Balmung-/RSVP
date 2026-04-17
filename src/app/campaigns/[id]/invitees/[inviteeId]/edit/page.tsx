@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 async function save(campaignId: string, inviteeId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const localeRaw = String(formData.get("locale") ?? "").toLowerCase();
   const res = await updateInvitee(
     inviteeId,
@@ -49,7 +49,7 @@ export default async function EditInvitee({
   params: { id: string; inviteeId: string };
   searchParams: { e?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const [c, i] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: params.id } }),
     prisma.invitee.findUnique({ where: { id: params.inviteeId } }),

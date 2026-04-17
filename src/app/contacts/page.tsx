@@ -13,7 +13,7 @@ export default async function Contacts({
 }: {
   searchParams: { page?: string; q?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const page = Math.max(1, parseInt(searchParams.page ?? "1", 10) || 1);
   const q = (searchParams.q ?? "").trim();
   const where = q

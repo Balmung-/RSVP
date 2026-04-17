@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  if (!isAuthed()) return new NextResponse("Unauthorized", { status: 401 });
+  if (!(await isAuthed())) return new NextResponse("Unauthorized", { status: 401 });
 
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) return new NextResponse("Not Found", { status: 404 });

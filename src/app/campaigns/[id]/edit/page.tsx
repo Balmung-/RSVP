@@ -6,12 +6,13 @@ import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
+import { logAction } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
 async function updateCampaign(id: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) redirect(`/campaigns/${id}/edit`);
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
@@ -51,13 +52,20 @@ function safeUrl(raw: string): string | null {
 
 async function deleteCampaign(id: string) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
+  const campaign = await prisma.campaign.findUnique({ where: { id }, select: { name: true } });
   await prisma.campaign.delete({ where: { id } });
+  await logAction({
+    kind: "campaign.deleted",
+    refType: "campaign",
+    refId: id,
+    data: { name: campaign?.name },
+  });
   redirect("/");
 }
 
 export default async function EditCampaign({ params }: { params: { id: string } }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });

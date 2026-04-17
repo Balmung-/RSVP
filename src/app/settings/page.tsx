@@ -1,17 +1,19 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
-import { isAuthed, clearSession } from "@/lib/auth";
+import { getCurrentUser, hasRole, endSession, isAuthed } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 async function signOut() {
   "use server";
-  clearSession();
+  await endSession();
   redirect("/login");
 }
 
-export default function Settings() {
-  if (!isAuthed()) redirect("/login");
+export default async function Settings() {
+  if (!(await isAuthed())) redirect("/login");
+  const user = await getCurrentUser();
   const emailProvider = process.env.EMAIL_PROVIDER ?? "stub";
   const smsProvider = process.env.SMS_PROVIDER ?? "stub";
   const appUrl = process.env.APP_URL ?? "—";
@@ -20,10 +22,17 @@ export default function Settings() {
   const timezone = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
   const webhookReady = !!process.env.WEBHOOK_SIGNING_SECRET;
   const strictHealth = process.env.HEALTH_REQUIRE_DB === "true";
+  const cronReady = !!process.env.CRON_SECRET;
 
   return (
     <Shell title="Settings">
       <div className="panel p-10 max-w-3xl">
+        <h2 className="text-sm font-medium tracking-tight text-ink-900 mb-6">Account</h2>
+        <div className="grid grid-cols-2 gap-6 text-sm mb-10">
+          <Row label="Signed in as" value={user?.email ?? "—"} />
+          <Row label="Role" value={user?.role ?? "—"} />
+        </div>
+
         <h2 className="text-sm font-medium tracking-tight text-ink-900 mb-6">Integrations</h2>
         <div className="grid grid-cols-2 gap-6 text-sm">
           <Row label="Email provider" value={emailProvider} live={emailProvider !== "stub"} />
@@ -33,6 +42,7 @@ export default function Settings() {
           <Row label="Default locale" value={locale} />
           <Row label="Timezone" value={timezone} />
           <Row label="Delivery webhook" value={webhookReady ? "configured" : "disabled"} live={webhookReady} />
+          <Row label="Cron tick" value={cronReady ? "configured" : "disabled"} live={cronReady} />
           <Row label="Strict health" value={strictHealth ? "on" : "off"} live={strictHealth} />
         </div>
         <p className="text-xs text-ink-400 mt-8 leading-relaxed">
@@ -42,6 +52,13 @@ export default function Settings() {
           end-to-end before real keys are provisioned.
         </p>
       </div>
+
+      {hasRole(user, "admin") ? (
+        <div className="mt-6">
+          <Link href="/users" className="btn-ghost">Manage team</Link>
+        </div>
+      ) : null}
+
       <form action={signOut} className="mt-6">
         <button className="btn-ghost">Sign out</button>
       </form>

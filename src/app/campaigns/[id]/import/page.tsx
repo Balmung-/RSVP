@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 async function runImport(formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("id"));
   const raw = String(formData.get("raw") ?? "");
   if (!raw.trim()) redirect(`/campaigns/${id}/import?e=empty`);
@@ -30,7 +30,7 @@ Jane Harrison,,British Embassy,jane@ukmission.sa,+442071234567,en,1
 محمد العتيبي,وكيل,وزارة السياحة,,+966551112223,ar,0`;
 
 export default async function ImportPage({ params }: { params: { id: string } }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
 

@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 async function addInvitee(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const localeRaw = String(formData.get("locale") ?? "").toLowerCase();
   const res = await createInvitee(campaignId, {
     fullName: String(formData.get("fullName") ?? ""),
@@ -45,7 +45,7 @@ export default async function NewInvitee({
   params: { id: string };
   searchParams: { e?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const action = addInvitee.bind(null, c.id);

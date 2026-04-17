@@ -206,10 +206,48 @@ model Response {
 model EventLog {
   id         String   @id @default(cuid())
   kind       String   // invite.sent, invite.delivered, rsvp.submitted, import.completed, ...
-  refType    String?  // campaign | invitee | invitation
+  refType    String?  // campaign | invitee | invitation | stage | user
   refId      String?
+  actorId    String?  // user who performed the action; null for system / public flows
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
   data       String?  // JSON blob
   createdAt  DateTime @default(now())
 
   @@index([kind, createdAt])
+  @@index([actorId, createdAt])
+}
+
+// --- Identity --------------------------------------------------
+
+// Admin users. One row per human. `passwordHash` is nullable for SSO-only
+// users; `role` drives every capability check in lib/auth.ts.
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String?
+  fullName     String?
+  role         String    @default("viewer") // admin | editor | viewer
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastLoginAt  DateTime?
+  sessions     Session[]
+  eventLog     EventLog[]
+
+  @@index([email])
+}
+
+// Server-side session. The cookie carries the id + HMAC; this row is the
+// authority (allows revocation + audit). Expired rows are pruned lazily.
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }

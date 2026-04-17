@@ -24,7 +24,7 @@ const PAGE_SIZE = 50;
 
 async function sendAction(formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("id"));
   const channel = String(formData.get("channel") ?? "both") as "email" | "sms" | "both";
   await sendCampaign(id, { channel, onlyUnsent: true });
@@ -33,7 +33,7 @@ async function sendAction(formData: FormData) {
 
 async function setStatus(formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("id"));
   const raw = String(formData.get("status"));
   const status = ["draft", "active", "closed", "archived"].includes(raw) ? raw : "draft";
@@ -43,7 +43,7 @@ async function setStatus(formData: FormData) {
 
 async function singleResend(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const inviteeId = String(formData.get("inviteeId"));
   const channel = String(formData.get("channel")) as "email" | "sms";
   if (channel !== "email" && channel !== "sms") redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
@@ -53,7 +53,7 @@ async function singleResend(campaignId: string, formData: FormData) {
 
 async function singleDelete(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const inviteeId = String(formData.get("inviteeId"));
   await deleteInvitee(campaignId, inviteeId);
   redirect(`/campaigns/${campaignId}`);
@@ -61,7 +61,7 @@ async function singleDelete(campaignId: string, formData: FormData) {
 
 async function bulkResend(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const ids = formData.getAll("id").map(String).filter(Boolean);
   const channel = String(formData.get("channel")) as "email" | "sms";
   if (ids.length === 0 || (channel !== "email" && channel !== "sms")) redirect(`/campaigns/${campaignId}`);
@@ -71,7 +71,7 @@ async function bulkResend(campaignId: string, formData: FormData) {
 
 async function bulkDelete(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const ids = formData.getAll("id").map(String).filter(Boolean);
   if (ids.length === 0) redirect(`/campaigns/${campaignId}`);
   await prisma.invitee.deleteMany({ where: { campaignId, id: { in: ids } } });
@@ -80,7 +80,7 @@ async function bulkDelete(campaignId: string, formData: FormData) {
 
 async function runStageAction(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const stageId = String(formData.get("stageId"));
   if (stageId) await runStageNow(stageId, campaignId);
   redirect(`/campaigns/${campaignId}`);
@@ -101,7 +101,7 @@ export default async function CampaignDetail({
   params: { id: string };
   searchParams: { page?: string; q?: string; invitee?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
 

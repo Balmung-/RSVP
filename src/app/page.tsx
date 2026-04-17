@@ -24,7 +24,7 @@ const dateFmt = new Intl.DateTimeFormat("en-GB", {
 });
 
 export default async function CampaignsPage() {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
 
   const campaigns = await prisma.campaign.findMany({
     orderBy: [{ status: "asc" }, { createdAt: "desc" }],

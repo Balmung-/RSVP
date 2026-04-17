@@ -43,7 +43,7 @@ const dateFmt = new Intl.DateTimeFormat("en-GB", {
 
 async function addQuestion(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const kindRaw = String(formData.get("kind") ?? "short_text");
   const kind = (QUESTION_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as QuestionKind) : "short_text";
   const showRaw = String(formData.get("showWhen") ?? "always");
@@ -67,7 +67,7 @@ async function addQuestion(campaignId: string, formData: FormData) {
 
 async function removeQuestion(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("questionId"));
   if (id) await deleteQuestion(id, campaignId);
   redirect(`/campaigns/${campaignId}/customize`);
@@ -75,7 +75,7 @@ async function removeQuestion(campaignId: string, formData: FormData) {
 
 async function addAttachment(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const kindRaw = String(formData.get("kind") ?? "file");
   const kind = (ATTACHMENT_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as AttachmentKind) : "file";
   const label = String(formData.get("label") ?? "").trim();
@@ -87,7 +87,7 @@ async function addAttachment(campaignId: string, formData: FormData) {
 
 async function removeAttachment(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("attachmentId"));
   if (id) await deleteAttachment(id, campaignId);
   redirect(`/campaigns/${campaignId}/customize`);
@@ -95,7 +95,7 @@ async function removeAttachment(campaignId: string, formData: FormData) {
 
 async function addDate(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const startsAt = parseLocalInput(String(formData.get("startsAt") ?? ""));
   if (!startsAt) redirect(`/campaigns/${campaignId}/customize?e=date`);
   await createEventOption(campaignId, {
@@ -109,7 +109,7 @@ async function addDate(campaignId: string, formData: FormData) {
 
 async function removeDate(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const id = String(formData.get("eventOptionId"));
   if (id) await deleteEventOption(id, campaignId);
   redirect(`/campaigns/${campaignId}/customize`);
@@ -124,7 +124,7 @@ export default async function Customize({
   params: { id: string };
   searchParams: { e?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const [questions, attachments, dates] = await Promise.all([

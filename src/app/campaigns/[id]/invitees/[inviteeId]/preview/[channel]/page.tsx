@@ -11,7 +11,7 @@ export default async function Preview({
 }: {
   params: { id: string; inviteeId: string; channel: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   if (params.channel !== "email" && params.channel !== "sms") notFound();
   const [campaign, invitee] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: params.id } }),

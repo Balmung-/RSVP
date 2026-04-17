@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 
 async function add(campaignId: string, formData: FormData) {
   "use server";
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const kindRaw = String(formData.get("kind") ?? "invite");
   const kind = (STAGE_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as StageKind) : "invite";
   const audRaw = String(formData.get("audience") ?? "all");
@@ -50,7 +50,7 @@ export default async function NewStage({
   params: { id: string };
   searchParams: { e?: string };
 }) {
-  if (!isAuthed()) redirect("/login");
+  if (!(await isAuthed())) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
   const action = add.bind(null, c.id);

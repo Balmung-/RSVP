@@ -1,10 +1,12 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { getCurrentUser, hasRole } from "@/lib/auth";
 
-// The dominant canvas. Edges are quiet: a thin rail, a thin top seam,
-// nothing else. Secondary actions live in the header slot.
+// The dominant canvas. Edges are quiet: a thin rail, a thin top seam.
+// Secondary actions live in the header slot. Admin-only links are hidden
+// from editors/viewers at render time.
 
-export function Shell({
+export async function Shell({
   title,
   crumb,
   actions,
@@ -15,24 +17,29 @@ export function Shell({
   actions?: ReactNode;
   children: ReactNode;
 }) {
+  const me = await getCurrentUser();
+  const isAdmin = hasRole(me, "admin");
+
   return (
     <div className="min-h-screen grid grid-cols-[220px_1fr]">
-      <aside className="border-r border-ink-200 bg-ink-0 px-6 py-6">
+      <aside className="border-r border-ink-200 bg-ink-0 px-6 py-6 flex flex-col">
         <Link href="/" className="flex items-center gap-2 mb-10">
           <span className="h-2 w-2 rounded-full bg-ink-900" />
           <span className="text-sm font-medium tracking-tight">Einai</span>
         </Link>
         <nav className="flex flex-col gap-1 text-sm text-ink-600">
-          <Link href="/" className="rounded-md px-2 py-1.5 hover:bg-ink-100 hover:text-ink-900">
-            Campaigns
-          </Link>
-          <Link href="/contacts" className="rounded-md px-2 py-1.5 hover:bg-ink-100 hover:text-ink-900">
-            Contacts
-          </Link>
-          <Link href="/settings" className="rounded-md px-2 py-1.5 hover:bg-ink-100 hover:text-ink-900">
-            Settings
-          </Link>
+          <NavLink href="/">Campaigns</NavLink>
+          <NavLink href="/contacts">Contacts</NavLink>
+          {isAdmin ? <NavLink href="/users">Team</NavLink> : null}
+          {isAdmin ? <NavLink href="/events">Events</NavLink> : null}
+          <NavLink href="/settings">Settings</NavLink>
         </nav>
+        {me ? (
+          <div className="mt-auto pt-6 text-xs text-ink-400 border-t border-ink-100">
+            <div className="truncate text-ink-700" title={me.email}>{me.email}</div>
+            <div className="uppercase tracking-wider mt-0.5">{me.role}</div>
+          </div>
+        ) : null}
       </aside>
       <main className="flex flex-col">
         <header className="flex items-center justify-between px-10 py-6 border-b border-ink-200 bg-ink-0">
@@ -45,5 +52,13 @@ export function Shell({
         <div className="flex-1 px-10 py-8">{children}</div>
       </main>
     </div>
+  );
+}
+
+function NavLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <Link href={href} className="rounded-md px-2 py-1.5 hover:bg-ink-100 hover:text-ink-900">
+      {children}
+    </Link>
   );
 }
