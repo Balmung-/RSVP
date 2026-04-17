@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /rsvp/
+Disallow: /api/
+Disallow: /campaigns/
+Disallow: /login
+Disallow: /settings
+Disallow: /contacts
