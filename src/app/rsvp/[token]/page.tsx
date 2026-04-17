@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import { findInviteeByToken, submitResponse, type SubmitResult } from "@/lib/rsvp";
 import { rateLimit } from "@/lib/ratelimit";
 import { t, type Locale } from "@/lib/i18n";
+import { checkInUrl, renderCheckInQrDataUrl } from "@/lib/checkin";
 import RsvpForm from "./form";
 
 export const dynamic = "force-dynamic";
@@ -71,6 +72,15 @@ export default async function RsvpPage({
   // visitors we show "always" questions up-front; state-gated ones reveal once
   // they pick yes/no.
   const priorAttending = inv.response?.attending ?? null;
+
+  // Pre-render the admission QR when the invitee has already said yes — shown
+  // in the form's "Thank you" state for them to save / print / show at the
+  // door. For no/pending responses we skip the cost.
+  const appUrl = process.env.APP_URL ?? "http://localhost:3000";
+  const admissionQr =
+    inv.response?.attending
+      ? await renderCheckInQrDataUrl(checkInUrl(appUrl, inv.rsvpToken))
+      : null;
 
   const brandColor = inv.campaign.brandColor && /^#[0-9A-Fa-f]{3,8}$/.test(inv.campaign.brandColor)
     ? inv.campaign.brandColor
@@ -187,6 +197,7 @@ export default async function RsvpPage({
                     }
                   : null
               }
+              admissionQrDataUrl={admissionQr}
             />
           )}
 

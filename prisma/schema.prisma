@@ -198,8 +198,11 @@ model Response {
   eventOptionId  String?
   eventOption    EventOption? @relation(fields: [eventOptionId], references: [id], onDelete: SetNull)
   answers        Answer[]
+  checkedInAt    DateTime?
+  checkedInBy    String?      // actor user id
 
   @@index([campaignId, attending])
+  @@index([checkedInAt])
 }
 
 // Event log — every significant action, for audit/tracing.

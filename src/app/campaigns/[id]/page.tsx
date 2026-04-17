@@ -212,6 +212,8 @@ export default async function CampaignDetail({
           <Link href={`/campaigns/${c.id}/import`} className="btn-ghost">Import</Link>
           <Link href={`/campaigns/${c.id}/duplicates`} className="btn-ghost">Duplicates</Link>
           <Link href={`/campaigns/${c.id}/test`} className="btn-ghost">Test send</Link>
+          <Link href={`/campaigns/${c.id}/arrivals`} className="btn-ghost">Arrivals</Link>
+          <Link href={`/campaigns/${c.id}/roster`} className="btn-ghost">Roster</Link>
           <a href={`/api/campaigns/${c.id}/export`} className="btn-ghost">Export</a>
           <form action={sendAction} className="inline-flex items-center gap-2">
             <input type="hidden" name="id" value={c.id} />

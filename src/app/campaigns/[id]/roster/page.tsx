@@ -1,0 +1,162 @@
+import { notFound, redirect } from "next/navigation";
+import { prisma } from "@/lib/db";
+import { isAuthed } from "@/lib/auth";
+import { PrintButton } from "@/components/PrintButton";
+
+export const dynamic = "force-dynamic";
+
+const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
+const whenFmt = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "long",
+  timeStyle: "short",
+  timeZone: TZ,
+});
+
+// Print-optimized roster. No Shell, no sidebar, no decoration beyond a thin
+// header. Groups attendees by organization; declined + pending listed below
+// for completeness (useful at the door for last-minute walk-ups).
+
+export default async function Roster({ params }: { params: { id: string } }) {
+  if (!(await isAuthed())) redirect("/login");
+  const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
+  if (!campaign) notFound();
+  const invitees = await prisma.invitee.findMany({
+    where: { campaignId: params.id },
+    include: { response: true },
+    orderBy: [{ organization: "asc" }, { fullName: "asc" }],
+  });
+
+  const attending = invitees.filter((i) => i.response?.attending);
+  const declined = invitees.filter((i) => i.response && !i.response.attending);
+  const pending = invitees.filter((i) => !i.response);
+
+  const groupedAttending = groupByOrg(attending);
+  const attendingHeadcount = attending.reduce((s, i) => s + 1 + (i.response?.guestsCount ?? 0), 0);
+
+  return (
+    <div className="print-roster min-h-screen bg-white text-ink-900 p-10 print:p-6">
+      <style>{`
+        @media print {
+          @page { margin: 16mm; }
+          .no-print { display: none !important; }
+        }
+        .print-roster table { width: 100%; border-collapse: collapse; }
+        .print-roster th, .print-roster td {
+          text-align: start; padding: 6px 10px; border-bottom: 1px solid #e8e8e6;
+          font-size: 13px;
+        }
+        .print-roster th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #5a5a57; }
+        .print-roster h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+        .print-roster h2 { font-size: 14px; font-weight: 600; margin-top: 28px; margin-bottom: 8px; }
+        .print-roster h3 { font-size: 12px; font-weight: 600; color: #3a3a38; margin-top: 14px; margin-bottom: 6px; }
+        .print-roster .meta { font-size: 12px; color: #5a5a57; }
+      `}</style>
+
+      <header className="flex items-start justify-between border-b border-ink-200 pb-4 mb-6">
+        <div>
+          <h1>{campaign.name}</h1>
+          <div className="meta mt-1">
+            {campaign.venue ? <>{campaign.venue} · </> : null}
+            {campaign.eventAt ? whenFmt.format(campaign.eventAt) : null}
+          </div>
+          <div className="meta mt-0.5">
+            Attending {attending.length} · Headcount {attendingHeadcount} · Declined {declined.length} · Pending {pending.length}
+          </div>
+        </div>
+        <div className="no-print">
+          <PrintButton />
+        </div>
+      </header>
+
+      <section>
+        <h2>Attending</h2>
+        {Object.entries(groupedAttending).map(([org, rows]) => (
+          <div key={org}>
+            <h3>{org}</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: "30%" }}>Name</th>
+                  <th style={{ width: "20%" }}>Title</th>
+                  <th style={{ width: "18%" }}>Guests</th>
+                  <th style={{ width: "16%" }}>Locale</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((i) => (
+                  <tr key={i.id}>
+                    <td><strong>{i.fullName}</strong></td>
+                    <td>{i.title ?? ""}</td>
+                    <td>{i.response!.guestsCount > 0 ? `+ ${i.response!.guestsCount}` : ""}</td>
+                    <td>{i.locale ?? campaign.locale}</td>
+                    <td>{i.notes ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </section>
+
+      {declined.length > 0 ? (
+        <section>
+          <h2>Declined</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Organization</th>
+                <th>Title</th>
+              </tr>
+            </thead>
+            <tbody>
+              {declined.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.fullName}</td>
+                  <td>{i.organization ?? ""}</td>
+                  <td>{i.title ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
+
+      {pending.length > 0 ? (
+        <section>
+          <h2>Pending</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Organization</th>
+                <th>Email</th>
+                <th>Phone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.fullName}</td>
+                  <td>{i.organization ?? ""}</td>
+                  <td>{i.email ?? ""}</td>
+                  <td>{i.phoneE164 ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function groupByOrg<T extends { organization: string | null }>(rows: T[]): Record<string, T[]> {
+  const out: Record<string, T[]> = {};
+  for (const r of rows) {
+    const key = (r.organization ?? "").trim() || "— Unaffiliated —";
+    (out[key] ??= []).push(r);
+  }
+  return out;
+}

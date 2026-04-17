@@ -37,6 +37,7 @@ type Props = {
     eventOptionId: string | null;
     answers: Record<string, string>;
   } | null;
+  admissionQrDataUrl?: string | null;
 };
 
 const ERROR_KEY: Record<
@@ -60,6 +61,7 @@ export default function RsvpForm({
   questions,
   priorAttending,
   existing,
+  admissionQrDataUrl,
 }: Props) {
   const L = t(locale);
   const [state, formAction] = useFormState<SubmitResult | null, FormData>(action, null);
@@ -72,6 +74,7 @@ export default function RsvpForm({
   const showDone = successful || (existing && !editing);
 
   if (showDone) {
+    const showQr = attending === true && admissionQrDataUrl;
     return (
       <div className="mt-10 text-center" role="status" aria-live="polite">
         <div className="inline-flex items-center gap-2 text-signal-live text-sm">
@@ -79,6 +82,26 @@ export default function RsvpForm({
           <span>{L.rsvp.thankYou}</span>
         </div>
         <p className="text-sm text-ink-500 mt-2">{L.rsvp.received}</p>
+
+        {showQr ? (
+          <div className="mt-8 flex flex-col items-center">
+            <div className="text-[11px] uppercase tracking-wider text-ink-400 mb-3">
+              {locale === "ar" ? "رمز الدخول" : "Admission code"}
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={admissionQrDataUrl}
+              alt={locale === "ar" ? "رمز الدخول" : "Admission QR code"}
+              className="w-48 h-48 bg-white rounded-lg border border-ink-100"
+            />
+            <p className="text-xs text-ink-400 mt-3 max-w-xs">
+              {locale === "ar"
+                ? "يرجى عرض هذا الرمز عند الوصول."
+                : "Show this at the entrance on arrival."}
+            </p>
+          </div>
+        ) : null}
+
         <button
           onClick={() => setEditing(true)}
           className="mt-6 text-xs text-ink-400 hover:text-ink-900 underline-offset-4 hover:underline"
