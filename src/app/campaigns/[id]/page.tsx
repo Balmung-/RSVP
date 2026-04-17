@@ -1,26 +1,56 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
-import { Stat } from "@/components/Stat";
-import { Badge } from "@/components/Badge";
-import { Pagination } from "@/components/Pagination";
-import { InviteeTable } from "@/components/InviteeTable";
+import { Tabs, type TabItem } from "@/components/Tabs";
 import { InviteePanel } from "@/components/InviteePanel";
-import { StageTimeline } from "@/components/StageTimeline";
+import { ArrivalsBoard } from "@/components/ArrivalsBoard";
+import { CampaignHeader, CampaignHeaderCrumb } from "@/components/workspace/CampaignHeader";
+import { InviteesTab } from "@/components/workspace/InviteesTab";
+import { ScheduleTab } from "@/components/workspace/ScheduleTab";
+import { ContentTab } from "@/components/workspace/ContentTab";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { isAuthed, requireRole, getCurrentUser, hasRole } from "@/lib/auth";
 import {
   campaignStats,
   sendCampaign,
   resendSingle,
   resendSelection,
   deleteInvitee,
+  findDuplicates,
 } from "@/lib/campaigns";
 import { listStages, runStageNow } from "@/lib/stages";
+import {
+  createQuestion,
+  deleteQuestion,
+  parseOptions,
+  QUESTION_KINDS,
+  SHOW_WHEN,
+  needsOptions,
+  type QuestionKind,
+  type ShowWhen,
+} from "@/lib/questions";
+import {
+  createAttachment,
+  deleteAttachment,
+  isSafeUrl,
+  ATTACHMENT_KINDS,
+  type AttachmentKind,
+} from "@/lib/attachments";
+import {
+  createEventOption,
+  deleteEventOption,
+} from "@/lib/eventoptions";
+import { parseLocalInput } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
+const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
+const APP_URL = process.env.APP_URL ?? "http://localhost:3000";
+
+type Tab = "invitees" | "schedule" | "content" | "arrivals";
+const TABS: readonly Tab[] = ["invitees", "schedule", "content", "arrivals"] as const;
+
+// ---------- actions (editor-gated) ----------
 
 async function sendAction(formData: FormData) {
   "use server";
@@ -28,16 +58,6 @@ async function sendAction(formData: FormData) {
   const id = String(formData.get("id"));
   const channel = String(formData.get("channel") ?? "both") as "email" | "sms" | "both";
   await sendCampaign(id, { channel, onlyUnsent: true });
-  redirect(`/campaigns/${id}`);
-}
-
-async function setStatus(formData: FormData) {
-  "use server";
-  await requireRole("editor");
-  const id = String(formData.get("id"));
-  const raw = String(formData.get("status"));
-  const status = ["draft", "active", "closed", "archived"].includes(raw) ? raw : "draft";
-  await prisma.campaign.update({ where: { id }, data: { status } });
   redirect(`/campaigns/${id}`);
 }
 
@@ -83,32 +103,368 @@ async function runStageAction(campaignId: string, formData: FormData) {
   await requireRole("editor");
   const stageId = String(formData.get("stageId"));
   if (stageId) await runStageNow(stageId, campaignId);
-  redirect(`/campaigns/${campaignId}`);
+  redirect(`/campaigns/${campaignId}?tab=schedule`);
 }
 
-const statusTone = {
-  draft: "wait",
-  active: "live",
-  sending: "hold",
-  closed: "muted",
-  archived: "muted",
-} as const;
+// Content tab actions ------------------------------------------------
 
-export default async function CampaignDetail({
+async function addQuestionAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const kindRaw = String(formData.get("kind") ?? "short_text");
+  const kind = (QUESTION_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as QuestionKind) : "short_text";
+  const showRaw = String(formData.get("showWhen") ?? "always");
+  const showWhen = (SHOW_WHEN as readonly string[]).includes(showRaw) ? (showRaw as ShowWhen) : "always";
+  const prompt = String(formData.get("prompt") ?? "").trim();
+  const options = String(formData.get("options") ?? "");
+  if (!prompt) redirect(`/campaigns/${campaignId}?tab=content&e=qprompt`);
+  if (needsOptions(kind) && parseOptions(options).length === 0) {
+    redirect(`/campaigns/${campaignId}?tab=content&e=qopts`);
+  }
+  await createQuestion(campaignId, {
+    prompt,
+    kind,
+    required: formData.get("required") === "on",
+    options,
+    showWhen,
+  });
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+async function removeQuestionAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const id = String(formData.get("questionId"));
+  if (id) await deleteQuestion(id, campaignId);
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+async function addAttachmentAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const kindRaw = String(formData.get("kind") ?? "file");
+  const kind = (ATTACHMENT_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as AttachmentKind) : "file";
+  const label = String(formData.get("label") ?? "").trim();
+  const url = String(formData.get("url") ?? "").trim();
+  if (!label || !isSafeUrl(url)) redirect(`/campaigns/${campaignId}?tab=content&e=att`);
+  await createAttachment(campaignId, { label, url, kind });
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+async function removeAttachmentAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const id = String(formData.get("attachmentId"));
+  if (id) await deleteAttachment(id, campaignId);
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+async function addDateAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const startsAt = parseLocalInput(String(formData.get("startsAt") ?? ""));
+  if (!startsAt) redirect(`/campaigns/${campaignId}?tab=content&e=date`);
+  await createEventOption(campaignId, {
+    startsAt: startsAt!,
+    endsAt: parseLocalInput(String(formData.get("endsAt") ?? "")),
+    label: String(formData.get("label") ?? "").trim() || null,
+    venue: String(formData.get("venue") ?? "").trim() || null,
+  });
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+async function removeDateAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const id = String(formData.get("eventOptionId"));
+  if (id) await deleteEventOption(id, campaignId);
+  redirect(`/campaigns/${campaignId}?tab=content`);
+}
+
+// ---------- page ----------
+
+export default async function CampaignWorkspace({
   params,
   searchParams,
 }: {
   params: { id: string };
-  searchParams: { page?: string; q?: string; invitee?: string };
+  searchParams: { tab?: string; page?: string; q?: string; invitee?: string; e?: string };
 }) {
   if (!(await isAuthed())) redirect("/login");
-  const c = await prisma.campaign.findUnique({ where: { id: params.id } });
-  if (!c) notFound();
+  const me = await getCurrentUser();
+  const canWrite = hasRole(me, "editor");
+  const canDelete = hasRole(me, "admin");
 
-  const page = Math.max(1, parseInt(searchParams.page ?? "1", 10) || 1);
-  const q = (searchParams.q ?? "").trim();
+  const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
+  if (!campaign) notFound();
+
+  const tabRaw = (searchParams.tab as Tab) ?? "invitees";
+  const tab: Tab = (TABS as readonly string[]).includes(tabRaw) ? (tabRaw as Tab) : "invitees";
+
+  // Everyone loads stats (cheap, drives header + tab counts).
+  const stats = await campaignStats(campaign.id);
+
+  // Per-tab data loaders. Only pay for what we render.
+  const tabData = await loadForTab(campaign.id, tab, searchParams);
+
+  const href = (t: Tab, extra?: Record<string, string>) => {
+    const qs = new URLSearchParams({ tab: t, ...(extra ?? {}) });
+    return `/campaigns/${campaign.id}?${qs.toString()}`;
+  };
+  const tabsItems: TabItem[] = [
+    { id: "invitees", label: "Invitees", href: href("invitees"), count: stats.total },
+    { id: "schedule", label: "Schedule", href: href("schedule"), count: tabData.scheduleCount },
+    { id: "content", label: "Content", href: href("content"), count: tabData.contentCount },
+    {
+      id: "arrivals",
+      label: "Arrivals",
+      href: href("arrivals"),
+      count: stats.attending,
+      hidden: stats.attending === 0,
+    },
+  ];
+
+  // Drawer for the Invitees tab.
+  const drawerInvitee =
+    tab === "invitees" && searchParams.invitee
+      ? await prisma.invitee.findUnique({
+          where: { id: searchParams.invitee },
+          include: {
+            response: { include: { answers: true } },
+            invitations: true,
+          },
+        })
+      : null;
+  const showDrawer = !!drawerInvitee && drawerInvitee.campaignId === campaign.id;
+  const [drawerQuestions, drawerEventOptions] = showDrawer
+    ? await Promise.all([
+        prisma.campaignQuestion.findMany({
+          where: { campaignId: campaign.id },
+          orderBy: { order: "asc" },
+        }),
+        prisma.eventOption.findMany({
+          where: { campaignId: campaign.id },
+          orderBy: { startsAt: "asc" },
+        }),
+      ])
+    : [[], []];
+
+  const closeDrawerHref = (() => {
+    const qs = new URLSearchParams({ tab: "invitees" });
+    if (searchParams.q) qs.set("q", searchParams.q);
+    if (searchParams.page && searchParams.page !== "1") qs.set("page", searchParams.page);
+    return `/campaigns/${campaign.id}?${qs.toString()}`;
+  })();
+
+  return (
+    <Shell title={campaign.name} crumb={<CampaignHeaderCrumb campaign={campaign} />}>
+      <CampaignHeader
+        campaign={campaign}
+        sendAction={sendAction}
+        canWrite={canWrite}
+        canDelete={canDelete}
+        headcount={stats.headcount}
+        invited={stats.total}
+        responded={stats.responded}
+      />
+      <Tabs active={tab} items={tabsItems} />
+
+      <div className="pt-8">
+        {tab === "invitees" ? (
+          <InviteesTab
+            campaign={campaign}
+            rows={tabData.rows ?? []}
+            totalInvitees={tabData.totalInvitees ?? 0}
+            page={tabData.page ?? 1}
+            pageSize={PAGE_SIZE}
+            searchQuery={tabData.searchQuery ?? ""}
+            duplicatesCount={tabData.duplicatesCount ?? 0}
+            stats={stats}
+            selectedInviteeId={showDrawer ? drawerInvitee!.id : undefined}
+            bulkResendAction={bulkResend.bind(null, campaign.id)}
+            bulkDeleteAction={bulkDelete.bind(null, campaign.id)}
+            canWrite={canWrite}
+          />
+        ) : null}
+
+        {tab === "schedule" ? (
+          <ScheduleTab
+            campaignId={campaign.id}
+            stages={tabData.stages ?? []}
+            runNowAction={runStageAction.bind(null, campaign.id)}
+            canWrite={canWrite}
+          />
+        ) : null}
+
+        {tab === "content" ? (
+          <ContentTab
+            canWrite={canWrite}
+            questions={tabData.questions ?? []}
+            attachments={tabData.attachments ?? []}
+            dates={tabData.dates ?? []}
+            datePickCounts={tabData.datePickCounts ?? new Map()}
+            addQuestionAction={addQuestionAction.bind(null, campaign.id)}
+            removeQuestionAction={removeQuestionAction.bind(null, campaign.id)}
+            addAttachmentAction={addAttachmentAction.bind(null, campaign.id)}
+            removeAttachmentAction={removeAttachmentAction.bind(null, campaign.id)}
+            addDateAction={addDateAction.bind(null, campaign.id)}
+            removeDateAction={removeDateAction.bind(null, campaign.id)}
+            error={CONTENT_ERROR[searchParams.e ?? ""] ?? null}
+          />
+        ) : null}
+
+        {tab === "arrivals" && tabData.arrivalsFeed ? (
+          <ArrivalsBoard
+            campaignId={campaign.id}
+            initial={tabData.arrivalsFeed}
+            tz={TZ}
+          />
+        ) : null}
+      </div>
+
+      {showDrawer ? (
+        <InviteePanel
+          campaign={campaign}
+          invitee={drawerInvitee!}
+          response={drawerInvitee!.response ?? null}
+          invitations={drawerInvitee!.invitations}
+          questions={drawerQuestions}
+          answers={drawerInvitee!.response?.answers ?? []}
+          eventOptions={drawerEventOptions}
+          closeHref={closeDrawerHref}
+          appUrl={APP_URL}
+          resendAction={singleResend.bind(null, campaign.id)}
+          deleteAction={singleDelete.bind(null, campaign.id)}
+        />
+      ) : null}
+    </Shell>
+  );
+}
+
+const CONTENT_ERROR: Record<string, string> = {
+  qprompt: "Question prompt is required.",
+  qopts: "This question kind needs at least one option.",
+  att: "Attachment needs a label and a valid http(s) URL.",
+  date: "Pick a valid start date/time.",
+};
+
+// Per-tab data loader — keeps the page function tidy.
+type TabData = {
+  // invitees
+  rows?: Awaited<ReturnType<typeof loadInviteesRows>>["rows"];
+  totalInvitees?: number;
+  page?: number;
+  searchQuery?: string;
+  duplicatesCount?: number;
+  // schedule
+  stages?: Awaited<ReturnType<typeof listStages>>;
+  scheduleCount?: number;
+  // content
+  questions?: Awaited<ReturnType<typeof prisma.campaignQuestion.findMany>>;
+  attachments?: Awaited<ReturnType<typeof prisma.campaignAttachment.findMany>>;
+  dates?: Awaited<ReturnType<typeof prisma.eventOption.findMany>>;
+  datePickCounts?: Map<string, number>;
+  contentCount?: number;
+  // arrivals
+  arrivalsFeed?: {
+    version: string;
+    totals: { expected: number; arrived: number; pending: number; expectedGuests: number; arrivedGuests: number };
+    rows: Array<{ id: string; name: string; title: string | null; organization: string | null; token: string; guestsCount: number; checkedInAt: string | null }>;
+  } | null;
+};
+
+async function loadForTab(
+  campaignId: string,
+  tab: Tab,
+  sp: { page?: string; q?: string },
+): Promise<TabData> {
+  // Always compute lightweight tab counts in parallel — they drive the tab
+  // labels even when the user is looking at a different tab.
+  const [scheduleCount, contentCount] = await Promise.all([
+    prisma.campaignStage.count({ where: { campaignId } }),
+    Promise.all([
+      prisma.campaignQuestion.count({ where: { campaignId } }),
+      prisma.campaignAttachment.count({ where: { campaignId } }),
+      prisma.eventOption.count({ where: { campaignId } }),
+    ]).then(([q, a, d]) => q + a + d),
+  ]);
+
+  if (tab === "invitees") {
+    const { rows, totalInvitees, page, searchQuery } = await loadInviteesRows(campaignId, sp);
+    const dups = await findDuplicates(campaignId);
+    return { rows, totalInvitees, page, searchQuery, duplicatesCount: dups.length, scheduleCount, contentCount };
+  }
+  if (tab === "schedule") {
+    const stages = await listStages(campaignId);
+    return { stages, scheduleCount, contentCount };
+  }
+  if (tab === "content") {
+    const [questions, attachments, dates, datePickRows] = await Promise.all([
+      prisma.campaignQuestion.findMany({ where: { campaignId }, orderBy: [{ order: "asc" }, { createdAt: "asc" }] }),
+      prisma.campaignAttachment.findMany({ where: { campaignId }, orderBy: [{ order: "asc" }, { createdAt: "asc" }] }),
+      prisma.eventOption.findMany({ where: { campaignId }, orderBy: [{ startsAt: "asc" }, { order: "asc" }] }),
+      prisma.response.groupBy({
+        by: ["eventOptionId"],
+        where: { campaignId, eventOptionId: { not: null } },
+        _count: { _all: true },
+      }),
+    ]);
+    const datePickCounts = new Map(datePickRows.map((r) => [r.eventOptionId as string, r._count._all]));
+    return { questions, attachments, dates, datePickCounts, scheduleCount, contentCount };
+  }
+  if (tab === "arrivals") {
+    const [responses, agg, arrivedCount, arrivedGuestsAgg] = await Promise.all([
+      prisma.response.findMany({
+        where: { campaignId, attending: true },
+        include: { invitee: { select: { fullName: true, title: true, organization: true, rsvpToken: true } } },
+        orderBy: [{ checkedInAt: "desc" }, { respondedAt: "desc" }],
+        take: 500,
+      }),
+      prisma.response.aggregate({
+        where: { campaignId, attending: true },
+        _sum: { guestsCount: true },
+        _count: { _all: true },
+        _max: { checkedInAt: true, respondedAt: true },
+      }),
+      prisma.response.count({ where: { campaignId, attending: true, checkedInAt: { not: null } } }),
+      prisma.response.aggregate({
+        where: { campaignId, attending: true, checkedInAt: { not: null } },
+        _sum: { guestsCount: true },
+      }),
+    ]);
+    const arrivalsFeed = {
+      version: [
+        agg._max.checkedInAt?.toISOString() ?? "",
+        agg._max.respondedAt?.toISOString() ?? "",
+        agg._count._all,
+      ].join("|"),
+      totals: {
+        expected: agg._count._all,
+        arrived: arrivedCount,
+        pending: agg._count._all - arrivedCount,
+        expectedGuests: agg._sum.guestsCount ?? 0,
+        arrivedGuests: arrivedGuestsAgg._sum.guestsCount ?? 0,
+      },
+      rows: responses.map((r) => ({
+        id: r.id,
+        name: r.invitee.fullName,
+        title: r.invitee.title,
+        organization: r.invitee.organization,
+        token: r.invitee.rsvpToken,
+        guestsCount: r.guestsCount,
+        checkedInAt: r.checkedInAt?.toISOString() ?? null,
+      })),
+    };
+    return { arrivalsFeed, scheduleCount, contentCount };
+  }
+  return { scheduleCount, contentCount };
+}
+
+async function loadInviteesRows(campaignId: string, sp: { page?: string; q?: string }) {
+  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const q = (sp.q ?? "").trim();
   const where = {
-    campaignId: c.id,
+    campaignId,
     ...(q
       ? {
           OR: [
@@ -120,9 +476,7 @@ export default async function CampaignDetail({
         }
       : {}),
   };
-
-  const [stats, totalInvitees, invitees, stages] = await Promise.all([
-    campaignStats(c.id),
+  const [totalInvitees, invitees] = await Promise.all([
     prisma.invitee.count({ where }),
     prisma.invitee.findMany({
       where,
@@ -131,48 +485,7 @@ export default async function CampaignDetail({
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
-    listStages(c.id),
   ]);
-
-  // Drawer payload (separate query because the selected invitee may be on a
-  // different page than the current table view).
-  const drawerInvitee = searchParams.invitee
-    ? await prisma.invitee.findUnique({
-        where: { id: searchParams.invitee },
-        include: {
-          response: { include: { answers: true } },
-          invitations: true,
-        },
-      })
-    : null;
-  const showDrawer = drawerInvitee && drawerInvitee.campaignId === c.id;
-  const [drawerQuestions, drawerEventOptions] = showDrawer
-    ? await Promise.all([
-        prisma.campaignQuestion.findMany({ where: { campaignId: c.id }, orderBy: { order: "asc" } }),
-        prisma.eventOption.findMany({ where: { campaignId: c.id }, orderBy: { startsAt: "asc" } }),
-      ])
-    : [[], []];
-
-  const hrefFor = (p: number) => {
-    const qs = new URLSearchParams();
-    if (q) qs.set("q", q);
-    qs.set("page", String(p));
-    return `/campaigns/${c.id}?${qs.toString()}`;
-  };
-  const baseHref = (() => {
-    const qs = new URLSearchParams();
-    if (q) qs.set("q", q);
-    if (page !== 1) qs.set("page", String(page));
-    const s = qs.toString();
-    return `/campaigns/${c.id}?${s ? s + "&" : ""}`;
-  })();
-  const closeDrawerHref = (() => {
-    const qs = new URLSearchParams();
-    if (q) qs.set("q", q);
-    if (page !== 1) qs.set("page", String(page));
-    return `/campaigns/${c.id}${qs.toString() ? "?" + qs.toString() : ""}`;
-  })();
-
   const rows = invitees.map((i) => ({
     id: i.id,
     fullName: i.fullName,
@@ -187,115 +500,6 @@ export default async function CampaignDetail({
       ? { attending: i.response.attending, guestsCount: i.response.guestsCount }
       : null,
   }));
-
-  const singleResendBound = singleResend.bind(null, c.id);
-  const singleDeleteBound = singleDelete.bind(null, c.id);
-  const bulkResendBound = bulkResend.bind(null, c.id);
-  const bulkDeleteBound = bulkDelete.bind(null, c.id);
-  const runStageBound = runStageAction.bind(null, c.id);
-
-  return (
-    <Shell
-      title={c.name}
-      crumb={
-        <span>
-          <Link href="/" className="hover:underline">Campaigns</Link>
-          <span className="mx-1.5 text-ink-300">/</span>
-          <span>{c.name}</span>
-        </span>
-      }
-      actions={
-        <>
-          <Link href={`/campaigns/${c.id}/edit`} className="btn-ghost">Edit</Link>
-          <Link href={`/campaigns/${c.id}/customize`} className="btn-ghost">Customize</Link>
-          <Link href={`/campaigns/${c.id}/invitees/new`} className="btn-ghost">Add invitee</Link>
-          <Link href={`/campaigns/${c.id}/import`} className="btn-ghost">Import</Link>
-          <Link href={`/campaigns/${c.id}/duplicates`} className="btn-ghost">Duplicates</Link>
-          <Link href={`/campaigns/${c.id}/test`} className="btn-ghost">Test send</Link>
-          <Link href={`/campaigns/${c.id}/arrivals`} className="btn-ghost">Arrivals</Link>
-          <Link href={`/campaigns/${c.id}/roster`} className="btn-ghost">Roster</Link>
-          <a href={`/api/campaigns/${c.id}/export`} className="btn-ghost">Export</a>
-          <form action={sendAction} className="inline-flex items-center gap-2">
-            <input type="hidden" name="id" value={c.id} />
-            <label className="sr-only" htmlFor="send-channel">Channel</label>
-            <select id="send-channel" name="channel" className="field !py-1.5 !px-3 !text-sm" defaultValue="both">
-              <option value="both">Email & SMS</option>
-              <option value="email">Email only</option>
-              <option value="sms">SMS only</option>
-            </select>
-            <button className="btn-primary" disabled={c.status === "sending"}>
-              {c.status === "sending" ? "Sending…" : "Send invitations"}
-            </button>
-          </form>
-        </>
-      }
-    >
-      <div className="grid grid-cols-[1fr_auto] gap-6 items-end mb-8">
-        <div className="grid grid-cols-6 gap-8">
-          <Stat label="Invited" value={stats.total} />
-          <Stat
-            label="Responded"
-            value={stats.responded}
-            hint={stats.total ? `${Math.round((stats.responded / stats.total) * 100)}%` : ""}
-          />
-          <Stat label="Attending" value={stats.attending} />
-          <Stat label="Declined" value={stats.declined} />
-          <Stat label="Guests +" value={stats.guests} />
-          <Stat label="Headcount" value={stats.headcount} />
-        </div>
-        <div className="flex items-center gap-3">
-          <Badge tone={statusTone[c.status as keyof typeof statusTone] ?? "muted"}>{c.status}</Badge>
-          <form action={setStatus} className="contents">
-            <input type="hidden" name="id" value={c.id} />
-            <label className="sr-only" htmlFor="status-select">Status</label>
-            <select id="status-select" name="status" className="field !py-1.5 !px-3 !text-sm" defaultValue={c.status}>
-              <option value="draft">Draft</option>
-              <option value="active">Active</option>
-              <option value="closed">Closed</option>
-              <option value="archived">Archived</option>
-            </select>
-            <button className="btn-ghost !px-3">Set</button>
-          </form>
-        </div>
-      </div>
-
-      <form method="get" className="mb-4">
-        <label className="sr-only" htmlFor="invitee-search">Search invitees</label>
-        <input
-          id="invitee-search"
-          name="q"
-          defaultValue={q}
-          placeholder="Search name, email, phone, organization"
-          className="field max-w-md"
-        />
-      </form>
-
-      <InviteeTable
-        invitees={rows}
-        baseHref={baseHref}
-        selectedInviteeId={showDrawer ? drawerInvitee!.id : undefined}
-        resendBulkAction={bulkResendBound}
-        deleteBulkAction={bulkDeleteBound}
-      />
-      <Pagination page={page} pageSize={PAGE_SIZE} total={totalInvitees} hrefFor={hrefFor} />
-
-      <StageTimeline campaignId={c.id} stages={stages} runNowAction={runStageBound} />
-
-      {showDrawer ? (
-        <InviteePanel
-          campaign={c}
-          invitee={drawerInvitee!}
-          response={drawerInvitee!.response ?? null}
-          invitations={drawerInvitee!.invitations}
-          questions={drawerQuestions}
-          answers={drawerInvitee!.response?.answers ?? []}
-          eventOptions={drawerEventOptions}
-          closeHref={closeDrawerHref}
-          appUrl={process.env.APP_URL ?? ""}
-          resendAction={singleResendBound}
-          deleteAction={singleDeleteBound}
-        />
-      ) : null}
-    </Shell>
-  );
+  return { rows, totalInvitees, page, searchQuery: q };
 }
+
