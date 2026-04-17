@@ -16,6 +16,8 @@ async function updateCampaign(id: string, formData: FormData) {
   if (!name) redirect(`/campaigns/${id}/edit`);
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
   const locale = rawLocale === "ar" ? "ar" : "en";
+  const rawColor = String(formData.get("brandColor") ?? "").trim();
+  const brandColor = /^#[0-9A-Fa-f]{3,8}$/.test(rawColor) ? rawColor : null;
   await prisma.campaign.update({
     where: { id },
     data: {
@@ -28,9 +30,23 @@ async function updateCampaign(id: string, formData: FormData) {
       subjectEmail: String(formData.get("subjectEmail") ?? "").trim().slice(0, 300) || null,
       templateEmail: String(formData.get("templateEmail") ?? "").trim().slice(0, 5000) || null,
       templateSms: String(formData.get("templateSms") ?? "").trim().slice(0, 500) || null,
+      brandColor,
+      brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
+      brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
     },
   });
   redirect(`/campaigns/${id}`);
+}
+
+function safeUrl(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    return (u.protocol === "https:" || u.protocol === "http:") && s.length <= 500 ? s : null;
+  } catch {
+    return null;
+  }
 }
 
 async function deleteCampaign(id: string) {

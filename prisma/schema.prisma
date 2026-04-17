@@ -27,12 +27,82 @@ model Campaign {
   subjectEmail  String?
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
+  // Branding (optional overrides for RSVP page + email hero).
+  brandColor    String?   // hex, e.g. "#0a6e3d"
+  brandLogoUrl  String?
+  brandHeroUrl  String?
+
   invitees      Invitee[]
   invitations   Invitation[]
   responses     Response[]
   stages        CampaignStage[]
+  questions     CampaignQuestion[]
+  attachments   CampaignAttachment[]
+  eventOptions  EventOption[]
 
   @@index([status])
+}
+
+// Per-campaign custom question asked on the RSVP page.
+model CampaignQuestion {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order       Int      @default(0)
+  prompt      String
+  kind        String   // short_text | long_text | single_select | multi_select | number | boolean
+  required    Boolean  @default(false)
+  options     String?  // newline-separated, for single_select / multi_select
+  showWhen    String   @default("always") // always | attending | declined
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  answers     Answer[]
+
+  @@index([campaignId, order])
+}
+
+// Invitee's answer to a question. One per (response, question).
+model Answer {
+  id          String             @id @default(cuid())
+  responseId  String
+  response    Response           @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  questionId  String
+  question    CampaignQuestion   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  value       String             // single string for everything; multi-select → newline-joined
+
+  @@unique([responseId, questionId])
+  @@index([questionId])
+}
+
+// Attachment shown on the RSVP page + linked in email/SMS. URL-only for now —
+// hosting lives with the tenant (S3, gov doc server, whatever).
+model CampaignAttachment {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order       Int      @default(0)
+  label       String
+  url         String
+  kind        String   @default("file") // file | map | agenda | parking
+  createdAt   DateTime @default(now())
+
+  @@index([campaignId, order])
+}
+
+// Optional date alternatives — when populated, invitee picks one on RSVP.
+model EventOption {
+  id          String    @id @default(cuid())
+  campaignId  String
+  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order       Int       @default(0)
+  label       String?
+  startsAt    DateTime
+  endsAt      DateTime?
+  venue       String?
+  createdAt   DateTime  @default(now())
+  responses   Response[]
+
+  @@index([campaignId, order])
 }
 
 // A scheduled touchpoint within a campaign. Stages stack into a flow:
@@ -114,17 +184,20 @@ model Invitation {
 
 // A Response captures the invitee's RSVP answer. One per invitee.
 model Response {
-  id          String   @id @default(cuid())
-  campaignId  String
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  inviteeId   String   @unique
-  invitee     Invitee  @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
-  attending   Boolean
-  guestsCount Int      @default(0)
-  message     String?
-  ip          String?
-  userAgent   String?
-  respondedAt DateTime @default(now())
+  id             String       @id @default(cuid())
+  campaignId     String
+  campaign       Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  inviteeId      String       @unique
+  invitee        Invitee      @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
+  attending      Boolean
+  guestsCount    Int          @default(0)
+  message        String?
+  ip             String?
+  userAgent      String?
+  respondedAt    DateTime     @default(now())
+  eventOptionId  String?
+  eventOption    EventOption? @relation(fields: [eventOptionId], references: [id], onDelete: SetNull)
+  answers        Answer[]
 
   @@index([campaignId, attending])
 }

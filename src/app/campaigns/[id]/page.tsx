@@ -139,10 +139,19 @@ export default async function CampaignDetail({
   const drawerInvitee = searchParams.invitee
     ? await prisma.invitee.findUnique({
         where: { id: searchParams.invitee },
-        include: { response: true, invitations: true },
+        include: {
+          response: { include: { answers: true } },
+          invitations: true,
+        },
       })
     : null;
   const showDrawer = drawerInvitee && drawerInvitee.campaignId === c.id;
+  const [drawerQuestions, drawerEventOptions] = showDrawer
+    ? await Promise.all([
+        prisma.campaignQuestion.findMany({ where: { campaignId: c.id }, orderBy: { order: "asc" } }),
+        prisma.eventOption.findMany({ where: { campaignId: c.id }, orderBy: { startsAt: "asc" } }),
+      ])
+    : [[], []];
 
   const hrefFor = (p: number) => {
     const qs = new URLSearchParams();
@@ -198,6 +207,7 @@ export default async function CampaignDetail({
       actions={
         <>
           <Link href={`/campaigns/${c.id}/edit`} className="btn-ghost">Edit</Link>
+          <Link href={`/campaigns/${c.id}/customize`} className="btn-ghost">Customize</Link>
           <Link href={`/campaigns/${c.id}/invitees/new`} className="btn-ghost">Add invitee</Link>
           <Link href={`/campaigns/${c.id}/import`} className="btn-ghost">Import</Link>
           <Link href={`/campaigns/${c.id}/duplicates`} className="btn-ghost">Duplicates</Link>
@@ -275,6 +285,9 @@ export default async function CampaignDetail({
           invitee={drawerInvitee!}
           response={drawerInvitee!.response ?? null}
           invitations={drawerInvitee!.invitations}
+          questions={drawerQuestions}
+          answers={drawerInvitee!.response?.answers ?? []}
+          eventOptions={drawerEventOptions}
           closeHref={closeDrawerHref}
           appUrl={process.env.APP_URL ?? ""}
           resendAction={singleResendBound}

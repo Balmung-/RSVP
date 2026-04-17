@@ -1,5 +1,13 @@
 import Link from "next/link";
-import type { Campaign, Invitation, Invitee, Response as RsvpResponse } from "@prisma/client";
+import type {
+  Answer,
+  Campaign,
+  CampaignQuestion,
+  EventOption,
+  Invitation,
+  Invitee,
+  Response as RsvpResponse,
+} from "@prisma/client";
 import { Drawer } from "./Drawer";
 import { Badge } from "./Badge";
 import { ConfirmButton } from "./ConfirmButton";
@@ -17,6 +25,9 @@ export function InviteePanel({
   invitee,
   response,
   invitations,
+  questions,
+  answers,
+  eventOptions,
   closeHref,
   appUrl,
   resendAction,
@@ -26,11 +37,18 @@ export function InviteePanel({
   invitee: Invitee;
   response: RsvpResponse | null;
   invitations: Invitation[];
+  questions: CampaignQuestion[];
+  answers: Answer[];
+  eventOptions: EventOption[];
   closeHref: string;
   appUrl: string;
   resendAction: (fd: FormData) => Promise<void> | void;
   deleteAction: (fd: FormData) => Promise<void> | void;
 }) {
+  const answerByQ = new Map(answers.map((a) => [a.questionId, a.value]));
+  const chosenDate = response?.eventOptionId
+    ? eventOptions.find((o) => o.id === response.eventOptionId)
+    : null;
   const rsvpUrl = `${appUrl.replace(/\/$/, "")}/rsvp/${invitee.rsvpToken}`;
   const emailInv = invitations.filter((i) => i.channel === "email").sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   const smsInv = invitations.filter((i) => i.channel === "sms").sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -114,6 +132,12 @@ export function InviteePanel({
               {response.attending ? "Attending" : "Not attending"}
               {response.attending && response.guestsCount > 0 ? ` · ${response.guestsCount} guest${response.guestsCount === 1 ? "" : "s"}` : ""}
             </div>
+            {chosenDate ? (
+              <div className="text-xs text-ink-500 mt-1">
+                Picked: <span className="text-ink-900 tabular-nums">{fmt.format(chosenDate.startsAt)}</span>
+                {chosenDate.label ? <span className="text-ink-400"> · {chosenDate.label}</span> : null}
+              </div>
+            ) : null}
             <div className="text-xs text-ink-400 mt-0.5">{fmt.format(response.respondedAt)}</div>
             {response.message ? (
               <p className="mt-2 text-sm text-ink-600 whitespace-pre-wrap border-l-2 border-ink-200 pl-3">
@@ -123,6 +147,25 @@ export function InviteePanel({
           </div>
         ) : null}
       </section>
+
+      {response && questions.length > 0 ? (
+        <section className="mt-8">
+          <div className="text-[11px] uppercase tracking-wider text-ink-400 mb-2">Answers</div>
+          <dl className="grid grid-cols-1 gap-3">
+            {questions.map((q) => {
+              const v = answerByQ.get(q.id);
+              return (
+                <div key={q.id} className="border-l-2 border-ink-100 pl-3">
+                  <dt className="text-xs text-ink-500">{q.prompt}</dt>
+                  <dd className="text-sm text-ink-900 whitespace-pre-wrap">
+                    {v ? v : <span className="text-ink-300">—</span>}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        </section>
+      ) : null}
 
       <section className="mt-8">
         <div className="text-[11px] uppercase tracking-wider text-ink-400 mb-2">RSVP link</div>

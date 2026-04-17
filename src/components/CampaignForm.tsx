@@ -68,6 +68,46 @@ export function CampaignForm({
           defaultValue={campaign?.description ?? ""}
         />
       </Field>
+      <details
+        className="col-span-2 group"
+        open={!!(campaign?.brandColor || campaign?.brandLogoUrl || campaign?.brandHeroUrl)}
+      >
+        <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
+          Branding — per-campaign logo, hero, accent
+        </summary>
+        <div className="mt-4 grid grid-cols-2 gap-6">
+          <Field label="Accent color (hex)">
+            <input
+              name="brandColor"
+              className="field"
+              maxLength={9}
+              pattern="^#[0-9A-Fa-f]{3,8}$"
+              defaultValue={campaign?.brandColor ?? ""}
+              placeholder="#0a6e3d"
+            />
+          </Field>
+          <Field label="Logo URL">
+            <input
+              name="brandLogoUrl"
+              type="url"
+              className="field"
+              maxLength={500}
+              defaultValue={campaign?.brandLogoUrl ?? ""}
+              placeholder="https://cdn.example.gov.sa/logo.svg"
+            />
+          </Field>
+          <Field label="Hero image URL" className="col-span-2">
+            <input
+              name="brandHeroUrl"
+              type="url"
+              className="field"
+              maxLength={500}
+              defaultValue={campaign?.brandHeroUrl ?? ""}
+              placeholder="https://cdn.example.gov.sa/hero.jpg"
+            />
+          </Field>
+        </div>
+      </details>
       <details className="col-span-2 group" open={!!(campaign?.subjectEmail || campaign?.templateEmail || campaign?.templateSms)}>
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
           Templates — override defaults
