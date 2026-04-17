@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { filterForState, validateAnswers } from "./questions";
+import { notifyAdmins } from "./notify";
 
 export type SubmitResult =
   | { ok: true }
@@ -113,6 +114,28 @@ export async function submitResponse(params: {
       }),
     },
   });
+
+  // High-value signal: long message, OR contact is VIP. Notify admins so
+  // someone can follow up before the event.
+  const message = (params.message ?? "").trim();
+  const isLongMessage = message.length >= 20;
+  const contact = inv.contactId
+    ? await prisma.contact.findUnique({
+        where: { id: inv.contactId },
+        select: { vipTier: true },
+      })
+    : null;
+  const isVip = contact && contact.vipTier !== "standard";
+  if (isLongMessage || isVip) {
+    await notifyAdmins(
+      "rsvp.high_value",
+      `RSVP · ${inv.fullName}`,
+      `${inv.fullName}${isVip ? ` (${contact?.vipTier})` : ""} ${params.attending ? "is attending" : "has declined"}${
+        params.attending && guests > 0 ? ` (+${guests})` : ""
+      } for "${c.name}".${message ? `\n\nNote:\n${message}` : ""}`,
+      `/campaigns/${c.id}?invitee=${inv.id}`,
+    );
+  }
 
   return { ok: true };
 }

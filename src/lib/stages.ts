@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { sendEmail, sendSms } from "./delivery";
+import { notifyAdmins } from "./notify";
 import type { Campaign, CampaignStage, Prisma } from "@prisma/client";
 
 export const STAGE_KINDS = ["invite", "reminder", "last_call", "thanks", "custom"] as const;
@@ -209,11 +210,22 @@ export async function dispatchDueStages(now: Date = new Date()) {
       await runStage(claimed);
       ran.push({ id: s.id, ok: true });
     } catch (e) {
+      const errMsg = String(e).slice(0, 500);
       await prisma.campaignStage.update({
         where: { id: s.id },
-        data: { status: "failed", error: String(e).slice(0, 500), completedAt: new Date() },
+        data: { status: "failed", error: errMsg, completedAt: new Date() },
       });
-      ran.push({ id: s.id, ok: false, error: String(e).slice(0, 200) });
+      ran.push({ id: s.id, ok: false, error: errMsg.slice(0, 200) });
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: s.campaignId },
+        select: { name: true, id: true },
+      });
+      await notifyAdmins(
+        "stage.failed",
+        `Stage failed · ${campaign?.name ?? "Campaign"}`,
+        `A scheduled stage "${s.kind.replace("_", " ")}" failed to run.\n\nError: ${errMsg}`,
+        `/campaigns/${s.campaignId}?tab=schedule`,
+      );
     }
   }
   return { considered: due.length, ran };

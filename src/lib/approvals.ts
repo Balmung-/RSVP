@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { sendCampaign } from "./campaigns";
 import { logAction } from "./audit";
+import { notifyAdmins } from "./notify";
 
 export function approvalThreshold(): number {
   const raw = parseInt(process.env.APPROVAL_THRESHOLD ?? "100", 10);
@@ -39,6 +40,20 @@ export async function requestApproval(params: {
     refId: params.campaignId,
     data: { recipients: params.recipientCount, channel: params.channel },
   });
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: params.campaignId },
+    select: { name: true },
+  });
+  const requester = await prisma.user.findUnique({
+    where: { id: params.requestedBy },
+    select: { email: true, fullName: true },
+  });
+  await notifyAdmins(
+    "approval.requested",
+    `Approval needed · ${campaign?.name ?? "Campaign"}`,
+    `${requester?.fullName ?? requester?.email ?? "An editor"} is asking to send ${params.recipientCount.toLocaleString()} ${params.channel === "both" ? "messages" : params.channel === "email" ? "emails" : "SMSs"} for "${campaign?.name ?? "a campaign"}".\n\nThe send is paused until an admin approves.`,
+    "/approvals",
+  );
   return row;
 }
 
