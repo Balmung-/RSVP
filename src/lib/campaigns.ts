@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { dedupKey, normalizeEmail, normalizePhone, parseContactsText } from "./contact";
 import { sendEmail, sendSms } from "./delivery";
+import { newRsvpToken } from "./tokens";
 import type { Prisma } from "@prisma/client";
 
 const COUNTRY = (process.env.DEFAULT_COUNTRY ?? "SA") as "SA";
@@ -83,6 +84,7 @@ export async function importInvitees(campaignId: string, text: string): Promise<
       notes: (r.notes || "").trim().slice(0, 2000) || null,
       guestsAllowed: clampInt(r.guests, 0, 20, 0),
       dedupKey: key,
+      rsvpToken: newRsvpToken(),
     });
   }
 

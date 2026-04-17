@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { dedupKey, normalizeEmail, normalizePhone } from "../src/lib/contact";
+import { newRsvpToken } from "../src/lib/tokens";
 
 const prisma = new PrismaClient();
 
@@ -45,6 +46,7 @@ async function main() {
         locale: p.locale ?? null,
         guestsAllowed: p.guestsAllowed ?? 0,
         dedupKey: dedupKey(email, phone),
+        rsvpToken: newRsvpToken(),
       },
     });
   }

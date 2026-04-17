@@ -46,7 +46,7 @@ model Invitee {
   phoneE164      String?     // +9665XXXXXXXX
   locale         String?     // overrides campaign locale
   tags           String?     // comma-separated tags
-  rsvpToken      String      @unique @default(cuid(2))
+  rsvpToken      String      @unique
   guestsAllowed  Int         @default(0)
   notes          String?
   dedupKey       String      // hash(email|phoneE164)
