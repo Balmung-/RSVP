@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { consumeFlash } from "@/lib/flash";
 import { teamsEnabled } from "@/lib/teams";
+import { readAdminLocale, adminDict } from "@/lib/adminLocale";
 import { Icon, type IconName } from "./Icon";
 import { Toast } from "./Toast";
 
@@ -27,6 +28,8 @@ export async function Shell({
   const isAdmin = hasRole(me, "admin");
   const flash = consumeFlash();
   const showTeams = teamsEnabled() && isAdmin;
+  const locale = readAdminLocale();
+  const T = adminDict(locale);
 
   return (
     <div className="min-h-screen grid grid-cols-[240px_1fr]">
@@ -38,13 +41,13 @@ export async function Shell({
           <span className="text-[15px] font-medium tracking-tight">Einai</span>
         </Link>
         <nav className="flex flex-col gap-0.5">
-          <NavLink href="/" icon="dashboard">Overview</NavLink>
-          <NavLink href="/campaigns" icon="calendar-check">Campaigns</NavLink>
-          <NavLink href="/contacts" icon="users">Contacts</NavLink>
-          <NavLink href="/inbox" icon="inbox">Inbox</NavLink>
-          {showTeams ? <NavLink href="/teams" icon="tag">Teams</NavLink> : null}
-          {isAdmin ? <NavLink href="/users" icon="user-plus">People</NavLink> : null}
-          {isAdmin ? <NavLink href="/events" icon="list">Events</NavLink> : null}
+          <NavLink href="/" icon="dashboard">{T.overview}</NavLink>
+          <NavLink href="/campaigns" icon="calendar-check">{T.campaigns}</NavLink>
+          <NavLink href="/contacts" icon="users">{T.contacts}</NavLink>
+          <NavLink href="/inbox" icon="inbox">{T.inbox}</NavLink>
+          {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
+          {isAdmin ? <NavLink href="/users" icon="user-plus">{T.people}</NavLink> : null}
+          {isAdmin ? <NavLink href="/events" icon="list">{T.events}</NavLink> : null}
         </nav>
         <div className="mt-auto pt-4 border-t border-ink-100">
           <Link

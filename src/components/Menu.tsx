@@ -56,7 +56,7 @@ export function Menu({
         className={clsx(
           "absolute top-[calc(100%+6px)] z-30 min-w-[14rem] rounded-xl border border-ink-200 bg-ink-0 p-1.5 shadow-lift",
           "origin-top transition-all duration-150 ease-glide",
-          align === "right" ? "right-0" : "left-0",
+          align === "right" ? "end-0" : "start-0",
           open ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none",
         )}
       >

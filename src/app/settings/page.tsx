@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
+import { Icon } from "@/components/Icon";
 import { getCurrentUser, hasRole, endSession, isAuthed } from "@/lib/auth";
+import { readAdminLocale, writeAdminLocale, adminDict, type AdminLocale } from "@/lib/adminLocale";
 
 export const dynamic = "force-dynamic";
 
@@ -11,27 +13,51 @@ async function signOut() {
   redirect("/login");
 }
 
+async function setLocale(formData: FormData) {
+  "use server";
+  const loc = String(formData.get("locale") ?? "en");
+  const next: AdminLocale = loc === "ar" ? "ar" : "en";
+  writeAdminLocale(next);
+  redirect("/settings");
+}
+
 export default async function Settings() {
   if (!(await isAuthed())) redirect("/login");
   const user = await getCurrentUser();
+  const locale = readAdminLocale();
+  const T = adminDict(locale);
+
   const emailProvider = process.env.EMAIL_PROVIDER ?? "stub";
   const smsProvider = process.env.SMS_PROVIDER ?? "stub";
   const appUrl = process.env.APP_URL ?? "—";
   const brand = process.env.APP_BRAND ?? "—";
-  const locale = process.env.DEFAULT_LOCALE ?? "en";
+  const tenantLocale = process.env.DEFAULT_LOCALE ?? "en";
   const timezone = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
   const webhookReady = !!process.env.WEBHOOK_SIGNING_SECRET;
   const strictHealth = process.env.HEALTH_REQUIRE_DB === "true";
   const cronReady = !!process.env.CRON_SECRET;
+  const inboundReady = !!process.env.INBOUND_EMAIL_DOMAIN && !!process.env.INBOUND_WEBHOOK_SECRET;
+  const teamsOn = (process.env.TEAMS_ENABLED ?? "").toLowerCase() === "true";
 
   return (
-    <Shell title="Settings">
+    <Shell title={T.settings}>
       <div className="panel p-10 max-w-3xl">
-        <h2 className="text-sub text-ink-900 mb-6">Account</h2>
-        <div className="grid grid-cols-2 gap-6 text-body mb-10">
-          <Row label="Signed in as" value={user?.email ?? "—"} />
+        <h2 className="text-sub text-ink-900 mb-6">{T.signedInAs === "Signed in as" ? "Account" : "الحساب"}</h2>
+        <div className="grid grid-cols-2 gap-6 text-body mb-8">
+          <Row label={T.signedInAs} value={user?.email ?? "—"} />
           <Row label="Role" value={user?.role ?? "—"} />
         </div>
+
+        <form action={setLocale} className="flex items-end gap-3 mb-10">
+          <label className="flex flex-col gap-1.5 flex-1 max-w-xs">
+            <span className="text-micro uppercase text-ink-400">{T.language}</span>
+            <select name="locale" className="field" defaultValue={locale}>
+              <option value="en">English</option>
+              <option value="ar">العربية</option>
+            </select>
+          </label>
+          <button className="btn btn-soft"><Icon name="check" size={14} />Save</button>
+        </form>
 
         <h2 className="text-sub text-ink-900 mb-6">Integrations</h2>
         <div className="grid grid-cols-2 gap-6 text-body">
@@ -39,28 +65,32 @@ export default async function Settings() {
           <Row label="SMS provider" value={smsProvider} live={smsProvider !== "stub"} />
           <Row label="App URL" value={appUrl} />
           <Row label="Brand" value={brand} />
-          <Row label="Default locale" value={locale} />
+          <Row label="Tenant locale" value={tenantLocale} />
           <Row label="Timezone" value={timezone} />
           <Row label="Delivery webhook" value={webhookReady ? "configured" : "disabled"} live={webhookReady} />
           <Row label="Cron tick" value={cronReady ? "configured" : "disabled"} live={cronReady} />
+          <Row label="Inbound replies" value={inboundReady ? "configured" : "disabled"} live={inboundReady} />
           <Row label="Strict health" value={strictHealth ? "on" : "off"} live={strictHealth} />
+          <Row label="Teams feature" value={teamsOn ? "enabled" : "disabled"} live={teamsOn} />
         </div>
-        <p className="text-xs text-ink-400 mt-8 leading-relaxed">
-          Providers are configured via environment variables — see{" "}
+        <p className="text-mini text-ink-400 mt-8 leading-relaxed">
+          Providers + feature flags are set via environment variables — see{" "}
           <code className="text-ink-700">.env.example</code>. Stub mode logs outgoing messages
-          to the server console and records a synthetic id, letting you exercise the flow
-          end-to-end before real keys are provisioned.
+          to the server console, so you can exercise the flow before real keys are provisioned.
         </p>
       </div>
 
       {hasRole(user, "admin") ? (
         <div className="mt-6">
-          <Link href="/users" className="btn-ghost">Manage team</Link>
+          <Link href="/users" className="btn btn-ghost">Manage people</Link>
         </div>
       ) : null}
 
       <form action={signOut} className="mt-6">
-        <button className="btn-ghost">Sign out</button>
+        <button className="btn btn-ghost">
+          <Icon name="log-out" size={14} />
+          {T.signOut}
+        </button>
       </form>
     </Shell>
   );
@@ -69,7 +99,7 @@ export default async function Settings() {
 function Row({ label, value, live }: { label: string; value: string; live?: boolean }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
+      <span className="text-micro uppercase text-ink-400">{label}</span>
       <span className="flex items-center gap-2 text-ink-900">
         {live !== undefined ? (
           <span className={`dot ${live ? "bg-signal-live" : "bg-ink-400"}`} />

@@ -27,8 +27,8 @@ export function Drawer({
       <DrawerDismiss closeHref={closeHref} />
       <aside
         className={clsx(
-          "fixed inset-y-0 right-0 z-50 w-full bg-ink-0 shadow-float flex flex-col",
-          "animate-drawer-in",
+          "fixed inset-y-0 end-0 z-50 w-full bg-ink-0 shadow-float flex flex-col",
+          "animate-drawer-in rtl:animate-drawer-in-rtl",
           width,
         )}
         role="dialog"
