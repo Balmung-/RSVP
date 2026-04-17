@@ -52,6 +52,23 @@ body {
   transform: scaleX(-1);
 }
 
+/* Per-campaign accent — when --brand is set on a container, the primary
+   button, the "will attend" choice, and the date-picker selected state pick
+   it up. No brand color ⇒ default ink palette stays. */
+.brand .btn-primary {
+  background-color: var(--brand, theme(colors.ink.900));
+}
+.brand .btn-primary:hover {
+  filter: brightness(0.92);
+}
+.brand .brand-accent {
+  border-color: var(--brand, theme(colors.ink.900));
+  color: var(--brand, theme(colors.ink.900));
+}
+.brand .brand-accent-bg {
+  background-color: color-mix(in srgb, var(--brand, theme(colors.ink.900)) 8%, transparent);
+}
+
 /* Remove outline clutter on focus-visible — use a subtle ring instead */
 *:focus-visible {
   outline: none;

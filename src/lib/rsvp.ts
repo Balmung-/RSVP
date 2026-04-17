@@ -55,38 +55,40 @@ export async function submitResponse(params: {
     if (belongs) eventOptionId = params.eventOptionId;
   }
 
-  const response = await prisma.response.upsert({
-    where: { inviteeId: inv.id },
-    create: {
-      campaignId: c.id,
-      inviteeId: inv.id,
-      attending: params.attending,
-      guestsCount: params.attending ? guests : 0,
-      message: params.message?.slice(0, 2000) || null,
-      ip: params.ip,
-      userAgent: params.userAgent?.slice(0, 300),
-      eventOptionId,
-    },
-    update: {
-      attending: params.attending,
-      guestsCount: params.attending ? guests : 0,
-      message: params.message?.slice(0, 2000) || null,
-      respondedAt: new Date(),
-      eventOptionId,
-    },
-  });
-
-  // Replace prior answers wholesale — last submission wins.
-  await prisma.answer.deleteMany({ where: { responseId: response.id } });
-  if (validation.answers.length > 0) {
-    await prisma.answer.createMany({
-      data: validation.answers.map((a) => ({
-        responseId: response.id,
-        questionId: a.questionId,
-        value: a.value,
-      })),
+  // Upsert response + replace its answers atomically — so two concurrent
+  // submits for the same token can't interleave into a half-written state.
+  await prisma.$transaction(async (tx) => {
+    const response = await tx.response.upsert({
+      where: { inviteeId: inv.id },
+      create: {
+        campaignId: c.id,
+        inviteeId: inv.id,
+        attending: params.attending,
+        guestsCount: params.attending ? guests : 0,
+        message: params.message?.slice(0, 2000) || null,
+        ip: params.ip,
+        userAgent: params.userAgent?.slice(0, 300),
+        eventOptionId,
+      },
+      update: {
+        attending: params.attending,
+        guestsCount: params.attending ? guests : 0,
+        message: params.message?.slice(0, 2000) || null,
+        respondedAt: new Date(),
+        eventOptionId,
+      },
     });
-  }
+    await tx.answer.deleteMany({ where: { responseId: response.id } });
+    if (validation.answers.length > 0) {
+      await tx.answer.createMany({
+        data: validation.answers.map((a) => ({
+          responseId: response.id,
+          questionId: a.questionId,
+          value: a.value,
+        })),
+      });
+    }
+  });
 
   await prisma.eventLog.create({
     data: {

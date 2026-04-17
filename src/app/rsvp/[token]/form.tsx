@@ -110,6 +110,8 @@ export default function RsvpForm({
   const fieldErrors = state && !state.ok && state.reason === "answers_invalid" ? state.errors ?? {} : {};
 
   const applicableQuestions = questions.filter((q) => {
+    // Mirrors filterForState in @/lib/questions — inlined to keep this a
+    // zero-server-import client module.
     if (q.showWhen === "always") return true;
     if (attending === null) return false;
     return q.showWhen === (attending ? "attending" : "declined");
@@ -306,23 +308,42 @@ function QuestionField({
           {errEl}
         </label>
       );
-    case "boolean":
+    case "boolean": {
+      // Two radios — keeps "No" distinguishable from "didn't answer". Defaults
+      // preserve the prior saved value when the invitee edits their response.
+      const yesChecked = defaultValue === "true";
+      const noChecked = defaultValue === "false";
       return (
         <div className="flex flex-col gap-1.5">
           {label}
-          <label className="flex items-center gap-2 text-sm text-ink-700">
-            <input
-              name={fieldName}
-              type="checkbox"
-              value="true"
-              className="accent-ink-900"
-              defaultChecked={defaultValue === "true"}
-            />
-            <span>{locale === "ar" ? "نعم" : "Yes"}</span>
-          </label>
+          <div className="flex gap-6 text-sm text-ink-700">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name={fieldName}
+                value="true"
+                className="accent-ink-900"
+                required={question.required}
+                defaultChecked={yesChecked}
+              />
+              <span>{locale === "ar" ? "نعم" : "Yes"}</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name={fieldName}
+                value="false"
+                className="accent-ink-900"
+                required={question.required}
+                defaultChecked={noChecked}
+              />
+              <span>{locale === "ar" ? "لا" : "No"}</span>
+            </label>
+          </div>
           {errEl}
         </div>
       );
+    }
     case "single_select":
       return (
         <div className="flex flex-col gap-1.5">

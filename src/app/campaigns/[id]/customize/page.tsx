@@ -8,6 +8,7 @@ import {
   listQuestions,
   createQuestion,
   deleteQuestion,
+  parseOptions,
   QUESTION_KINDS,
   SHOW_WHEN,
   type QuestionKind,
@@ -48,12 +49,17 @@ async function addQuestion(campaignId: string, formData: FormData) {
   const showRaw = String(formData.get("showWhen") ?? "always");
   const showWhen = (SHOW_WHEN as readonly string[]).includes(showRaw) ? (showRaw as ShowWhen) : "always";
   const prompt = String(formData.get("prompt") ?? "").trim();
-  if (!prompt) redirect(`/campaigns/${campaignId}/customize`);
+  const options = String(formData.get("options") ?? "");
+  if (!prompt) redirect(`/campaigns/${campaignId}/customize?e=qprompt`);
+  // Selects without options would render zero inputs and be unanswerable.
+  if (needsOptions(kind) && parseOptions(options).length === 0) {
+    redirect(`/campaigns/${campaignId}/customize?e=qopts`);
+  }
   await createQuestion(campaignId, {
     prompt,
     kind,
     required: formData.get("required") === "on",
-    options: String(formData.get("options") ?? ""),
+    options,
     showWhen,
   });
   redirect(`/campaigns/${campaignId}/customize`);
@@ -126,6 +132,14 @@ export default async function Customize({
     listAttachments(c.id),
     listEventOptions(c.id),
   ]);
+  const datePickCounts = await prisma.response.groupBy({
+    by: ["eventOptionId"],
+    where: { campaignId: c.id, eventOptionId: { not: null } },
+    _count: { _all: true },
+  });
+  const picksById = new Map(
+    datePickCounts.map((r) => [r.eventOptionId as string, r._count._all]),
+  );
 
   const boundAddQ = addQuestion.bind(null, c.id);
   const boundRmQ = removeQuestion.bind(null, c.id);
@@ -139,7 +153,11 @@ export default async function Customize({
       ? "Attachment needs a label and a valid http(s) URL."
       : searchParams.e === "date"
         ? "Pick a valid start date/time."
-        : null;
+        : searchParams.e === "qprompt"
+          ? "Question prompt is required."
+          : searchParams.e === "qopts"
+            ? "This question kind needs at least one option."
+            : null;
 
   return (
     <Shell
@@ -184,20 +202,30 @@ export default async function Customize({
 
         {dates.length > 0 ? (
           <ul className="panel divide-y divide-ink-100 overflow-hidden">
-            {dates.map((d) => (
-              <li key={d.id} className="flex items-center justify-between px-6 py-3">
-                <div className="text-sm text-ink-900 tabular-nums">
-                  {dateFmt.format(d.startsAt)}
-                  {d.endsAt ? <> <span className="text-ink-400">→</span> {dateFmt.format(d.endsAt)}</> : null}
-                  {d.venue ? <span className="text-ink-400"> · {d.venue}</span> : null}
-                  {d.label ? <span className="text-ink-400"> · {d.label}</span> : null}
-                </div>
-                <form action={boundRmD}>
-                  <input type="hidden" name="eventOptionId" value={d.id} />
-                  <ConfirmButton prompt="Remove this date option?">Remove</ConfirmButton>
-                </form>
-              </li>
-            ))}
+            {dates.map((d) => {
+              const picks = picksById.get(d.id) ?? 0;
+              const prompt =
+                picks > 0
+                  ? `Remove this date? ${picks} response${picks === 1 ? "" : "s"} picked it — those picks will be cleared.`
+                  : "Remove this date option?";
+              return (
+                <li key={d.id} className="flex items-center justify-between px-6 py-3">
+                  <div className="text-sm text-ink-900 tabular-nums">
+                    {dateFmt.format(d.startsAt)}
+                    {d.endsAt ? <> <span className="text-ink-400">→</span> {dateFmt.format(d.endsAt)}</> : null}
+                    {d.venue ? <span className="text-ink-400"> · {d.venue}</span> : null}
+                    {d.label ? <span className="text-ink-400"> · {d.label}</span> : null}
+                    {picks > 0 ? (
+                      <span className="text-xs text-ink-500 ms-2">· {picks} picked</span>
+                    ) : null}
+                  </div>
+                  <form action={boundRmD}>
+                    <input type="hidden" name="eventOptionId" value={d.id} />
+                    <ConfirmButton prompt={prompt}>Remove</ConfirmButton>
+                  </form>
+                </li>
+              );
+            })}
           </ul>
         ) : null}
       </section>

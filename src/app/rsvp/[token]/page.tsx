@@ -83,7 +83,7 @@ export default async function RsvpPage({
     <div
       dir={L.dir}
       lang={locale}
-      className="min-h-screen bg-ink-50 flex items-center justify-center px-6 py-20"
+      className={`min-h-screen bg-ink-50 flex items-center justify-center px-6 py-20 ${brandColor ? "brand" : ""}`}
       style={{ fontFamily: "var(--font-sans)", ...cssVars }}
     >
       <div className="w-full max-w-xl">
