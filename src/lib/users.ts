@@ -42,6 +42,7 @@ export async function createUser(input: UserInput, password: string): Promise<Us
       data: {
         email,
         passwordHash: hash,
+        mustChangePassword: true, // first login forces a self-set password
         fullName: (input.fullName ?? "").trim().slice(0, 120) || null,
         role: input.role,
         active: input.active ?? true,
@@ -82,8 +83,11 @@ export async function updateUser(
 export async function resetPassword(userId: string, newPassword: string): Promise<UserMutationResult> {
   if (newPassword.length < 10) return { ok: false, reason: "weak_password" };
   const hash = await hashPassword(newPassword);
-  await prisma.user.update({ where: { id: userId }, data: { passwordHash: hash } });
-  // Invalidate existing sessions — forces re-login everywhere for this user.
+  // Admin-driven reset forces the user to change it on next sign-in.
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash: hash, mustChangePassword: true },
+  });
   await prisma.session.deleteMany({ where: { userId } });
   return { ok: true, userId };
 }

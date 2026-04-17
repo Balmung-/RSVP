@@ -1,11 +1,14 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import type { Campaign } from "@prisma/client";
 import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
+import { TemplatePicker } from "@/components/TemplatePicker";
 import { prisma } from "@/lib/db";
 import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { teamsEnabled } from "@/lib/teams";
+import { listTemplates, getTemplate } from "@/lib/templates";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +46,6 @@ async function createCampaign(formData: FormData) {
 function safeUrl(raw: string): string | null {
   const s = raw.trim();
   if (!s || s.length > 500) return null;
-  // Accept same-origin paths (from our /api/files upload endpoint).
   if (s.startsWith("/") && !s.startsWith("//")) return s;
   try {
     const u = new URL(s);
@@ -53,14 +55,43 @@ function safeUrl(raw: string): string | null {
   }
 }
 
-export default async function NewCampaign() {
+export default async function NewCampaign({
+  searchParams,
+}: {
+  searchParams: { tpl?: string };
+}) {
   if (!(await isAuthed())) redirect("/login");
-  const teams = teamsEnabled()
-    ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
-    : [];
+  const [teams, templates] = await Promise.all([
+    teamsEnabled()
+      ? prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+      : Promise.resolve([]),
+    listTemplates(),
+  ]);
+
+  // Prefill from a template if requested. We don't write anything — just
+  // seed the form's defaultValues.
+  let preset: Partial<Campaign> | null = null;
+  if (searchParams.tpl) {
+    const tpl = await getTemplate(searchParams.tpl);
+    if (tpl) {
+      preset = {
+        locale: tpl.locale,
+        subjectEmail: tpl.kind === "email" ? tpl.subject ?? null : null,
+        templateEmail: tpl.kind === "email" ? tpl.body : null,
+        templateSms: tpl.kind === "sms" ? tpl.body : null,
+      };
+    }
+  }
+
   return (
     <Shell title="New campaign" crumb={<Link href="/campaigns">Campaigns</Link>}>
+      <TemplatePicker
+        templates={templates}
+        selected={searchParams.tpl ?? null}
+        baseHref="/campaigns/new"
+      />
       <CampaignForm
+        campaign={preset}
         action={createCampaign}
         submitLabel="Create campaign"
         cancelHref="/campaigns"

@@ -13,7 +13,7 @@ export function CampaignForm({
   cancelHref,
   teams,
 }: {
-  campaign?: Campaign | null;
+  campaign?: Partial<Campaign> | null;
   action: (fd: FormData) => Promise<void> | void;
   submitLabel: string;
   cancelHref: string;

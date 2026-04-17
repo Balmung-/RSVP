@@ -80,11 +80,15 @@ export default async function Settings() {
         </p>
       </div>
 
-      {hasRole(user, "admin") ? (
-        <div className="mt-6">
+      <div className="mt-6 flex items-center gap-3">
+        <Link href="/account/password" className="btn btn-ghost">
+          <Icon name="settings" size={14} />
+          Change password
+        </Link>
+        {hasRole(user, "admin") ? (
           <Link href="/users" className="btn btn-ghost">Manage people</Link>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
       <form action={signOut} className="mt-6">
         <button className="btn btn-ghost">

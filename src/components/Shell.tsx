@@ -44,6 +44,7 @@ export async function Shell({
           <NavLink href="/" icon="dashboard">{T.overview}</NavLink>
           <NavLink href="/campaigns" icon="calendar-check">{T.campaigns}</NavLink>
           <NavLink href="/contacts" icon="users">{T.contacts}</NavLink>
+          <NavLink href="/templates" icon="file-text">{locale === "ar" ? "القوالب" : "Templates"}</NavLink>
           <NavLink href="/inbox" icon="inbox">{T.inbox}</NavLink>
           {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
           {isAdmin ? <NavLink href="/users" icon="user-plus">{T.people}</NavLink> : null}
@@ -71,6 +72,16 @@ export async function Shell({
       </aside>
 
       <main className="flex flex-col">
+        {me?.mustChangePassword ? (
+          <div className="bg-signal-hold/10 border-b border-signal-hold/30 text-signal-hold px-10 py-2.5 flex items-center justify-between">
+            <span className="text-body">
+              Your password was set by an admin. Please pick your own before continuing.
+            </span>
+            <Link href="/account/password" className="btn btn-soft text-mini">
+              Change password
+            </Link>
+          </div>
+        ) : null}
         {compactTitle ? (
           <header className="flex items-center justify-between px-10 py-4 border-b border-ink-100 bg-ink-0">
             <div className="min-w-0 flex items-baseline gap-3">

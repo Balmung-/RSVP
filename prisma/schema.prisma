@@ -307,6 +307,29 @@ model FileUpload {
   @@index([createdAt])
 }
 
+// --- Templates library -----------------------------------------
+
+// Reusable outbound message templates, office-wide. Operators load one
+// into a campaign or stage to seed the subject + body. Tagging lets
+// them filter by kind ("national-day", "ramadan"). Locale-aware: a
+// template is either en or ar.
+model Template {
+  id          String   @id @default(cuid())
+  name        String
+  kind        String   // email | sms
+  locale      String   @default("en") // en | ar
+  subject     String?  // email only
+  body        String
+  tags        String?
+  archivedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdBy   String?
+
+  @@index([kind, archivedAt])
+  @@index([locale])
+}
+
 // --- Inbound / compliance --------------------------------------
 
 // Email or SMS replies captured by our inbound webhooks. We extract
@@ -392,6 +415,7 @@ model User {
   id           String    @id @default(cuid())
   email        String    @unique
   passwordHash String?
+  mustChangePassword Boolean @default(false)
   fullName     String?
   role         String    @default("viewer") // admin | editor | viewer
   active       Boolean   @default(true)
