@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Campaign } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
+import { FileInput } from "./FileInput";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
 // The submit action is whatever the caller binds — we just collect fields.
@@ -86,26 +87,21 @@ export function CampaignForm({
               placeholder="#0a6e3d"
             />
           </Field>
-          <Field label="Logo URL">
-            <input
-              name="brandLogoUrl"
-              type="url"
-              className="field"
-              maxLength={500}
-              defaultValue={campaign?.brandLogoUrl ?? ""}
-              placeholder="https://cdn.example.gov.sa/logo.svg"
-            />
-          </Field>
-          <Field label="Hero image URL" className="col-span-2">
-            <input
-              name="brandHeroUrl"
-              type="url"
-              className="field"
-              maxLength={500}
-              defaultValue={campaign?.brandHeroUrl ?? ""}
-              placeholder="https://cdn.example.gov.sa/hero.jpg"
-            />
-          </Field>
+          <div />
+          <FileInput
+            name="brandLogoUrl"
+            label="Logo"
+            kind="image"
+            defaultValue={campaign?.brandLogoUrl ?? ""}
+            hint="PNG / JPG / WebP, under 4 MB. Drag in or paste a URL."
+          />
+          <FileInput
+            name="brandHeroUrl"
+            label="Hero image"
+            kind="image"
+            defaultValue={campaign?.brandHeroUrl ?? ""}
+            hint="Shown at the top of the RSVP page."
+          />
         </div>
       </details>
       <details className="col-span-2 group" open={!!(campaign?.subjectEmail || campaign?.templateEmail || campaign?.templateSms)}>

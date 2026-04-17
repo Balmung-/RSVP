@@ -1,6 +1,8 @@
 import Link from "next/link";
 import type { CampaignStage } from "@prisma/client";
 import { StageTimeline } from "@/components/StageTimeline";
+import { EmptyState } from "@/components/EmptyState";
+import { Icon } from "@/components/Icon";
 
 export function ScheduleTab({
   campaignId,
@@ -13,41 +15,42 @@ export function ScheduleTab({
   runNowAction: (fd: FormData) => Promise<void> | void;
   canWrite: boolean;
 }) {
-  if (!canWrite && stages.length === 0) {
+  if (stages.length === 0) {
     return (
-      <div className="panel p-12 text-center text-sm text-ink-400 max-w-2xl mx-auto">
-        No stages scheduled.
-      </div>
+      <EmptyState
+        icon="clock"
+        title="No stages scheduled"
+        action={
+          canWrite
+            ? { label: "Add the first stage", href: `/campaigns/${campaignId}/stages/new` }
+            : undefined
+        }
+      >
+        Stages fire automatically. Chain them to build the flow:
+        invitation → reminder → last call → thank-you.
+      </EmptyState>
     );
   }
+
   return (
     <div className="flex flex-col gap-6">
       {canWrite ? (
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-medium tracking-tight text-ink-900">Send schedule</h3>
-            <p className="text-xs text-ink-400 mt-1 max-w-lg">
+            <h2 className="text-sub text-ink-900">Send schedule</h2>
+            <p className="text-body text-ink-500 mt-1 max-w-lg">
               Queue invitations, reminders, last calls, and thank-yous to fire automatically.
-              A cron worker wakes each stage at its scheduled time.
+              The cron worker wakes each stage at its scheduled time.
             </p>
           </div>
-          <Link href={`/campaigns/${campaignId}/stages/new`} className="btn-primary text-xs">
+          <Link href={`/campaigns/${campaignId}/stages/new`} className="btn btn-primary">
+            <Icon name="plus" size={14} />
             Add stage
           </Link>
         </div>
       ) : null}
 
-      {stages.length === 0 ? (
-        <div className="panel p-16 text-center">
-          <p className="text-sm text-ink-500 max-w-sm mx-auto">
-            No stages yet. Add one to automate the flow: invite → reminder → last call → thank-you.
-          </p>
-        </div>
-      ) : (
-        <div className="-mt-2">
-          <StageTimeline campaignId={campaignId} stages={stages} runNowAction={runNowAction} />
-        </div>
-      )}
+      <StageTimeline campaignId={campaignId} stages={stages} runNowAction={runNowAction} />
     </div>
   );
 }

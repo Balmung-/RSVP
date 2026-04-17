@@ -41,10 +41,11 @@ async function updateCampaign(id: string, formData: FormData) {
 
 function safeUrl(raw: string): string | null {
   const s = raw.trim();
-  if (!s) return null;
+  if (!s || s.length > 500) return null;
+  if (s.startsWith("/") && !s.startsWith("//")) return s;
   try {
     const u = new URL(s);
-    return (u.protocol === "https:" || u.protocol === "http:") && s.length <= 500 ? s : null;
+    return u.protocol === "https:" || u.protocol === "http:" ? s : null;
   } catch {
     return null;
   }

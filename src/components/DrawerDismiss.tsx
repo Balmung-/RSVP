@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import { Icon } from "./Icon";
 
 // Two renders in one component:
 // - Without `asCloseButton`: the scrim. Covers the viewport, dismisses on click
@@ -34,9 +35,9 @@ export function DrawerDismiss({
         type="button"
         aria-label="Close drawer"
         onClick={() => router.replace(closeHref)}
-        className="btn-ghost !px-3 !py-1 text-xs"
+        className="btn btn-ghost btn-icon"
       >
-        ✕
+        <Icon name="x" size={16} />
       </button>
     );
   }

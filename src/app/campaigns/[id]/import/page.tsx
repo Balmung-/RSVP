@@ -4,6 +4,7 @@ import { Shell } from "@/components/Shell";
 import { prisma } from "@/lib/db";
 import { isAuthed, requireRole } from "@/lib/auth";
 import { importInvitees } from "@/lib/campaigns";
+import { setFlash } from "@/lib/flash";
 
 export const dynamic = "force-dynamic";
 
@@ -12,16 +13,25 @@ async function runImport(formData: FormData) {
   await requireRole("editor");
   const id = String(formData.get("id"));
   const raw = String(formData.get("raw") ?? "");
-  if (!raw.trim()) redirect(`/campaigns/${id}/import?e=empty`);
+  if (!raw.trim()) {
+    setFlash({ kind: "warn", text: "Paste some rows before importing." });
+    redirect(`/campaigns/${id}/import`);
+  }
   const report = await importInvitees(id, raw);
-  const qs = new URLSearchParams({
-    created: String(report.created),
-    dupW: String(report.duplicatesWithin),
-    dupE: String(report.duplicatesExisting),
-    bad: String(report.invalid),
-    capped: String(report.capped),
+  const bits = [
+    `${report.created.toLocaleString()} added`,
+    report.duplicatesWithin + report.duplicatesExisting > 0
+      ? `${(report.duplicatesWithin + report.duplicatesExisting).toLocaleString()} duplicates skipped`
+      : null,
+    report.invalid > 0 ? `${report.invalid.toLocaleString()} invalid` : null,
+    report.capped ? "row cap reached" : null,
+  ].filter(Boolean);
+  setFlash({
+    kind: report.created > 0 ? "success" : "warn",
+    text: report.created > 0 ? "Import complete" : "Nothing imported",
+    detail: bits.join(" · "),
   });
-  redirect(`/campaigns/${id}?${qs.toString()}`);
+  redirect(`/campaigns/${id}`);
 }
 
 const EXAMPLE = `full_name,title,organization,email,phone,locale,guests

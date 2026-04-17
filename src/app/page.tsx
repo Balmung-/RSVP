@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { Campaign } from "@prisma/client";
 import { Shell } from "@/components/Shell";
+import { EmptyState } from "@/components/EmptyState";
+import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import { campaignStats } from "@/lib/campaigns";
@@ -49,7 +51,8 @@ export default async function CampaignsPage() {
     <Shell
       title="Campaigns"
       actions={
-        <Link href="/campaigns/new" className="btn-primary">
+        <Link href="/campaigns/new" className="btn btn-primary">
+          <Icon name="plus" size={14} />
           New campaign
         </Link>
       }
@@ -137,17 +140,14 @@ function Mini({ label, value, emphasize }: { label: string; value: number | stri
 
 function Empty() {
   return (
-    <div className="flex flex-col items-center justify-center py-32 text-center max-w-md mx-auto">
-      <div className="h-1.5 w-1.5 rounded-full bg-ink-900 mb-8" />
-      <h2 className="text-xl font-medium tracking-tightest text-ink-900">No campaigns yet</h2>
-      <p className="text-sm text-ink-500 mt-3 leading-relaxed">
-        A campaign is one event, one guest list, one window to collect responses.
-        Everything else — imports, scheduling, questions, arrivals — lives inside it.
-      </p>
-      <Link href="/campaigns/new" className="btn-primary mt-10">
-        Create the first campaign
-      </Link>
-    </div>
+    <EmptyState
+      icon="calendar-check"
+      title="No campaigns yet"
+      action={{ label: "Create the first campaign", href: "/campaigns/new" }}
+    >
+      A campaign is one event, one guest list, one window to collect responses.
+      Everything else — imports, scheduling, questions, arrivals — lives inside it.
+    </EmptyState>
   );
 }
 

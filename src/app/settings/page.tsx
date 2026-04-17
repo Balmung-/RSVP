@@ -27,14 +27,14 @@ export default async function Settings() {
   return (
     <Shell title="Settings">
       <div className="panel p-10 max-w-3xl">
-        <h2 className="text-sm font-medium tracking-tight text-ink-900 mb-6">Account</h2>
-        <div className="grid grid-cols-2 gap-6 text-sm mb-10">
+        <h2 className="text-sub text-ink-900 mb-6">Account</h2>
+        <div className="grid grid-cols-2 gap-6 text-body mb-10">
           <Row label="Signed in as" value={user?.email ?? "—"} />
           <Row label="Role" value={user?.role ?? "—"} />
         </div>
 
-        <h2 className="text-sm font-medium tracking-tight text-ink-900 mb-6">Integrations</h2>
-        <div className="grid grid-cols-2 gap-6 text-sm">
+        <h2 className="text-sub text-ink-900 mb-6">Integrations</h2>
+        <div className="grid grid-cols-2 gap-6 text-body">
           <Row label="Email provider" value={emailProvider} live={emailProvider !== "stub"} />
           <Row label="SMS provider" value={smsProvider} live={smsProvider !== "stub"} />
           <Row label="App URL" value={appUrl} />

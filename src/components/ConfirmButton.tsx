@@ -1,29 +1,31 @@
 "use client";
 
 import type { ReactNode } from "react";
-import clsx from "clsx";
+import { ConfirmSubmit } from "./ConfirmDialog";
 
-// Click-to-confirm via native window.confirm. Two-step enough for a gov tool
-// without the ceremony of a custom modal. Wraps any submit button.
+// Kept as a drop-in API wrapper for the earlier call sites. Internally it
+// now renders a proper modal (no window.confirm). Tone defaults to danger.
 
 export function ConfirmButton({
   children,
   prompt,
   className,
+  tone = "danger",
 }: {
   children: ReactNode;
   prompt: string;
   className?: string;
+  tone?: "default" | "danger";
 }) {
   return (
-    <button
-      type="submit"
-      className={clsx("btn-danger text-xs", className)}
-      onClick={(e) => {
-        if (!window.confirm(prompt)) e.preventDefault();
-      }}
+    <ConfirmSubmit
+      title={tone === "danger" ? "Are you sure?" : "Confirm"}
+      description={prompt}
+      confirmLabel={tone === "danger" ? "Delete" : "Confirm"}
+      tone={tone}
+      className={className}
     >
       {children}
-    </button>
+    </ConfirmSubmit>
   );
 }

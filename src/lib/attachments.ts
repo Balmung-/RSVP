@@ -14,9 +14,13 @@ export type AttachmentInput = {
 // the RSVP page and optionally embedded in emails.
 
 export function isSafeUrl(raw: string): boolean {
+  const s = raw.trim();
+  if (!s || s.length > 2000) return false;
+  // Same-origin path (e.g. /api/files/<id> from our own upload endpoint).
+  if (s.startsWith("/") && !s.startsWith("//")) return true;
   try {
-    const u = new URL(raw);
-    return (u.protocol === "https:" || u.protocol === "http:") && raw.length <= 2000;
+    const u = new URL(s);
+    return u.protocol === "https:" || u.protocol === "http:";
   } catch {
     return false;
   }

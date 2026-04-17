@@ -88,12 +88,14 @@ export default async function Login({ searchParams }: { searchParams: { e?: stri
             </p>
           ) : null}
 
-          <button className="btn-primary w-full py-3">Continue</button>
+          <button className="btn btn-primary w-full py-3">Continue</button>
 
-          <p className="text-xs text-ink-400 mt-2">
-            First time here? The root admin account is <code className="text-ink-700">admin@local</code> with
-            the password set in <code className="text-ink-700">ADMIN_PASSWORD</code>.
-          </p>
+          {process.env.NODE_ENV !== "production" ? (
+            <p className="text-mini text-ink-400 mt-2">
+              Dev bootstrap: <code className="text-ink-700">admin@local</code> with{" "}
+              <code className="text-ink-700">ADMIN_PASSWORD</code> env.
+            </p>
+          ) : null}
         </form>
       </main>
     </div>

@@ -1,5 +1,6 @@
 import type { CampaignAttachment, CampaignQuestion, EventOption } from "@prisma/client";
 import { ConfirmButton } from "@/components/ConfirmButton";
+import { FileInput } from "@/components/FileInput";
 import { QUESTION_KINDS, SHOW_WHEN, needsOptions } from "@/lib/questions";
 import { ATTACHMENT_KINDS } from "@/lib/attachments";
 
@@ -111,11 +112,14 @@ export function ContentTab({
                 ))}
               </select>
             </Field>
-            <Field label="URL">
-              <input name="url" type="url" className="field" required placeholder="https://..." />
-            </Field>
+            <FileInput
+              name="url"
+              label="File"
+              kind="doc"
+              hint="PDF, Word, or image. Upload or paste a URL."
+            />
             <div className="col-span-2 flex justify-end">
-              <button className="btn-primary text-xs">Add attachment</button>
+              <button className="btn btn-primary">Add attachment</button>
             </div>
           </form>
         ) : null}
@@ -227,8 +231,8 @@ function Section({ title, hint, children }: { title: string; hint: string; child
   return (
     <section>
       <div className="mb-3">
-        <h3 className="text-sm font-medium tracking-tight text-ink-900">{title}</h3>
-        <p className="text-xs text-ink-400 mt-1 max-w-lg">{hint}</p>
+        <h2 className="text-sub text-ink-900">{title}</h2>
+        <p className="text-body text-ink-500 mt-1 max-w-lg">{hint}</p>
       </div>
       {children}
     </section>

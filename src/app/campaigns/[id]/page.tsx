@@ -204,6 +204,31 @@ export default async function CampaignWorkspace({
   // Everyone loads stats (cheap, drives header + tab counts).
   const stats = await campaignStats(campaign.id);
 
+  // Send summary for the pre-send confirmation modal.
+  const [withEmail, withPhone, alreadyEmailSent, alreadySmsSent] = await Promise.all([
+    prisma.invitee.count({ where: { campaignId: campaign.id, email: { not: null } } }),
+    prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } }),
+    prisma.invitee.count({
+      where: {
+        campaignId: campaign.id,
+        invitations: { some: { channel: "email", status: { in: ["sent", "delivered"] } } },
+      },
+    }),
+    prisma.invitee.count({
+      where: {
+        campaignId: campaign.id,
+        invitations: { some: { channel: "sms", status: { in: ["sent", "delivered"] } } },
+      },
+    }),
+  ]);
+  const sendSummary = {
+    invited: stats.total,
+    withEmail,
+    withPhone,
+    alreadyEmailSent,
+    alreadySmsSent,
+  };
+
   // Per-tab data loaders. Only pay for what we render.
   const tabData = await loadForTab(campaign.id, tab, searchParams);
 
@@ -257,10 +282,15 @@ export default async function CampaignWorkspace({
   })();
 
   return (
-    <Shell title={campaign.name} crumb={<CampaignHeaderCrumb campaign={campaign} />}>
+    <Shell
+      title={campaign.name}
+      crumb={<CampaignHeaderCrumb campaign={campaign} />}
+      compactTitle
+    >
       <CampaignHeader
         campaign={campaign}
         sendAction={sendAction}
+        sendSummary={sendSummary}
         canWrite={canWrite}
         canDelete={canDelete}
         headcount={stats.headcount}

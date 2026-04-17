@@ -1,9 +1,11 @@
 import Link from "next/link";
 import type { Campaign } from "@prisma/client";
 import { Menu, MenuItem, MenuSeparator } from "@/components/Menu";
+import { SendDialog } from "@/components/SendDialog";
+import { Icon, type IconName } from "@/components/Icon";
 
-// Workspace header: one dominant title, quiet metadata row, one primary
-// action and one kebab for everything else. Eleven header buttons became two.
+// Workspace header: one dominant title, quiet metadata, one primary action
+// (Send invitations → opens the SendDialog) and one kebab for everything else.
 
 const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 const dateFmt = new Intl.DateTimeFormat("en-GB", {
@@ -15,7 +17,7 @@ const dateFmt = new Intl.DateTimeFormat("en-GB", {
 const statusColor: Record<string, string> = {
   draft: "bg-ink-300",
   active: "bg-signal-live",
-  sending: "bg-signal-hold animate-pulse",
+  sending: "bg-signal-hold",
   closed: "bg-ink-400",
   archived: "bg-ink-300",
 };
@@ -23,6 +25,7 @@ const statusColor: Record<string, string> = {
 export function CampaignHeader({
   campaign,
   sendAction,
+  sendSummary,
   canWrite,
   canDelete,
   headcount,
@@ -30,7 +33,14 @@ export function CampaignHeader({
   responded,
 }: {
   campaign: Campaign;
-  sendAction: (fd: FormData) => Promise<void> | void;
+  sendAction: (fd: FormData) => Promise<void>;
+  sendSummary: {
+    invited: number;
+    withEmail: number;
+    withPhone: number;
+    alreadyEmailSent: number;
+    alreadySmsSent: number;
+  };
   canWrite: boolean;
   canDelete: boolean;
   headcount: number;
@@ -43,71 +53,72 @@ export function CampaignHeader({
   ].filter(Boolean);
 
   return (
-    <div className="-mt-2 pb-6">
+    <div className="pb-8">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">
-          <div className="flex items-center gap-3 mb-2">
+          <div className="flex items-center gap-2 mb-3">
             <span
-              className={`h-1.5 w-1.5 rounded-full ${statusColor[campaign.status] ?? "bg-ink-300"}`}
+              className={`h-1.5 w-1.5 rounded-full ${statusColor[campaign.status] ?? "bg-ink-300"} ${campaign.status === "sending" ? "animate-pulse" : ""}`}
               aria-hidden
             />
-            <span className="text-[11px] uppercase tracking-wider text-ink-400">
-              {campaign.status}
-            </span>
+            <span className="text-micro text-ink-500">{campaign.status.toUpperCase()}</span>
           </div>
-          <h1 className="text-2xl font-medium tracking-tightest text-ink-900 truncate">
+          <h1
+            className="text-ink-900 truncate"
+            style={{ fontSize: "30px", lineHeight: "36px", letterSpacing: "-0.02em", fontWeight: 500 }}
+          >
             {campaign.name}
           </h1>
           {bits.length > 0 ? (
-            <p className="text-sm text-ink-500 mt-1 tabular-nums">{bits.join(" · ")}</p>
+            <p className="text-body text-ink-500 mt-1.5 tabular-nums">{bits.join(" · ")}</p>
           ) : null}
-          <p className="text-xs text-ink-400 mt-3 tabular-nums">
-            {invited} invited
-            <span className="mx-1.5 text-ink-300">·</span>
-            {responded} responded
-            <span className="mx-1.5 text-ink-300">·</span>
-            {headcount} expected headcount
-          </p>
+          <div className="flex items-center gap-5 mt-4 text-body text-ink-600 tabular-nums">
+            <InlineStat label="Invited" value={invited} />
+            <Divider />
+            <InlineStat label="Responded" value={responded} />
+            <Divider />
+            <InlineStat label="Expected headcount" value={headcount} emphasize />
+          </div>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {canWrite ? (
-            <form action={sendAction} className="inline-flex items-center gap-2">
-              <input type="hidden" name="id" value={campaign.id} />
-              <label className="sr-only" htmlFor="send-channel">Channel</label>
-              <select
-                id="send-channel"
-                name="channel"
-                className="field !py-1.5 !px-3 !text-sm !w-auto"
-                defaultValue="both"
-                aria-label="Channels"
-              >
-                <option value="both">Email & SMS</option>
-                <option value="email">Email only</option>
-                <option value="sms">SMS only</option>
-              </select>
-              <button className="btn-primary" disabled={campaign.status === "sending"}>
-                {campaign.status === "sending" ? "Sending…" : "Send invitations"}
-              </button>
-            </form>
-          ) : null}
+          <SendDialog
+            campaignId={campaign.id}
+            summary={sendSummary}
+            status={campaign.status}
+            action={sendAction}
+            canWrite={canWrite}
+          />
 
-          <Menu label="More actions" trigger={<span className="text-lg leading-none">⋯</span>}>
-            <MenuItem as="link" href={`/campaigns/${campaign.id}/edit`}>Edit settings</MenuItem>
+          <Menu
+            label="More actions"
+            trigger={<Icon name="more" size={16} className="text-ink-700" />}
+          >
+            <MenuItem as="link" href={`/campaigns/${campaign.id}/edit`}>
+              <MenuRow icon="pencil" label="Edit settings" />
+            </MenuItem>
             {canWrite ? (
               <>
-                <MenuItem as="link" href={`/campaigns/${campaign.id}/test`}>Send test message</MenuItem>
-                <MenuItem as="link" href={`/campaigns/${campaign.id}/import`}>Import CSV</MenuItem>
+                <MenuItem as="link" href={`/campaigns/${campaign.id}/test`}>
+                  <MenuRow icon="send" label="Send test message" />
+                </MenuItem>
+                <MenuItem as="link" href={`/campaigns/${campaign.id}/import`}>
+                  <MenuRow icon="upload" label="Import CSV" />
+                </MenuItem>
               </>
             ) : null}
             <MenuSeparator />
-            <MenuItem as="link" href={`/api/campaigns/${campaign.id}/export`}>Export responses (CSV)</MenuItem>
-            <MenuItem as="link" href={`/campaigns/${campaign.id}/roster`} target="_blank">Open print roster</MenuItem>
+            <MenuItem as="link" href={`/api/campaigns/${campaign.id}/export`}>
+              <MenuRow icon="download" label="Export responses (CSV)" />
+            </MenuItem>
+            <MenuItem as="link" href={`/campaigns/${campaign.id}/roster`} target="_blank">
+              <MenuRow icon="printer" label="Open print roster" />
+            </MenuItem>
             {canDelete ? (
               <>
                 <MenuSeparator />
                 <MenuItem as="link" href={`/campaigns/${campaign.id}/edit`} danger>
-                  Delete campaign…
+                  <MenuRow icon="trash" label="Delete campaign…" />
                 </MenuItem>
               </>
             ) : null}
@@ -118,14 +129,34 @@ export function CampaignHeader({
   );
 }
 
-// Wrapper that positions the header as a link when Shell title is already
-// being used for the breadcrumb.
 export function CampaignHeaderCrumb({ campaign }: { campaign: Campaign }) {
   return (
     <span>
-      <Link href="/" className="hover:underline">Campaigns</Link>
+      <Link href="/" className="hover:text-ink-900 transition-colors">Campaigns</Link>
       <span className="mx-1.5 text-ink-300">/</span>
-      <span>{campaign.name}</span>
+      <span className="truncate">{campaign.name}</span>
+    </span>
+  );
+}
+
+function InlineStat({ label, value, emphasize }: { label: string; value: number; emphasize?: boolean }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5">
+      <span className="text-micro uppercase text-ink-400">{label}</span>
+      <span className={emphasize ? "text-ink-900 font-medium" : ""}>{value.toLocaleString()}</span>
+    </span>
+  );
+}
+
+function Divider() {
+  return <span className="h-3 w-px bg-ink-200" aria-hidden />;
+}
+
+function MenuRow({ icon, label }: { icon: IconName; label: string }) {
+  return (
+    <span className="flex items-center gap-2.5">
+      <Icon name={icon} size={14} className="text-ink-500" />
+      <span>{label}</span>
     </span>
   );
 }

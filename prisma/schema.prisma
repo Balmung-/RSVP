@@ -220,6 +220,24 @@ model EventLog {
   @@index([actorId, createdAt])
 }
 
+// --- Files -----------------------------------------------------
+
+// DB-backed file storage. Blob in Postgres — simple, portable, survives
+// any redeploy. Small files only (logos, hero images, agenda PDFs up to a
+// few MB). If you outgrow it, swap the contents column for an S3 pointer
+// without changing callers.
+model FileUpload {
+  id          String   @id @default(cuid())
+  filename    String
+  contentType String
+  size        Int
+  contents    Bytes
+  uploadedBy  String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 // --- Identity --------------------------------------------------
 
 // Admin users. One row per human. `passwordHash` is nullable for SSO-only
