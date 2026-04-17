@@ -2,14 +2,14 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { testSendEmail, testSendSms } from "@/lib/testsend";
 
 export const dynamic = "force-dynamic";
 
 async function run(campaignId: string, formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const channel = String(formData.get("channel") ?? "email");
   const to = String(formData.get("to") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim() || undefined;

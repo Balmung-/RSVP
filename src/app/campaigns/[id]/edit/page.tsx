@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
 
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 
 async function updateCampaign(id: string, formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) redirect(`/campaigns/${id}/edit`);
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
@@ -52,7 +52,7 @@ function safeUrl(raw: string): string | null {
 
 async function deleteCampaign(id: string) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("admin");
   const campaign = await prisma.campaign.findUnique({ where: { id }, select: { name: true } });
   await prisma.campaign.delete({ where: { id } });
   await logAction({

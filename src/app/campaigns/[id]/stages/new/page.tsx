@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { StageForm } from "@/components/StageForm";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import {
   createStage,
@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 
 async function add(campaignId: string, formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const kindRaw = String(formData.get("kind") ?? "invite");
   const kind = (STAGE_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as StageKind) : "invite";
   const audRaw = String(formData.get("audience") ?? "all");

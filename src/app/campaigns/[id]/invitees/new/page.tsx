@@ -3,14 +3,14 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { InviteeForm } from "@/components/InviteeForm";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { createInvitee } from "@/lib/campaigns";
 
 export const dynamic = "force-dynamic";
 
 async function addInvitee(campaignId: string, formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const localeRaw = String(formData.get("locale") ?? "").toLowerCase();
   const res = await createInvitee(campaignId, {
     fullName: String(formData.get("fullName") ?? ""),

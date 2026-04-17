@@ -42,8 +42,10 @@ export default async function EventsPage({
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
-    // Top kinds by volume, for the filter chip row.
+    // Top kinds by volume under the current filter — keeps the chips
+    // meaningful when a specific actor is selected.
     prisma.eventLog.groupBy({
+      where,
       by: ["kind"],
       _count: { _all: true },
       orderBy: { _count: { kind: "desc" } },

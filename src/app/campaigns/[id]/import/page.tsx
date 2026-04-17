@@ -2,14 +2,14 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { importInvitees } from "@/lib/campaigns";
 
 export const dynamic = "force-dynamic";
 
 async function runImport(formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const id = String(formData.get("id"));
   const raw = String(formData.get("raw") ?? "");
   if (!raw.trim()) redirect(`/campaigns/${id}/import?e=empty`);

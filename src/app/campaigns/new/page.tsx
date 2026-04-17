@@ -3,14 +3,14 @@ import Link from "next/link";
 import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { isAuthed, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
 
 async function createCampaign(formData: FormData) {
   "use server";
-  if (!(await isAuthed())) redirect("/login");
+  await requireRole("editor");
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) return;
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();

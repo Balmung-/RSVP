@@ -1,4 +1,6 @@
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { cache } from "react";
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { prisma } from "./db";
 import type { User } from "@prisma/client";
@@ -109,29 +111,19 @@ export async function endSession() {
 
 // Current user lookup ----------------------------------------------
 
-let cacheUser: { key: string; at: number; user: User | null } | null = null;
-
-export async function getCurrentUser(): Promise<User | null> {
+// Request-scoped cache via React — multiple components in one render share
+// a single DB lookup, and different requests get their own call.
+export const getCurrentUser = cache(async (): Promise<User | null> => {
   const raw = cookies().get(COOKIE)?.value;
   const sid = unpack(raw);
   if (!sid) return null;
-  // Cache per-request to avoid repeated DB hits within one render. Cache is
-  // process-local and short (keyed by sid), fine under Next's request-scoped
-  // server components.
-  if (cacheUser && cacheUser.key === sid && Date.now() - cacheUser.at < 2000) {
-    return cacheUser.user;
-  }
   const session = await prisma.session.findUnique({
     where: { id: sid },
     include: { user: true },
   });
-  if (!session || session.expiresAt < new Date() || !session.user.active) {
-    cacheUser = { key: sid, at: Date.now(), user: null };
-    return null;
-  }
-  cacheUser = { key: sid, at: Date.now(), user: session.user };
+  if (!session || session.expiresAt < new Date() || !session.user.active) return null;
   return session.user;
-}
+});
 
 // Capability checks ------------------------------------------------
 
@@ -147,6 +139,16 @@ export async function isAuthed(): Promise<boolean> {
   return (await getCurrentUser()) !== null;
 }
 
+// Gate a server action or page on a minimum role. Redirects to /login if
+// unauthenticated; redirects to / if authenticated but under-privileged.
+// Returns the user so callers can attribute logs.
+export async function requireRole(role: Role): Promise<User> {
+  const u = await getCurrentUser();
+  if (!u) redirect("/login");
+  if (!hasRole(u, role)) redirect("/");
+  return u;
+}
+
 // Bootstrap --------------------------------------------------------
 
 // On first login attempt with no users, seed a root admin using the
@@ -158,14 +160,17 @@ export async function ensureBootstrapAdmin(): Promise<void> {
   const pw = process.env.ADMIN_PASSWORD;
   if (!pw) return;
   const hash = await hashPassword(pw);
-  await prisma.user.create({
-    data: {
+  // Upsert so two concurrent first-logins can't race on the unique index.
+  await prisma.user.upsert({
+    where: { email: "admin@local" },
+    create: {
       email: "admin@local",
       passwordHash: hash,
       fullName: "Root admin",
       role: "admin",
       active: true,
     },
+    update: {},
   });
 }
 
