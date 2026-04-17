@@ -32,6 +32,7 @@ function vars(c: Campaign, r: Recipient): Record<string, string> {
       ? new Intl.DateTimeFormat("en-GB", { dateStyle: "long", timeStyle: "short", timeZone: TZ() }).format(c.eventAt)
       : "",
     rsvpUrl: `${APP_URL()}/rsvp/${r.rsvpToken}`,
+    unsubscribeUrl: `${APP_URL()}/unsubscribe/${r.rsvpToken}`,
     brand: BRAND(),
   };
 }
@@ -58,8 +59,18 @@ export function renderEmail(c: Campaign, r: Recipient) {
   const v = vars(c, r);
   const subject = condRender(c.subjectEmail || L.email.defaultSubject, v);
   const text = condRender(c.templateEmail || L.email.body, v);
-  const html = textToHtml(text, L.dir);
-  return { locale, dir: L.dir, subject, text, html };
+  const textWithFooter = appendUnsubscribeFooter(text, v.unsubscribeUrl, locale);
+  const html = textToHtml(textWithFooter, L.dir, v.unsubscribeUrl, locale);
+  return { locale, dir: L.dir, subject, text: textWithFooter, html };
+}
+
+function appendUnsubscribeFooter(text: string, unsubUrl: string, locale: string): string {
+  if (text.includes(unsubUrl)) return text;
+  const line =
+    locale === "ar"
+      ? `\n\n—\nلإلغاء الاشتراك: ${unsubUrl}`
+      : `\n\n—\nUnsubscribe: ${unsubUrl}`;
+  return text + line;
 }
 
 export function renderSms(c: Campaign, r: Recipient) {
@@ -70,14 +81,26 @@ export function renderSms(c: Campaign, r: Recipient) {
   return { locale, dir: L.dir, body };
 }
 
-export function textToHtml(text: string, dir: "ltr" | "rtl"): string {
+export function textToHtml(
+  text: string,
+  dir: "ltr" | "rtl",
+  unsubUrl?: string,
+  locale?: string,
+): string {
   const urlRe = /(https?:\/\/[^\s<]+[^\s<.,;:!?)\]])/g;
   const body = escapeHtml(text)
     .replace(/\n/g, "<br/>")
     .replace(urlRe, '<a href="$1" style="color:#0a0a0a;text-decoration:underline">$1</a>');
+  const unsubLine =
+    unsubUrl
+      ? `<div style="margin-top:28px;padding-top:16px;border-top:1px solid #e8e8e6;color:#8e8e8a;font-size:11px;line-height:16px">
+        <a href="${unsubUrl}" style="color:#8e8e8a;text-decoration:underline">${locale === "ar" ? "إلغاء الاشتراك" : "Unsubscribe from future messages"}</a>
+      </div>`
+      : "";
   return `<!doctype html><html dir="${dir}"><body style="margin:0;padding:32px;background:#fafafa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#141414;line-height:1.55">
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;padding:40px 32px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 8px 28px rgba(0,0,0,0.06)">
     ${body}
+    ${unsubLine}
   </div>
 </body></html>`;
 }

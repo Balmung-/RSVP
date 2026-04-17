@@ -41,6 +41,7 @@ export async function Shell({
           <NavLink href="/" icon="dashboard">Overview</NavLink>
           <NavLink href="/campaigns" icon="calendar-check">Campaigns</NavLink>
           <NavLink href="/contacts" icon="users">Contacts</NavLink>
+          <NavLink href="/inbox" icon="inbox">Inbox</NavLink>
           {showTeams ? <NavLink href="/teams" icon="tag">Teams</NavLink> : null}
           {isAdmin ? <NavLink href="/users" icon="user-plus">People</NavLink> : null}
           {isAdmin ? <NavLink href="/events" icon="list">Events</NavLink> : null}

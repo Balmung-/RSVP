@@ -163,6 +163,7 @@ model Invitee {
   updatedAt      DateTime    @updatedAt
   invitations    Invitation[]
   response       Response?
+  inboundMessages InboundMessage[]
 
   @@unique([campaignId, dedupKey])
   @@index([campaignId, phoneE164])
@@ -303,6 +304,48 @@ model FileUpload {
   createdAt   DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// --- Inbound / compliance --------------------------------------
+
+// Email or SMS replies captured by our inbound webhooks. We extract
+// the rsvp token from the address (rsvp+<token>@inbound-domain for
+// email, or body/phone match for SMS), classify intent (yes/no/stop/
+// auto), and either apply the response automatically or route to the
+// needs-review queue.
+model InboundMessage {
+  id           String   @id @default(cuid())
+  channel      String   // email | sms
+  providerId   String?  // message-id or twilio SID
+  fromAddress  String
+  toAddress    String?
+  subject      String?
+  body         String
+  rawHeaders   String?
+  token        String?
+  inviteeId    String?
+  invitee      Invitee? @relation(fields: [inviteeId], references: [id], onDelete: SetNull)
+  intent       String   @default("unknown") // attending | declined | stop | autoreply | unknown
+  status       String   @default("new")     // new | processed | needs_review | ignored
+  note         String?
+  processedAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([status, createdAt])
+  @@index([inviteeId])
+}
+
+// One row per email/phone that has opted out. Sender respects this at
+// send time; unsubscribed recipients are skipped silently.
+model Unsubscribe {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  phoneE164 String?  @unique
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([phoneE164])
 }
 
 // --- Teams -----------------------------------------------------
