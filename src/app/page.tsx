@@ -6,6 +6,8 @@ import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import { phrase, type ActivityRecord } from "@/lib/activity";
+import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
+import { Badge } from "@/components/Badge";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +37,7 @@ export default async function Dashboard() {
     failedInvitations,
     recentActivity,
     totalCampaigns,
+    vips,
   ] = await Promise.all([
     prisma.campaign.findMany({
       where: {
@@ -64,6 +67,7 @@ export default async function Dashboard() {
       take: 25,
     }),
     prisma.campaign.count(),
+    vipWatch(),
   ]);
 
   if (totalCampaigns === 0) {
@@ -190,20 +194,62 @@ export default async function Dashboard() {
           </section>
         </div>
 
-        <section>
-          <SectionHeader title="Activity" hint="Latest 25 events across the office." href="/events" linkLabel="Full log" />
-          {recentActivity.length === 0 ? (
-            <div className="panel-quiet p-8 text-center text-body text-ink-500">
-              Nothing yet this week.
-            </div>
-          ) : (
-            <ol className="flex flex-col">
-              {recentActivity.map((e) => (
-                <ActivityRow key={e.id} event={e} />
-              ))}
-            </ol>
-          )}
-        </section>
+        <div className="flex flex-col gap-10">
+          {vips.length > 0 ? (
+            <section>
+              <SectionHeader
+                title="VIP watch"
+                hint="Royal, ministerial, and VIP invitees across active campaigns."
+                href="/contacts?tier=royal"
+                linkLabel="All contacts"
+              />
+              <ul className="panel-quiet divide-y divide-ink-100 overflow-hidden">
+                {vips.slice(0, 8).map((i) => {
+                  const r = i.response;
+                  const tone = r ? (r.attending ? "live" : "fail") : "wait";
+                  const label = r ? (r.attending ? "attending" : "declined") : "pending";
+                  return (
+                    <li key={i.id}>
+                      <Link
+                        href={`/campaigns/${i.campaign.id}?invitee=${i.id}`}
+                        className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-ink-50 transition-colors"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-body text-ink-900 truncate">{i.contact!.fullName}</span>
+                            <span className="text-micro uppercase text-ink-400">
+                              {VIP_LABEL[i.contact!.vipTier as VipTier] ?? i.contact!.vipTier}
+                            </span>
+                          </div>
+                          <div className="text-mini text-ink-400 mt-0.5 truncate">
+                            {i.campaign.name}
+                            {i.contact!.organization ? ` · ${i.contact!.organization}` : ""}
+                          </div>
+                        </div>
+                        <Badge tone={tone}>{label}</Badge>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ) : null}
+
+          <section>
+            <SectionHeader title="Activity" hint="Latest 25 events across the office." href="/events" linkLabel="Full log" />
+            {recentActivity.length === 0 ? (
+              <div className="panel-quiet p-8 text-center text-body text-ink-500">
+                Nothing yet this week.
+              </div>
+            ) : (
+              <ol className="flex flex-col">
+                {recentActivity.map((e) => (
+                  <ActivityRow key={e.id} event={e} />
+                ))}
+              </ol>
+            )}
+          </section>
+        </div>
       </div>
     </Shell>
   );

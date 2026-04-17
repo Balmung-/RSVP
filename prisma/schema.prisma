@@ -141,6 +141,8 @@ model Invitee {
   id             String      @id @default(cuid())
   campaignId     String
   campaign       Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId      String?
+  contact        Contact?    @relation(fields: [contactId], references: [id], onDelete: SetNull)
   fullName       String
   title          String?     // honorific / rank
   organization   String?
@@ -160,6 +162,7 @@ model Invitee {
   @@unique([campaignId, dedupKey])
   @@index([campaignId, phoneE164])
   @@index([campaignId, email])
+  @@index([contactId])
 }
 
 // A delivery attempt on a specific channel (email or sms).
@@ -218,6 +221,65 @@ model EventLog {
 
   @@index([kind, createdAt])
   @@index([actorId, createdAt])
+}
+
+// --- Global address book ---------------------------------------
+
+// A Contact is a person the office invites. One canonical record per
+// human — the same ambassador invited to 30 events lives once here.
+// Invitee rows can reference a Contact for their base fields, but
+// still carry campaign-specific overrides (guest count, per-campaign
+// notes).
+model Contact {
+  id              String   @id @default(cuid())
+  fullName        String
+  title           String?
+  organization    String?
+  email           String?
+  phoneE164       String?
+  preferredLocale String?  // en | ar
+  vipTier         String   @default("standard") // royal | minister | vip | standard
+  tags            String?
+  dietary         String?
+  dress           String?
+  securityNotes   String?
+  notes           String?
+  dedupKey        String   @unique
+  archivedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdBy       String?
+
+  invitees        Invitee[]
+  members         ContactGroupMember[]
+
+  @@index([vipTier])
+  @@index([fullName])
+  @@index([email])
+  @@index([phoneE164])
+}
+
+model ContactGroup {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  members     ContactGroupMember[]
+
+  @@index([name])
+}
+
+model ContactGroupMember {
+  id         String       @id @default(cuid())
+  groupId    String
+  group      ContactGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  contactId  String
+  contact    Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  createdAt  DateTime     @default(now())
+
+  @@unique([groupId, contactId])
+  @@index([contactId])
 }
 
 // --- Files -----------------------------------------------------
