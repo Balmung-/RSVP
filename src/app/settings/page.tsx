@@ -80,10 +80,15 @@ export default async function Settings() {
         </p>
       </div>
 
-      <div className="mt-6 flex items-center gap-3">
+      <div className="mt-6 flex items-center gap-3 flex-wrap">
         <Link href="/account/password" className="btn btn-ghost">
           <Icon name="settings" size={14} />
           Change password
+        </Link>
+        <Link href="/account/2fa" className="btn btn-ghost">
+          <Icon name="qr" size={14} />
+          Two-step sign-in
+          {user?.totpConfirmedAt ? <span className="text-signal-live ms-1">· on</span> : null}
         </Link>
         {hasRole(user, "admin") ? (
           <Link href="/users" className="btn btn-ghost">Manage people</Link>

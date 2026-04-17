@@ -440,6 +440,8 @@ model User {
   email        String    @unique
   passwordHash String?
   mustChangePassword Boolean @default(false)
+  totpSecret   String?
+  totpConfirmedAt DateTime?
   fullName     String?
   role         String    @default("viewer") // admin | editor | viewer
   active       Boolean   @default(true)

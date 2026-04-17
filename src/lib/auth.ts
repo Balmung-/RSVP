@@ -185,3 +185,52 @@ export async function authenticateWithPassword(
   const ok = await verifyPassword(password, user.passwordHash);
   return ok ? user : null;
 }
+
+// --- Pending-2FA handshake -----------------------------------------
+
+// After password succeeds but before the session is issued, we stash the
+// user id in a short-lived signed cookie. The /login?step=2fa page reads
+// it, verifies the TOTP code, then calls startSession.
+
+const PENDING_COOKIE = "einai_pending";
+const PENDING_TTL = 5 * 60 * 1000;
+
+export function issuePending(userId: string) {
+  const ts = String(Date.now());
+  const payload = `${userId}:${ts}`;
+  const token = `${payload}.${sign(payload)}`;
+  cookies().set(PENDING_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 300,
+  });
+}
+
+export function readPending(): string | null {
+  const raw = cookies().get(PENDING_COOKIE)?.value;
+  if (!raw) return null;
+  const dot = raw.lastIndexOf(".");
+  if (dot < 0) return null;
+  const payload = raw.slice(0, dot);
+  const sig = raw.slice(dot + 1);
+  const expected = sign(payload);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  const [userId, tsRaw] = payload.split(":");
+  const ts = Number(tsRaw);
+  if (!Number.isFinite(ts) || Date.now() - ts > PENDING_TTL) return null;
+  return userId;
+}
+
+export function clearPending() {
+  cookies().set(PENDING_COOKIE, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 0,
+  });
+}
