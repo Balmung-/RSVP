@@ -1,0 +1,109 @@
+// Einai RSVP — data core.
+// Small surface, explicit relations. Postgres in dev + prod (Neon / RDS / Azure).
+// For a zero-dependency local run, flip provider to "sqlite" and set
+// DATABASE_URL="file:./dev.db" — schema below is compatible with both.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A Campaign is the top-level container. Long-running, reusable.
+model Campaign {
+  id            String     @id @default(cuid())
+  name          String
+  description   String?
+  eventAt       DateTime?
+  venue         String?
+  locale        String     @default("en") // primary locale (en | ar)
+  rsvpDeadline  DateTime?
+  status        String     @default("draft") // draft | active | closed | archived
+  templateEmail String? // optional custom email body (liquid-lite)
+  templateSms   String? // optional custom sms body
+  subjectEmail  String?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  invitees      Invitee[]
+  invitations   Invitation[]
+  responses     Response[]
+
+  @@index([status])
+}
+
+// An Invitee is a person. Phone/email are normalized and unique per campaign.
+model Invitee {
+  id             String      @id @default(cuid())
+  campaignId     String
+  campaign       Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  fullName       String
+  title          String?     // honorific / rank
+  organization   String?
+  email          String?     // normalized lowercase
+  phoneE164      String?     // +9665XXXXXXXX
+  locale         String?     // overrides campaign locale
+  tags           String?     // comma-separated tags
+  rsvpToken      String      @unique @default(cuid())
+  guestsAllowed  Int         @default(0)
+  notes          String?
+  dedupKey       String      // hash(email|phoneE164)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  invitations    Invitation[]
+  response       Response?
+
+  @@unique([campaignId, dedupKey])
+  @@index([campaignId, phoneE164])
+  @@index([campaignId, email])
+}
+
+// A delivery attempt on a specific channel (email or sms).
+model Invitation {
+  id          String    @id @default(cuid())
+  campaignId  String
+  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  inviteeId   String
+  invitee     Invitee   @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
+  channel     String    // "email" | "sms"
+  status      String    @default("queued") // queued | sent | delivered | failed | bounced
+  providerId  String?   // id returned by the upstream API
+  error       String?
+  payload     String?   // rendered body snapshot
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([campaignId, channel, status])
+}
+
+// A Response captures the invitee's RSVP answer. One per invitee.
+model Response {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  inviteeId   String   @unique
+  invitee     Invitee  @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
+  attending   Boolean
+  guestsCount Int      @default(0)
+  message     String?
+  ip          String?
+  userAgent   String?
+  respondedAt DateTime @default(now())
+
+  @@index([campaignId, attending])
+}
+
+// Event log — every significant action, for audit/tracing.
+model EventLog {
+  id         String   @id @default(cuid())
+  kind       String   // invite.sent, invite.delivered, rsvp.submitted, import.completed, ...
+  refType    String?  // campaign | invitee | invitation
+  refId      String?
+  data       String?  // JSON blob
+  createdAt  DateTime @default(now())
+
+  @@index([kind, createdAt])
+}

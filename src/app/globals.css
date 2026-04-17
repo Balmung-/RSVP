@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html,
+body {
+  background: theme(colors.ink.50);
+  color: theme(colors.ink.900);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* A single calm surface. No banding, no shadow halos. */
+.panel {
+  background: theme(colors.ink.0);
+  border: 1px solid theme(colors.ink.200);
+  border-radius: 14px;
+}
+
+.field {
+  @apply block w-full rounded-lg border border-ink-200 bg-ink-0 px-3 py-2 text-ink-900
+    placeholder:text-ink-400 focus:outline-none focus:ring-0 focus:border-ink-900
+    transition-colors duration-150;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2
+    text-sm font-medium transition-all duration-200 ease-glide select-none;
+}
+.btn-primary {
+  @apply btn bg-ink-900 text-ink-0 hover:bg-ink-700 active:bg-ink-800;
+}
+.btn-ghost {
+  @apply btn text-ink-700 hover:bg-ink-100;
+}
+.btn-danger {
+  @apply btn text-signal-fail hover:bg-ink-100;
+}
+
+.dot {
+  @apply inline-block h-1.5 w-1.5 rounded-full;
+}
+
+/* RTL fine-tuning */
+[dir="rtl"] .flip-x {
+  transform: scaleX(-1);
+}
+
+/* Remove outline clutter on focus-visible — use a subtle ring instead */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px theme(colors.ink.0), 0 0 0 3px theme(colors.ink.900);
+  border-radius: 8px;
+}
+
+/* Table styling — rows as a continuous surface */
+.rail table {
+  @apply w-full border-separate border-spacing-0 text-sm;
+}
+.rail th {
+  @apply sticky top-0 z-[1] bg-ink-0/80 backdrop-blur text-xs font-medium uppercase
+    tracking-wide text-ink-400 text-left px-4 py-3 border-b border-ink-200;
+}
+[dir="rtl"] .rail th {
+  @apply text-right;
+}
+.rail td {
+  @apply px-4 py-3 border-b border-ink-100 align-middle;
+}
+.rail tr:last-child td {
+  @apply border-b-0;
+}
+.rail tr:hover td {
+  @apply bg-ink-50;
+}

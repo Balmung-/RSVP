@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: einai-db
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: einai
+      POSTGRES_PASSWORD: einai
+      POSTGRES_DB: einai
+    volumes:
+      - einai-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U einai"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  einai-db:
