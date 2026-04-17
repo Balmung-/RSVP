@@ -5,6 +5,7 @@ import { stubSms } from "./sms/stub";
 import { twilio } from "./sms/twilio";
 import { unifonic } from "./sms/unifonic";
 import { msegat } from "./sms/msegat";
+import { whatsappTwilio } from "./sms/whatsapp";
 import type { EmailProvider, SmsProvider } from "./types";
 
 // Single resolution point. Everything else asks the factory — never a driver.
@@ -36,6 +37,14 @@ export function getSmsProvider(): SmsProvider {
   switch (kind) {
     case "twilio":
       _sms = twilio(must("TWILIO_ACCOUNT_SID"), must("TWILIO_AUTH_TOKEN"), must("TWILIO_FROM"));
+      break;
+    case "whatsapp":
+    case "whatsapp-twilio":
+      _sms = whatsappTwilio(
+        must("TWILIO_ACCOUNT_SID"),
+        must("TWILIO_AUTH_TOKEN"),
+        must("WHATSAPP_FROM"),
+      );
       break;
     case "unifonic":
       _sms = unifonic(must("UNIFONIC_APP_SID"), must("UNIFONIC_SENDER_NAME"));

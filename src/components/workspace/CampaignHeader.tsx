@@ -124,6 +124,9 @@ export function CampaignHeader({
             <MenuItem as="link" href={`/kiosk/${campaign.id}`} target="_blank">
               <MenuRow icon="qr" label="Open door kiosk" />
             </MenuItem>
+            <MenuItem as="link" href={`/campaigns/${campaign.id}/catering`}>
+              <MenuRow icon="list" label="Catering summary" />
+            </MenuItem>
             {canDelete ? (
               <>
                 <MenuSeparator />
