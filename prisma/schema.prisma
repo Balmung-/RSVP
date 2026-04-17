@@ -307,6 +307,30 @@ model FileUpload {
   @@index([createdAt])
 }
 
+// --- Approvals -------------------------------------------------
+
+// Gate large sends behind admin sign-off. When an editor triggers
+// sendCampaign and the recipient count exceeds APPROVAL_THRESHOLD, we
+// persist a SendApproval row instead of firing. Admins approve from
+// /approvals and the send runs with the stored params.
+model SendApproval {
+  id             String    @id @default(cuid())
+  campaignId     String
+  campaign       Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  channel        String    // email | sms | both
+  recipientCount Int
+  requestedBy    String
+  note           String?
+  status         String    @default("pending") // pending | approved | rejected | expired
+  decidedBy      String?
+  decidedAt      DateTime?
+  decisionNote   String?
+  createdAt      DateTime  @default(now())
+
+  @@index([status, createdAt])
+  @@index([campaignId])
+}
+
 // --- Templates library -----------------------------------------
 
 // Reusable outbound message templates, office-wide. Operators load one

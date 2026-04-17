@@ -4,6 +4,7 @@ import { getCurrentUser, hasRole } from "@/lib/auth";
 import { consumeFlash } from "@/lib/flash";
 import { teamsEnabled } from "@/lib/teams";
 import { readAdminLocale, adminDict } from "@/lib/adminLocale";
+import { prisma } from "@/lib/db";
 import { Icon, type IconName } from "./Icon";
 import { Toast } from "./Toast";
 import { CommandPalette } from "./CommandPalette";
@@ -32,6 +33,9 @@ export async function Shell({
   const showTeams = teamsEnabled() && isAdmin;
   const locale = readAdminLocale();
   const T = adminDict(locale);
+  const pendingApprovals = isAdmin
+    ? await prisma.sendApproval.count({ where: { status: "pending" } })
+    : 0;
 
   return (
     <div className="min-h-screen grid grid-cols-[240px_1fr]">
@@ -48,6 +52,11 @@ export async function Shell({
           <NavLink href="/contacts" icon="users">{T.contacts}</NavLink>
           <NavLink href="/templates" icon="file-text">{locale === "ar" ? "القوالب" : "Templates"}</NavLink>
           <NavLink href="/inbox" icon="inbox">{T.inbox}</NavLink>
+          {isAdmin ? (
+            <NavLink href="/approvals" icon="circle-alert" badge={pendingApprovals}>
+              {locale === "ar" ? "الموافقات" : "Approvals"}
+            </NavLink>
+          ) : null}
           {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
           {isAdmin ? <NavLink href="/users" icon="user-plus">{T.people}</NavLink> : null}
           {isAdmin ? <NavLink href="/events" icon="list">{T.events}</NavLink> : null}
@@ -114,14 +123,29 @@ export async function Shell({
   );
 }
 
-function NavLink({ href, children, icon }: { href: string; children: ReactNode; icon: IconName }) {
+function NavLink({
+  href,
+  children,
+  icon,
+  badge,
+}: {
+  href: string;
+  children: ReactNode;
+  icon: IconName;
+  badge?: number;
+}) {
   return (
     <Link
       href={href}
       className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-body text-ink-600 hover:bg-ink-100 hover:text-ink-900 transition-colors"
     >
       <Icon name={icon} size={16} className="text-ink-400" />
-      <span>{children}</span>
+      <span className="flex-1">{children}</span>
+      {typeof badge === "number" && badge > 0 ? (
+        <span className="rounded-full bg-signal-hold/15 text-signal-hold text-[10px] font-medium px-2 py-0.5 tabular-nums">
+          {badge}
+        </span>
+      ) : null}
     </Link>
   );
 }

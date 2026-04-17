@@ -42,6 +42,12 @@ import {
   deleteEventOption,
 } from "@/lib/eventoptions";
 import { parseLocalInput } from "@/lib/time";
+import {
+  needsApproval,
+  pendingApproval,
+  requestApproval,
+  approvalThreshold,
+} from "@/lib/approvals";
 
 export const dynamic = "force-dynamic";
 
@@ -56,9 +62,51 @@ const TABS: readonly Tab[] = ["invitees", "schedule", "content", "arrivals"] as 
 
 async function sendAction(formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
   const id = String(formData.get("id"));
   const channel = String(formData.get("channel") ?? "both") as "email" | "sms" | "both";
+
+  // Compute recipient count for the chosen channel. Same predicate as the
+  // header's pre-send summary so the approval threshold check is honest.
+  const [emailCount, smsCount] = await Promise.all([
+    channel === "sms"
+      ? Promise.resolve(0)
+      : prisma.invitee.count({
+          where: {
+            campaignId: id,
+            email: { not: null },
+            NOT: { invitations: { some: { channel: "email", status: { in: ["sent", "delivered"] } } } },
+          },
+        }),
+    channel === "email"
+      ? Promise.resolve(0)
+      : prisma.invitee.count({
+          where: {
+            campaignId: id,
+            phoneE164: { not: null },
+            NOT: { invitations: { some: { channel: "sms", status: { in: ["sent", "delivered"] } } } },
+          },
+        }),
+  ]);
+  const recipients = emailCount + smsCount;
+
+  // Admin bypasses the approval gate — their click IS the approval.
+  const myRole = me.role as "admin" | "editor" | "viewer";
+  if (needsApproval(recipients) && myRole !== "admin") {
+    await requestApproval({
+      campaignId: id,
+      channel,
+      recipientCount: recipients,
+      requestedBy: me.id,
+    });
+    setFlash({
+      kind: "info",
+      text: "Approval requested",
+      detail: `An admin needs to approve this send (${recipients.toLocaleString()} recipients).`,
+    });
+    redirect(`/campaigns/${id}`);
+  }
+
   await sendCampaign(id, { channel, onlyUnsent: true });
   redirect(`/campaigns/${id}`);
 }
@@ -239,6 +287,8 @@ export default async function CampaignWorkspace({
     alreadySmsSent,
   };
 
+  const pendingApprovalRow = await pendingApproval(campaign.id);
+
   // Per-tab data loaders. Only pay for what we render.
   const tabData = await loadForTab(campaign.id, tab, searchParams);
 
@@ -308,6 +358,18 @@ export default async function CampaignWorkspace({
         invited={stats.total}
         responded={stats.responded}
       />
+      {pendingApprovalRow ? (
+        <div className="mb-6 max-w-4xl rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold px-4 py-3 flex items-center justify-between gap-4">
+          <div className="text-body">
+            An admin needs to approve this send — <span className="tabular-nums font-medium">{pendingApprovalRow.recipientCount.toLocaleString()} recipients</span> on <span className="uppercase">{pendingApprovalRow.channel}</span>.
+          </div>
+          {canDelete ? (
+            <Link href="/approvals" className="btn btn-soft text-mini">Review</Link>
+          ) : (
+            <span className="text-mini text-ink-500">Waiting on admin</span>
+          )}
+        </div>
+      ) : null}
       <Tabs active={tab} items={tabsItems} />
 
       <div className="pt-8">
