@@ -4,15 +4,18 @@ import { Shell } from "@/components/Shell";
 import { Badge } from "@/components/Badge";
 import { getCurrentUser, requireRole } from "@/lib/auth";
 import { findCheckInByToken, markArrived, undoArrived } from "@/lib/checkin";
+import { rateLimit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
 const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 const fmt = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: TZ });
 
-async function confirm(token: string) {
+async function confirmArrival(token: string) {
   "use server";
   const me = await requireRole("editor");
+  const rl = rateLimit(`checkin:${me.id}`, { capacity: 20, refillPerSec: 1 });
+  if (!rl.ok) redirect(`/checkin/${token}?e=rate`);
   await markArrived(token, me.id);
   redirect(`/checkin/${token}?done=1`);
 }
@@ -20,6 +23,8 @@ async function confirm(token: string) {
 async function undo(token: string) {
   "use server";
   const me = await requireRole("editor");
+  const rl = rateLimit(`checkin:${me.id}`, { capacity: 20, refillPerSec: 1 });
+  if (!rl.ok) redirect(`/checkin/${token}?e=rate`);
   await undoArrived(token, me.id);
   redirect(`/checkin/${token}`);
 }
@@ -29,7 +34,7 @@ export default async function CheckIn({
   searchParams,
 }: {
   params: { token: string };
-  searchParams: { done?: string };
+  searchParams: { done?: string; e?: string };
 }) {
   const user = await getCurrentUser();
   if (!user) redirect(`/login?returnTo=${encodeURIComponent(`/checkin/${params.token}`)}`);
@@ -39,9 +44,10 @@ export default async function CheckIn({
   const resp = inv.response;
   const isAttending = !!resp?.attending;
   const arrived = !!resp?.checkedInAt;
-  const confirmBound = confirm.bind(null, params.token);
+  const confirmBound = confirmArrival.bind(null, params.token);
   const undoBound = undo.bind(null, params.token);
   const showDone = searchParams.done === "1" || arrived;
+  const rateLimited = (searchParams as { e?: string }).e === "rate";
 
   return (
     <Shell
@@ -84,6 +90,12 @@ export default async function CheckIn({
 
         {arrived && resp?.checkedInAt ? (
           <p className="text-xs text-ink-400 mt-3 tabular-nums">Arrived {fmt.format(resp.checkedInAt)}</p>
+        ) : null}
+
+        {rateLimited ? (
+          <p role="alert" className="text-xs text-signal-fail mt-3">
+            Too many check-ins in a short window. Take a breath and try again.
+          </p>
         ) : null}
 
         <div className="mt-10 flex items-center justify-center gap-3">

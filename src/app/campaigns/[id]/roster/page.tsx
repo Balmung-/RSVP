@@ -16,7 +16,13 @@ const whenFmt = new Intl.DateTimeFormat("en-GB", {
 // header. Groups attendees by organization; declined + pending listed below
 // for completeness (useful at the door for last-minute walk-ups).
 
-export default async function Roster({ params }: { params: { id: string } }) {
+export default async function Roster({
+  params,
+  searchParams,
+}: {
+  params: { id: string };
+  searchParams: { sensitive?: string };
+}) {
   if (!(await isAuthed())) redirect("/login");
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
@@ -25,6 +31,7 @@ export default async function Roster({ params }: { params: { id: string } }) {
     include: { response: true },
     orderBy: [{ organization: "asc" }, { fullName: "asc" }],
   });
+  const sensitive = searchParams.sensitive === "1";
 
   const attending = invitees.filter((i) => i.response?.attending);
   const declined = invitees.filter((i) => i.response && !i.response.attending);
@@ -37,8 +44,14 @@ export default async function Roster({ params }: { params: { id: string } }) {
     <div className="print-roster min-h-screen bg-white text-ink-900 p-10 print:p-6">
       <style>{`
         @media print {
-          @page { margin: 16mm; }
+          @page { size: A4; margin: 16mm; }
           .no-print { display: none !important; }
+          .print-roster { font-size: 11px; }
+        }
+        .print-roster {
+          font-family:
+            "Noto Naskh Arabic", "Amiri", var(--font-sans),
+            -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         }
         .print-roster table { width: 100%; border-collapse: collapse; }
         .print-roster th, .print-roster td {
@@ -50,6 +63,10 @@ export default async function Roster({ params }: { params: { id: string } }) {
         .print-roster h2 { font-size: 14px; font-weight: 600; margin-top: 28px; margin-bottom: 8px; }
         .print-roster h3 { font-size: 12px; font-weight: 600; color: #3a3a38; margin-top: 14px; margin-bottom: 6px; }
         .print-roster .meta { font-size: 12px; color: #5a5a57; }
+        .print-roster .foot {
+          font-size: 10px; color: #5a5a57; text-align: center; margin-top: 40px;
+          border-top: 1px solid #e8e8e6; padding-top: 10px;
+        }
       `}</style>
 
       <header className="flex items-start justify-between border-b border-ink-200 pb-4 mb-6">
@@ -63,7 +80,14 @@ export default async function Roster({ params }: { params: { id: string } }) {
             Attending {attending.length} · Headcount {attendingHeadcount} · Declined {declined.length} · Pending {pending.length}
           </div>
         </div>
-        <div className="no-print">
+        <div className="no-print flex items-center gap-3">
+          <a
+            href={`?${sensitive ? "" : "sensitive=1"}`}
+            className="btn-ghost text-xs"
+            title={sensitive ? "Hide emails/phones" : "Show full contact details"}
+          >
+            {sensitive ? "Hide contacts" : "Show contacts"}
+          </a>
           <PrintButton />
         </div>
       </header>
@@ -140,16 +164,32 @@ export default async function Roster({ params }: { params: { id: string } }) {
                 <tr key={i.id}>
                   <td>{i.fullName}</td>
                   <td>{i.organization ?? ""}</td>
-                  <td>{i.email ?? ""}</td>
-                  <td>{i.phoneE164 ?? ""}</td>
+                  <td>{sensitive ? (i.email ?? "") : redactEmail(i.email)}</td>
+                  <td>{sensitive ? (i.phoneE164 ?? "") : redactPhone(i.phoneE164)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </section>
       ) : null}
+
+      <div className="foot">
+        Confidential — destroy after the event.
+      </div>
     </div>
   );
+}
+
+function redactEmail(e: string | null | undefined): string {
+  if (!e) return "";
+  const at = e.indexOf("@");
+  if (at < 0) return "•••";
+  return `•••${e.slice(at)}`;
+}
+
+function redactPhone(p: string | null | undefined): string {
+  if (!p) return "";
+  return p.length <= 4 ? p : `${"•".repeat(Math.max(0, p.length - 4))}${p.slice(-4)}`;
 }
 
 function groupByOrg<T extends { organization: string | null }>(rows: T[]): Record<string, T[]> {

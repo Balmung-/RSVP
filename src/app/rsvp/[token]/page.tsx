@@ -8,6 +8,8 @@ import RsvpForm from "./form";
 
 export const dynamic = "force-dynamic";
 
+const APP_URL = process.env.APP_URL ?? "http://localhost:3000";
+
 async function submit(_prev: SubmitResult | null, formData: FormData): Promise<SubmitResult> {
   "use server";
   const token = String(formData.get("token") ?? "");
@@ -73,13 +75,11 @@ export default async function RsvpPage({
   // they pick yes/no.
   const priorAttending = inv.response?.attending ?? null;
 
-  // Pre-render the admission QR when the invitee has already said yes — shown
-  // in the form's "Thank you" state for them to save / print / show at the
-  // door. For no/pending responses we skip the cost.
-  const appUrl = process.env.APP_URL ?? "http://localhost:3000";
+  // Pre-render the admission QR when the invitee has already said yes —
+  // shown in the form's "Thank you" state. Cached per token in checkin.ts.
   const admissionQr =
     inv.response?.attending
-      ? await renderCheckInQrDataUrl(checkInUrl(appUrl, inv.rsvpToken))
+      ? await renderCheckInQrDataUrl(checkInUrl(APP_URL, inv.rsvpToken))
       : null;
 
   const brandColor = inv.campaign.brandColor && /^#[0-9A-Fa-f]{3,8}$/.test(inv.campaign.brandColor)
