@@ -132,7 +132,7 @@ export function CampaignHeader({
 export function CampaignHeaderCrumb({ campaign }: { campaign: Campaign }) {
   return (
     <span>
-      <Link href="/" className="hover:text-ink-900 transition-colors">Campaigns</Link>
+      <Link href="/campaigns" className="hover:text-ink-900 transition-colors">Campaigns</Link>
       <span className="mx-1.5 text-ink-300">/</span>
       <span className="truncate">{campaign.name}</span>
     </span>

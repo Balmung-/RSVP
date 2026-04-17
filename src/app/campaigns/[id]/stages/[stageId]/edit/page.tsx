@@ -89,7 +89,7 @@ export default async function EditStage({
       title="Edit stage"
       crumb={
         <span>
-          <Link href="/" className="hover:underline">Campaigns</Link>
+          <Link href="/campaigns" className="hover:underline">Campaigns</Link>
           <span className="mx-1.5 text-ink-300">/</span>
           <Link href={`/campaigns/${c.id}`} className="hover:underline">{c.name}</Link>
           <span className="mx-1.5 text-ink-300">/</span>

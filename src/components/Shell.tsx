@@ -36,7 +36,8 @@ export async function Shell({
           <span className="text-[15px] font-medium tracking-tight">Einai</span>
         </Link>
         <nav className="flex flex-col gap-0.5">
-          <NavLink href="/" icon="calendar-check">Campaigns</NavLink>
+          <NavLink href="/" icon="dashboard">Overview</NavLink>
+          <NavLink href="/campaigns" icon="calendar-check">Campaigns</NavLink>
           <NavLink href="/contacts" icon="users">Contacts</NavLink>
           {isAdmin ? <NavLink href="/users" icon="user-plus">Team</NavLink> : null}
           {isAdmin ? <NavLink href="/events" icon="list">Events</NavLink> : null}

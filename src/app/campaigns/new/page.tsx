@@ -52,8 +52,8 @@ function safeUrl(raw: string): string | null {
 export default async function NewCampaign() {
   if (!(await isAuthed())) redirect("/login");
   return (
-    <Shell title="New campaign" crumb={<Link href="/">Campaigns</Link>}>
-      <CampaignForm action={createCampaign} submitLabel="Create campaign" cancelHref="/" />
+    <Shell title="New campaign" crumb={<Link href="/campaigns">Campaigns</Link>}>
+      <CampaignForm action={createCampaign} submitLabel="Create campaign" cancelHref="/campaigns" />
     </Shell>
   );
 }

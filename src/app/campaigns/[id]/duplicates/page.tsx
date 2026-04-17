@@ -28,7 +28,7 @@ export default async function DuplicatesPage({ params }: { params: { id: string 
       title="Duplicates"
       crumb={
         <span>
-          <Link href="/" className="hover:underline">Campaigns</Link>
+          <Link href="/campaigns" className="hover:underline">Campaigns</Link>
           <span className="mx-1.5 text-ink-300">/</span>
           <Link href={`/campaigns/${c.id}`} className="hover:underline">{c.name}</Link>
           <span className="mx-1.5 text-ink-300">/</span>
