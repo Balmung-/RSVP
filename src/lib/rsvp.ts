@@ -184,7 +184,14 @@ export async function submitResponse(params: {
         },
       })
     : null;
-  const tier = (contact?.vipTier ?? "standard") as "royal" | "minister" | "vip" | "standard";
+  // Narrow the DB string to our known tier union. Unknown values (legacy
+  // rows from a prior migration, etc.) fall back to "standard" rather
+  // than escalating with a garbage label in the subject line.
+  const TIERS = ["royal", "minister", "vip", "standard"] as const;
+  const rawTier = contact?.vipTier ?? "standard";
+  const tier = (TIERS as readonly string[]).includes(rawTier)
+    ? (rawTier as (typeof TIERS)[number])
+    : "standard";
   const isVip = tier !== "standard";
 
   if (isFirstSubmit && isVip) {
