@@ -1381,3 +1381,33 @@ Acknowledging both prior audit notes from GPT:
 Files: `Agent chat.md`
 
 - status: informational (no code changed; protocol catch-up)
+
+### 2026-04-18 - audit note - todo drift / Phase A reality check
+
+> GPT: audit note - the checklist in this file is now materially behind the actual codebase. Claude should treat this as the current Phase A status snapshot before continuing.
+> - Implemented in code already:
+>   - A1 schema exists in `prisma/schema.prisma` (`ChatSession`, `ChatMessage`, indexes, `isError` follow-up column).
+>   - A2 registry/dispatcher/types exist under `src/lib/ai/tools/`.
+>   - A3 tools 1-5 now exist: `list_campaigns`, `campaign_detail`, `search_contacts`, `recent_activity`, `draft_campaign`.
+>   - A4 base `/api/chat` route exists and streams SSE from `src/app/api/chat/route.ts`.
+>   - A5 standalone `/chat` page + `ChatPanel` + directive registry exist.
+>   - A6 context builder exists in `src/lib/ai/context.ts`.
+>   - A7 system prompt builder exists in `src/lib/ai/system-prompt.ts`.
+> - Todo text drift / stale assumptions:
+>   - The checklist still says `toolInput/toolOutput/renderDirective` are `Json`; implementation uses stringified `String?` fields by design.
+>   - The checklist says `zod`; implementation uses JSON Schema + per-tool `validate()`.
+>   - The checklist says env goes through an existing env module; implementation reads `process.env.ANTHROPIC_API_KEY` inline in the route.
+>   - The checklist says rate limit `10 msg/min/user`; implementation is burst `8` with refill `0.3/s` (`src/app/api/chat/route.ts:84-89`).
+>   - The checklist says tool audit events are `chat.tool.*`; implementation currently logs `ai.tool.<name>` (`src/app/api/chat/route.ts:406-417`).
+>   - The checklist says prompt caching is active; it is NOT yet wired. Route still uses stable `client.messages.create(... system: string ...)` and comments explicitly defer `cache_control` / beta prompt caching.
+>   - The checklist says context is memoized per session with 60s TTL; current code only uses `React.cache()` request-scope memoization.
+> - Still actually open for Phase A exit:
+>   - `propose_send` destructive tool.
+>   - `/api/chat/confirm/[messageId]` route. Current route comment still says this lands in Push 7.
+>   - `ConfirmSend` directive/component.
+>   - Shell surfacing: no Chat entry in `AvatarMenu`, no chat shortcut in `CommandPalette`, and `/chat` is still described in code as a smoke-test route.
+>   - Remaining fixed-registry phase-A components from the plan (`Stat`, `Empty`) if they are still desired.
+>   - Audit event names for confirm/denied flows (`chat.confirm.*`, `chat.denied`) if that naming is still the requirement.
+>   - Repo-owned tests: I did not find project test files outside `node_modules`.
+> - Recommendation:
+>   - Before Push 7, update the Phase A checklist body in this doc so it matches reality. Right now Claude could "complete" work against stale boxes and drift on scope/naming/caching assumptions.
