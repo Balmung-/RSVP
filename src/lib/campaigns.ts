@@ -414,44 +414,6 @@ function push<T>(map: Map<string, T[]>, key: string, v: T) {
   map.set(key, arr);
 }
 
-// Count live (still-failing) Invitations on a campaign. A failure is "live"
-// if nothing later succeeded on that (invitee, channel). Matches the
-// /deliverability page's definition so the banner count and the filtered
-// list stay in sync. Scoped to the last 60 days like /deliverability.
-export async function liveFailureCount(campaignId: string): Promise<{
-  total: number;
-  email: number;
-  sms: number;
-}> {
-  const since = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
-  const failures = await prisma.invitation.findMany({
-    where: {
-      campaignId,
-      status: { in: ["failed", "bounced"] },
-      createdAt: { gte: since },
-    },
-    select: { inviteeId: true, channel: true, createdAt: true },
-  });
-  if (failures.length === 0) return { total: 0, email: 0, sms: 0 };
-  const laterOk = await prisma.invitation.groupBy({
-    by: ["inviteeId", "channel"],
-    where: {
-      campaignId,
-      status: { in: ["sent", "delivered"] },
-      inviteeId: { in: failures.map((f) => f.inviteeId) },
-    },
-    _max: { createdAt: true },
-  });
-  const okAt = new Map<string, Date>();
-  for (const g of laterOk) {
-    if (g._max.createdAt) okAt.set(`${g.inviteeId}:${g.channel}`, g._max.createdAt);
-  }
-  let email = 0;
-  let sms = 0;
-  for (const f of failures) {
-    const ok = okAt.get(`${f.inviteeId}:${f.channel}`);
-    if (ok && ok >= f.createdAt) continue;
-    if (f.channel === "email") email++; else if (f.channel === "sms") sms++;
-  }
-  return { total: email + sms, email, sms };
-}
+// Re-export from lib/deliverability so existing callers continue to
+// work while the authoritative implementation lives there.
+export { liveFailureCount } from "./deliverability";

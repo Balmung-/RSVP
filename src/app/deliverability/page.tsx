@@ -10,6 +10,7 @@ import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 import { scopedCampaignWhere, canSeeCampaign } from "@/lib/teams";
+import { filterLiveFailures } from "@/lib/deliverability";
 
 export const dynamic = "force-dynamic";
 
@@ -144,25 +145,10 @@ export default async function Deliverability({
     take: 500,
   });
 
-  // A failure is "live" only if nothing later succeeded on that (invitee,
-  // channel). A quick index pass over the same list handles the common
-  // case; for anything else we fall back to a single grouped query.
-  const laterOk = await prisma.invitation.groupBy({
-    by: ["inviteeId", "channel"],
-    where: {
-      inviteeId: { in: failures.map((f) => f.inviteeId) },
-      status: { in: ["sent", "delivered"] },
-    },
-    _max: { createdAt: true },
-  });
-  const okAt = new Map<string, Date>();
-  for (const g of laterOk) {
-    if (g._max.createdAt) okAt.set(`${g.inviteeId}:${g.channel}`, g._max.createdAt);
-  }
-  const live = failures.filter((f) => {
-    const ok = okAt.get(`${f.inviteeId}:${f.channel}`);
-    return !ok || ok < f.createdAt;
-  });
+  // Delegate the "no later success" filter to the shared helper so
+  // this page, the workspace banner, and the digest all agree on
+  // what "live" means.
+  const live = await filterLiveFailures(failures);
 
   // Campaign dropdown — only campaigns that actually have failures in
   // range AND that the caller can see (matches the main list scope).

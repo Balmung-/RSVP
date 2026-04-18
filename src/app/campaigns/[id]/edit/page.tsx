@@ -8,6 +8,7 @@ import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
 import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
+import { safeBrandUrl } from "@/lib/attachments";
 
 export const dynamic = "force-dynamic";
 
@@ -59,24 +60,12 @@ async function updateCampaign(id: string, formData: FormData) {
       templateEmail: String(formData.get("templateEmail") ?? "").trim().slice(0, 5000) || null,
       templateSms: String(formData.get("templateSms") ?? "").trim().slice(0, 500) || null,
       brandColor,
-      brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
-      brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
+      brandLogoUrl: safeBrandUrl(String(formData.get("brandLogoUrl") ?? "")),
+      brandHeroUrl: safeBrandUrl(String(formData.get("brandHeroUrl") ?? "")),
       ...teamPatch,
     },
   });
   redirect(`/campaigns/${id}`);
-}
-
-function safeUrl(raw: string): string | null {
-  const s = raw.trim();
-  if (!s || s.length > 500) return null;
-  if (s.startsWith("/") && !s.startsWith("//")) return s;
-  try {
-    const u = new URL(s);
-    return u.protocol === "https:" || u.protocol === "http:" ? s : null;
-  } catch {
-    return null;
-  }
 }
 
 async function deleteCampaign(id: string) {

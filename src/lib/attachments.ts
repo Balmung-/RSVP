@@ -27,6 +27,16 @@ export function isSafeUrl(raw: string): boolean {
   }
 }
 
+// Trimming wrapper for form inputs — returns the cleaned URL on pass,
+// null on fail. Accepts a tighter max (brand URLs shouldn't be 2KB) so
+// the two previous duplicate local `safeUrl` helpers on the campaign
+// new/edit pages can call into one place.
+export function safeBrandUrl(raw: string): string | null {
+  const s = raw.trim();
+  if (!s || s.length > 500) return null;
+  return isSafeUrl(s) ? s : null;
+}
+
 export async function listAttachments(campaignId: string) {
   return prisma.campaignAttachment.findMany({
     where: { campaignId },

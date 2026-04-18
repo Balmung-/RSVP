@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { getEmailProvider } from "./providers";
 import { logAction } from "./audit";
+import { liveFailures } from "./deliverability";
 
 // Once-a-day digest for admins. Summary of:
 //   - live send failures per campaign
@@ -119,53 +120,33 @@ type CampaignFailureRow = {
 
 async function buildSummary(now: Date) {
   const since24h = new Date(now.getTime() - 24 * 3600_000);
-  const failureLookbackSince = new Date(now.getTime() - 60 * 24 * 3600_000);
 
-  const [failures, newUnsubs, pendingApprovals, inboxToReview, activeCampaignCount] =
+  // Shared liveFailures() handles the "failure minus later success"
+  // filter that used to live here as a copy-pasted groupBy; this keeps
+  // the digest's tally in lockstep with the /deliverability page and
+  // the campaign workspace banner.
+  const [live, newUnsubs, pendingApprovals, inboxToReview, activeCampaignCount] =
     await Promise.all([
-      prisma.invitation.findMany({
-        where: {
-          status: { in: ["failed", "bounced"] },
-          createdAt: { gte: failureLookbackSince },
-        },
-        select: { inviteeId: true, channel: true, createdAt: true, campaignId: true },
-      }),
+      liveFailures(),
       prisma.unsubscribe.count({ where: { createdAt: { gte: since24h } } }),
       prisma.sendApproval.count({ where: { status: "pending" } }),
       prisma.inboundMessage.count({ where: { status: "needs_review" } }),
       prisma.campaign.count({ where: { status: { in: ["draft", "active", "sending"] } } }),
     ]);
 
-  // Filter out failures that later succeeded on the same (invitee, channel).
   let liveEmail = 0;
   let liveSms = 0;
   const perCampaign = new Map<string, { email: number; sms: number }>();
-  if (failures.length > 0) {
-    const later = await prisma.invitation.groupBy({
-      by: ["inviteeId", "channel"],
-      where: {
-        inviteeId: { in: failures.map((f) => f.inviteeId) },
-        status: { in: ["sent", "delivered"] },
-      },
-      _max: { createdAt: true },
-    });
-    const okAt = new Map<string, Date>();
-    for (const g of later) {
-      if (g._max.createdAt) okAt.set(`${g.inviteeId}:${g.channel}`, g._max.createdAt);
+  for (const f of live) {
+    const slot = perCampaign.get(f.campaignId) ?? { email: 0, sms: 0 };
+    if (f.channel === "email") {
+      slot.email++;
+      liveEmail++;
+    } else if (f.channel === "sms") {
+      slot.sms++;
+      liveSms++;
     }
-    for (const f of failures) {
-      const ok = okAt.get(`${f.inviteeId}:${f.channel}`);
-      if (ok && ok >= f.createdAt) continue;
-      const slot = perCampaign.get(f.campaignId) ?? { email: 0, sms: 0 };
-      if (f.channel === "email") {
-        slot.email++;
-        liveEmail++;
-      } else if (f.channel === "sms") {
-        slot.sms++;
-        liveSms++;
-      }
-      perCampaign.set(f.campaignId, slot);
-    }
+    perCampaign.set(f.campaignId, slot);
   }
 
   let topCampaigns: CampaignFailureRow[] = [];

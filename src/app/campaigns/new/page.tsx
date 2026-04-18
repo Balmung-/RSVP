@@ -9,6 +9,7 @@ import { isAuthed, requireRole, hasRole, getCurrentUser } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
+import { safeBrandUrl } from "@/lib/attachments";
 
 export const dynamic = "force-dynamic";
 
@@ -48,24 +49,12 @@ async function createCampaign(formData: FormData) {
       templateEmail: String(formData.get("templateEmail") ?? "").trim().slice(0, 5000) || null,
       templateSms: String(formData.get("templateSms") ?? "").trim().slice(0, 500) || null,
       brandColor,
-      brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
-      brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
+      brandLogoUrl: safeBrandUrl(String(formData.get("brandLogoUrl") ?? "")),
+      brandHeroUrl: safeBrandUrl(String(formData.get("brandHeroUrl") ?? "")),
       teamId,
     },
   });
   redirect(`/campaigns/${c.id}`);
-}
-
-function safeUrl(raw: string): string | null {
-  const s = raw.trim();
-  if (!s || s.length > 500) return null;
-  if (s.startsWith("/") && !s.startsWith("//")) return s;
-  try {
-    const u = new URL(s);
-    return u.protocol === "https:" || u.protocol === "http:" ? s : null;
-  } catch {
-    return null;
-  }
 }
 
 export default async function NewCampaign({
