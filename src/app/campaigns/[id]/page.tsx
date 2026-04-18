@@ -17,6 +17,7 @@ import {
   resendSelection,
   deleteInvitee,
   findDuplicates,
+  liveFailureCount,
 } from "@/lib/campaigns";
 import { listStages, runStageNow } from "@/lib/stages";
 import { duplicateCampaign } from "@/lib/campaign-duplicate";
@@ -309,6 +310,7 @@ export default async function CampaignWorkspace({
         select: { email: true },
       })
     : null;
+  const atRisk = await liveFailureCount(campaign.id);
 
   // Per-tab data loaders. Only pay for what we render.
   const tabData = await loadForTab(campaign.id, tab, searchParams);
@@ -401,6 +403,27 @@ export default async function CampaignWorkspace({
           ) : (
             <span className="text-mini text-ink-500">Waiting on admin</span>
           )}
+        </div>
+      ) : null}
+      {atRisk.total > 0 ? (
+        <div className="mb-6 max-w-4xl rounded-xl bg-signal-fail/10 border border-signal-fail/30 text-signal-fail px-4 py-3 flex items-center justify-between gap-4">
+          <div className="text-body">
+            <span className="tabular-nums font-medium">{atRisk.total.toLocaleString()}</span>{" "}
+            {atRisk.total === 1 ? "invitee isn't reachable" : "invitees aren't reachable"} —{" "}
+            <span className="text-mini text-ink-500">
+              {atRisk.email > 0 && atRisk.sms > 0
+                ? `${atRisk.email} email · ${atRisk.sms} SMS still failing`
+                : atRisk.email > 0
+                  ? `${atRisk.email} email bouncing or rejected`
+                  : `${atRisk.sms} SMS bouncing or rejected`}
+            </span>
+          </div>
+          <Link
+            href={`/deliverability?campaign=${campaign.id}`}
+            className="btn btn-soft text-mini shrink-0"
+          >
+            Review &amp; retry
+          </Link>
         </div>
       ) : null}
       <Tabs active={tab} items={tabsItems} />
