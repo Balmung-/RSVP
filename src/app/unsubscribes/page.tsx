@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { requireRole } from "@/lib/auth";
 import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
+import { InlineStat } from "@/components/Stat";
 
 export const dynamic = "force-dynamic";
 
@@ -94,9 +95,9 @@ export default async function UnsubscribesPage({
       }
     >
       <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-8">
-        <Stat label={locale === "ar" ? "الإجمالي" : "Total"} value={totalAll} />
-        <Stat label={locale === "ar" ? "بريد" : "Email"} value={emailCount} />
-        <Stat label={locale === "ar" ? "رسائل" : "SMS"} value={smsCount} />
+        <InlineStat label={locale === "ar" ? "الإجمالي" : "Total"} value={totalAll} />
+        <InlineStat label={locale === "ar" ? "بريد" : "Email"} value={emailCount} />
+        <InlineStat label={locale === "ar" ? "رسائل" : "SMS"} value={smsCount} />
       </div>
 
       <div className="mb-6 flex items-center gap-3 flex-wrap">
@@ -191,21 +192,3 @@ function humanReason(reason: string, locale: "en" | "ar"): string {
   return reason;
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <span className="inline-flex items-baseline gap-2">
-      <span
-        className="text-ink-900 tabular-nums"
-        style={{
-          fontSize: "24px",
-          lineHeight: "28px",
-          letterSpacing: "-0.015em",
-          fontWeight: 500,
-        }}
-      >
-        {value.toLocaleString()}
-      </span>
-      <span className="text-micro uppercase tracking-wider text-ink-400">{label}</span>
-    </span>
-  );
-}

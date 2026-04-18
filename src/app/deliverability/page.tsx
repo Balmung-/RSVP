@@ -10,6 +10,7 @@ import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
 import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
+import { InlineStat } from "@/components/Stat";
 import { CampaignScopeSelect } from "./CampaignScopeSelect";
 import { scopedCampaignWhere, canSeeCampaign } from "@/lib/teams";
 import { filterLiveFailures } from "@/lib/deliverability";
@@ -194,13 +195,13 @@ export default async function Deliverability({
       crumb={locale === "ar" ? "إخفاقات الإرسال الحيّة" : "Live send failures"}
     >
       <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-8">
-        <Stat
+        <InlineStat
           label={locale === "ar" ? "إخفاقات حيّة" : "Live failures"}
           value={live.length}
           tone={live.length > 0 ? "fail" : undefined}
         />
-        <Stat label={locale === "ar" ? "عبر البريد" : "Email"} value={emailCount} />
-        <Stat
+        <InlineStat label={locale === "ar" ? "عبر البريد" : "Email"} value={emailCount} />
+        <InlineStat
           label={locale === "ar" ? "عبر الرسائل" : "SMS"}
           value={smsCount}
           hint={bouncedCount ? `${bouncedCount} bounced` : undefined}
@@ -312,37 +313,3 @@ export default async function Deliverability({
   );
 }
 
-// Inline number + label — same shape as the dashboard's reading
-// strip so all the office-wide pages speak one visual voice.
-function Stat({
-  label,
-  value,
-  tone,
-  hint,
-}: {
-  label: string;
-  value: number;
-  tone?: "fail";
-  hint?: string;
-}) {
-  return (
-    <span className="inline-flex items-baseline gap-2">
-      {tone === "fail" ? (
-        <span className="h-1.5 w-1.5 rounded-full translate-y-[-3px] bg-signal-fail" aria-hidden />
-      ) : null}
-      <span
-        className="text-ink-900 tabular-nums"
-        style={{
-          fontSize: "24px",
-          lineHeight: "28px",
-          letterSpacing: "-0.015em",
-          fontWeight: 500,
-        }}
-      >
-        {value.toLocaleString()}
-      </span>
-      <span className="text-micro uppercase tracking-wider text-ink-400">{label}</span>
-      {hint ? <span className="text-mini text-ink-400">· {hint}</span> : null}
-    </span>
-  );
-}

@@ -80,15 +80,18 @@ export function InviteesTab({
       </section>
 
       {duplicatesCount > 0 ? (
-        <Link
-          href={`/campaigns/${campaign.id}/duplicates`}
-          className="flex items-center justify-between rounded-xl border border-signal-hold/30 bg-signal-hold/5 px-4 py-3 text-sm text-signal-hold hover:bg-signal-hold/10 transition-colors"
-        >
-          <span>
-            {duplicatesCount} possible duplicate{duplicatesCount === 1 ? "" : "s"} detected.
+        <div className="flex items-center gap-3 text-mini">
+          <span className="h-1.5 w-1.5 rounded-full bg-signal-hold shrink-0" aria-hidden />
+          <span className="text-ink-900">
+            {duplicatesCount} possible duplicate{duplicatesCount === 1 ? "" : "s"} detected
           </span>
-          <span className="text-xs">Review →</span>
-        </Link>
+          <Link
+            href={`/campaigns/${campaign.id}/duplicates`}
+            className="ms-auto text-ink-500 hover:text-ink-900 underline-offset-4 hover:underline"
+          >
+            Review
+          </Link>
+        </div>
       ) : null}
 
       <div className="flex items-center justify-between gap-3">

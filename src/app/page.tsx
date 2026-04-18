@@ -10,6 +10,7 @@ import { phrase, type ActivityRecord } from "@/lib/activity";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 import { Badge } from "@/components/Badge";
+import { InlineStat } from "@/components/Stat";
 
 export const dynamic = "force-dynamic";
 
@@ -146,14 +147,14 @@ export default async function Dashboard() {
           failure count becomes a link when non-zero; otherwise it's
           just a quiet number. */}
       <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-12 text-ink-600">
-        <Stat label={T.activeCampaigns} value={activeCampaigns} />
-        <Stat
+        <InlineStat label={T.activeCampaigns} value={activeCampaigns} />
+        <InlineStat
           label={T.sendingNow}
           value={sendingCampaigns}
           tone={sendingCampaigns > 0 ? "hold" : undefined}
         />
-        <Stat label={T.responsesThisWeek} value={totalResponses} />
-        <Stat
+        <InlineStat label={T.responsesThisWeek} value={totalResponses} />
+        <InlineStat
           label={T.deliveryFailures7d}
           value={failedInvitations}
           tone={failedInvitations > 0 ? "fail" : undefined}
@@ -208,22 +209,30 @@ export default async function Dashboard() {
           {failedStages.length > 0 ? (
             <section>
               <SectionHeader title="Needs attention" hint="Failed stages in the last 7 days." />
-              <ul className="flex flex-col gap-2">
+              {/* Thin rows instead of bordered signal-fail tiles — a
+                  calm strip with one dot per entry. Matches the
+                  AttentionStrip vocabulary used on the campaign
+                  workspace so signal-fail color stays rare. */}
+              <ul className="flex flex-col divide-y divide-ink-100 border-t border-b border-ink-100">
                 {failedStages.map((s) => (
                   <li key={s.id}>
                     <Link
                       href={`/campaigns/${s.campaign.id}?tab=schedule`}
-                      className="flex items-center justify-between rounded-xl border border-signal-fail/30 bg-signal-fail/5 px-4 py-3 hover:bg-signal-fail/10 transition-colors"
+                      className="flex items-center gap-3 py-3 text-mini hover:text-ink-900 transition-colors"
                     >
-                      <div className="min-w-0">
-                        <div className="text-body text-ink-900 truncate">
-                          {s.campaign.name} · {s.kind.replace("_", " ")}
-                        </div>
-                        {s.error ? (
-                          <div className="text-mini text-signal-fail mt-0.5 truncate max-w-xl">{s.error}</div>
-                        ) : null}
-                      </div>
-                      <Icon name="chevron-right" size={14} className="text-ink-400 shrink-0" />
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-signal-fail shrink-0"
+                        aria-hidden
+                      />
+                      <span className="text-ink-900 truncate">
+                        {s.campaign.name}
+                        <span className="text-ink-400 mx-1.5">·</span>
+                        {s.kind.replace("_", " ")}
+                      </span>
+                      {s.error ? (
+                        <span className="text-ink-500 truncate max-w-md">{s.error}</span>
+                      ) : null}
+                      <Icon name="chevron-right" size={14} className="text-ink-400 shrink-0 ms-auto" />
                     </Link>
                   </li>
                 ))}
@@ -338,62 +347,6 @@ function SectionHeader({
   );
 }
 
-// Inline Stat — number dominates, label recessed beneath. Tone is a
-// small colored dot, not a colored field, so the strip stays calm
-// unless something is actually happening.
-function Stat({
-  label,
-  value,
-  tone,
-  href,
-}: {
-  label: string;
-  value: number;
-  tone?: "hold" | "fail";
-  href?: string;
-}) {
-  const dot =
-    tone === "hold"
-      ? "bg-signal-hold animate-pulse"
-      : tone === "fail"
-        ? "bg-signal-fail"
-        : null;
-  const body = (
-    <span className="inline-flex items-baseline gap-2 group">
-      {dot ? (
-        <span
-          className={`h-1.5 w-1.5 rounded-full translate-y-[-3px] ${dot}`}
-          aria-hidden
-        />
-      ) : null}
-      <span
-        className="text-ink-900 tabular-nums"
-        style={{
-          fontSize: "24px",
-          lineHeight: "28px",
-          letterSpacing: "-0.015em",
-          fontWeight: 500,
-        }}
-      >
-        {value.toLocaleString()}
-      </span>
-      <span className="text-micro uppercase tracking-wider text-ink-400">
-        {label}
-      </span>
-    </span>
-  );
-  if (href) {
-    return (
-      <Link
-        href={href}
-        className="text-ink-900 hover:text-ink-700 transition-colors"
-      >
-        {body}
-      </Link>
-    );
-  }
-  return body;
-}
 
 function ResponseBar({
   attending,
