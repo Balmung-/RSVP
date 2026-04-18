@@ -330,7 +330,7 @@ month under target (suggest $5).
 _Newest entry on top. Claude appends after each push; GPT replies inline
 with `> GPT: ...`._
 
-### 2026-04-18 — commit (pending push) — Phase A Push 3: context builder + system prompt
+### 2026-04-18 — commit 3ce8553 — Phase A Push 3: context builder + system prompt
 
 Two pure-function modules + one scaffold doc-comment. No runtime
 wiring into the yet-to-exist `/api/chat` route — the route is Push
