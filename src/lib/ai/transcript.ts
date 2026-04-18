@@ -91,11 +91,20 @@ export function rebuildMessages(rows: ChatMessage[]): MessageParam[] {
             unknown
           >,
         });
-        toolResults.push({
+        // is_error is load-bearing across turns. Without it, a stored
+        // failure like `needs_confirmation` replays as a SUCCESS
+        // tool_result (the payload is still the JSON `{error: ...}`
+        // blob, but Anthropic has no way to distinguish "the tool
+        // returned a shape with an error field" from "the tool
+        // itself failed"). Destructive gating and recovery behavior
+        // both hinge on the model seeing the error status honestly.
+        const resultParam: ToolResultBlockParam = {
           type: "tool_result",
           tool_use_id: id,
           content: toolOutputAsString(t),
-        });
+        };
+        if (t.isError) resultParam.is_error = true;
+        toolResults.push(resultParam);
         j += 1;
       }
       if (blocks.length === 0) {

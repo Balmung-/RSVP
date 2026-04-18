@@ -439,7 +439,14 @@ model ChatSession {
 // tool rows, `toolName` + `toolInput` + `toolOutput` are populated and
 // `content` holds a short human-readable summary. `renderDirective` is
 // a typed JSON payload ({ kind, props }) the client matches against a
-// fixed registry; unknown kinds are dropped client-side.
+// fixed registry; unknown kinds are dropped client-side. `isError`
+// is a load-bearing flag on tool rows: it's forwarded to
+// ToolResultBlockParam.is_error when the transcript is replayed to
+// Anthropic on later turns, so a stored failure (e.g.
+// `needs_confirmation`, invalid input, handler throw) stays marked
+// as an error rather than being replayed as a successful payload.
+// Default false is a safe no-op for user/assistant rows and for
+// tool rows that completed successfully.
 model ChatMessage {
   id               String      @id @default(cuid())
   sessionId        String
@@ -450,6 +457,7 @@ model ChatMessage {
   toolInput        String?     // JSON
   toolOutput       String?     // JSON
   renderDirective  String?     // JSON
+  isError          Boolean     @default(false)
   createdAt        DateTime    @default(now())
 
   @@index([sessionId, createdAt])

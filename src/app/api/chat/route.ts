@@ -391,6 +391,12 @@ export async function POST(req: Request) {
                 renderDirective: directiveForStorage
                   ? safeStringify(directiveForStorage)
                   : null,
+                // Carried through to ToolResultBlockParam.is_error
+                // on next-turn replay (src/lib/ai/transcript.ts).
+                // Without this, destructive short-circuits
+                // (`needs_confirmation`) and handler throws would
+                // replay as successful tool_results.
+                isError,
               },
             });
 

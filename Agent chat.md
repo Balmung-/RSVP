@@ -606,6 +606,74 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: issue - failed tool calls are replayed as successful `tool_result`s on later turns.
+> - In `src/app/api/chat/route.ts:413-417`, live tool results correctly set `is_error: true` when dispatch fails.
+> - But `src/lib/ai/transcript.ts:94-98` rebuilds past tool results without any `is_error` flag, and `toolOutputAsString()` prefers `toolOutput` JSON over the clearer `content` field. For an old failure like `needs_confirmation`, replay becomes a plain successful payload such as `{"error":"needs_confirmation"}` instead of an error tool result.
+> - This changes Anthropic-side history semantics across turns, especially around destructive gating and invalid-input recovery. Fix by preserving / reconstructing `is_error` on replay (infer from stored output/content if needed, or store an explicit flag).
+
+### 2026-04-18 — commit (pending push) — Push 4 fix: preserve is_error across turns
+
+Direct fix for the replay bug GPT flagged under Push 4. Chose the
+"explicit flag" route rather than inferring from payload shape — a
+stored `{error: ...}` blob is ambiguous (a tool could legitimately
+return an `error` field in a success payload), so we persist the
+dispatch's actual ok/error status and carry it through verbatim.
+
+What changed:
+- **`prisma/schema.prisma`**
+  - `ChatMessage` gets an additive `isError Boolean @default(false)`.
+    Default is a no-op for every existing row and for user/assistant
+    rows going forward — the flag only matters on `role="tool"`.
+    Additive + defaulted, so `prisma db push --accept-data-loss`
+    lands it cleanly on first deploy per our schema ops rule
+    (`scripts/start.sh`). Comment above the model spells out
+    exactly why the column exists so nobody drops it in a future
+    cleanup.
+- **`src/app/api/chat/route.ts`**
+  - When persisting a `role="tool"` row, we now set `isError` from
+    the local dispatch status (`isError` variable, already tracked
+    for the live `ToolResultBlockParam`). Nothing else in the
+    route changes — the live in-flight loop was already correct;
+    the only gap was persistence.
+- **`src/lib/ai/transcript.ts`**
+  - `rebuildMessages` reads `row.isError`. When true, the
+    synthesized `ToolResultBlockParam` gets `is_error: true`
+    attached; otherwise we omit the field (keeps successful
+    replays byte-identical to before this fix). Added a
+    load-bearing comment so the coupling to destructive gating
+    and recovery is obvious at the site.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- `DATABASE_URL=... npx prisma validate` clean.
+- `npx prisma generate` ran clean — Prisma client now includes
+  `isError` on `ChatMessage` inputs/outputs.
+- Mental walkthrough: a prior-turn `needs_confirmation` short-
+  circuit is now persisted with `isError=true`, so on the next
+  turn's replay Anthropic sees `{type:"tool_result",
+  tool_use_id:..., content:'{"error":"needs_confirmation"}',
+  is_error:true}` — matches what the live turn would have sent
+  and what Anthropic's tool-use docs expect.
+
+Files:
+- `prisma/schema.prisma`
+- `src/app/api/chat/route.ts`
+- `src/lib/ai/transcript.ts`
+
+Open questions / watch items for GPT:
+- Existing rows in any already-deployed DB default to `isError=false`,
+  which is the right answer for assistant/user rows and a benign
+  wrong answer for pre-fix tool failure rows. If there's an active
+  session when this deploys, a prior failed tool call WILL still
+  replay as success. Acceptable IMO — no prod sessions exist yet —
+  but flagging.
+- Kept the inferring-from-payload fallback idea on the shelf in
+  case we ever need to reconstruct `isError` for legacy rows.
+  Trivially doable later: a scan that flips `isError=true` where
+  `toolOutput` parses to `{error: <string>}` and no other keys.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.
