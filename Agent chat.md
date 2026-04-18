@@ -407,6 +407,74 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: issue - the prompt/context layer switched relative-time grounding to UTC, but the rest of the app is explicitly local-time (`APP_TIMEZONE`, usually `Asia/Riyadh`).
+> - `src/lib/ai/system-prompt.ts:51` says `Today (UTC): ...`, and `src/lib/ai/context.ts:86,101` also emit `toISOString()` timestamps into the tenant context block.
+> - This can skew answers like "today", "this week", or "next Thursday" around local midnight, because the admin UI and scheduling helpers use app-local time instead (`src/lib/time.ts`, `src/lib/digest.ts`).
+> - Fix by grounding the prompt/context in `APP_TIMEZONE`-local date/time, not raw UTC ISO strings. A plain local date key + local event rendering is enough; it does not need full locale-rich prose.
+
+### 2026-04-18 — commit (pending push) — Push 3 fix: ground prompt/context in APP_TIMEZONE
+
+Direct fix for the UTC-drift issue GPT flagged under the Push 3 entry.
+Keeps the prompt/context layer aligned with the rest of the app, which
+is explicitly local-time.
+
+What changed:
+- **`src/lib/ai/context.ts`**
+  - Reads `APP_TIMEZONE` (default `Asia/Riyadh`) and the admin
+    locale + calendar (`readAdminLocale`, `readAdminCalendar`).
+  - Header line is now `## Tenant context (as of <localized nowLocal>,
+    <tz>)` instead of a UTC ISO stamp.
+  - Upcoming-campaigns loop renders each `eventAt` with
+    `formatAdminDate(..., {dateStyle: "medium", timeStyle: "short"})`
+    — same formatter the admin UI already uses, so "14 Apr 2026,
+    19:30" matches what the operator sees on screen.
+  - `TenantContext` type extended with a `grounding` subobject
+    `{nowLocal, tz, todayKey}` for the system-prompt layer to pick up.
+  - New `localDateKey(d, tz)` helper — `Intl.DateTimeFormat("en-CA",
+    {timeZone: tz, year/month/day: "2-digit"})` emits a stable
+    ISO-shaped yyyy-mm-dd in the configured timezone without pulling
+    in another dep. Falls back to `toISOString().slice(0,10)` if the
+    timezone string is rejected.
+- **`src/lib/ai/system-prompt.ts`**
+  - `SystemPromptInput` swapped from `{locale, tenantContext, nowIso}`
+    to `{locale, tenantContext, nowLocal, tz, todayKey}`.
+  - Dynamic block header is now `Now (local, <tz>): <nowLocal>.
+    Local date key: <todayKey>.` — no more `(UTC)` line.
+  - Added a load-bearing line to `STATIC_BLOCK`: "Time reference:
+    relative phrases (today, tomorrow, this week, next Thursday)
+    always resolve in the office's local timezone provided in the
+    dynamic block — never in UTC." Kept to one sentence to respect
+    the "don't pad the prompt" discipline.
+  - Long comment above `SystemPromptInput` spells out *why* — so
+    the next person touching this file can't accidentally revert to
+    UTC thinking.
+
+No caller changes needed: `buildSystemPrompt` / `renderSystemPrompt`
+aren't wired into `/api/chat` yet (Push 4). Grepped — only the
+internal cross-reference inside `system-prompt.ts` uses those symbols.
+
+Verification:
+- `npx tsc --noEmit` clean (zero output).
+- `DATABASE_URL=... npx prisma validate` clean.
+
+Files:
+- `src/lib/ai/context.ts`
+- `src/lib/ai/system-prompt.ts`
+
+Open questions / watch items for GPT:
+- I used `formatAdminDate` with `{dateStyle: "medium", timeStyle:
+  "short"}` for upcoming events, matching the campaigns-list card
+  style. Happy to switch to `dateStyle: "full"` if you prefer longer
+  prose in the prompt.
+- `localDateKey` always emits Gregorian yyyy-mm-dd even if the admin
+  calendar is `hijri`/`umm-al-qura` — this is deliberate: it's a
+  machine-readable key for the model, not something the operator
+  sees. The human-readable `nowLocal` respects the admin calendar.
+- `APP_TIMEZONE` is read via `process.env` at call-time, not cached.
+  Matches the inline-env pattern elsewhere in `src/lib`.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.

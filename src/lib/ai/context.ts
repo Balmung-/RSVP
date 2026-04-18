@@ -6,6 +6,11 @@ import { scopedCampaignWhere } from "@/lib/teams";
 import { getNotifications } from "@/lib/notifications";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
 import { DELIVERED_FAIL_STATUSES } from "@/lib/statuses";
+import {
+  readAdminLocale,
+  readAdminCalendar,
+  formatAdminDate,
+} from "@/lib/adminLocale";
 
 // "Awareness context" — the structured snapshot of what matters right
 // now in the tenant, dropped into the system prompt so the assistant
@@ -36,20 +41,54 @@ export type TenantContext = {
     vipCount: number;
     notifications: number;
   };
+  // Grounding tokens for the system-prompt dynamic block. Both are
+  // rendered in APP_TIMEZONE (default Asia/Riyadh), NOT UTC — the
+  // rest of the app works in local time (see src/lib/time.ts), and
+  // relative-time questions ("today", "this week") must agree with
+  // what the operator sees on screen.
+  grounding: {
+    nowLocal: string; // full local date+time for the prompt header
+    tz: string;       // APP_TIMEZONE value
+    todayKey: string; // local ISO-ish yyyy-mm-dd for unambiguous math
+  };
 };
 
 const HORIZON_DAYS = 7;
 const VIP_LIMIT = 5;
 const UPCOMING_LIMIT = 8;
 
+// Produce a yyyy-mm-dd string in the configured APP_TIMEZONE without
+// pulling in another dep — Intl.DateTimeFormat in en-CA happens to
+// emit ISO-shaped dates, which is stable across Node versions.
+function localDateKey(d: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
 export const buildContext = cache(async function buildContext(
   user: User,
 ): Promise<TenantContext> {
   const isAdmin = hasRole(user, "admin");
+  const locale = readAdminLocale();
+  const calendar = readAdminCalendar();
+  const tz = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
   const campaignScope = await scopedCampaignWhere(user.id, isAdmin);
   const now = new Date();
   const horizon = new Date(now.getTime() + HORIZON_DAYS * 24 * 3600_000);
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
+  const nowLocal = formatAdminDate(now, locale, calendar, {
+    dateStyle: "full",
+    timeStyle: "short",
+  });
+  const todayKey = localDateKey(now, tz);
 
   const [upcoming, pendingApprovals, liveFailures, vips, notifs] = await Promise.all([
     // Upcoming scoped to user.
@@ -83,7 +122,7 @@ export const buildContext = cache(async function buildContext(
   ]);
 
   const lines: string[] = [];
-  lines.push(`## Tenant context (as of ${now.toISOString()})`);
+  lines.push(`## Tenant context (as of ${nowLocal}, ${tz})`);
   lines.push("");
   lines.push(
     `Viewer: ${user.fullName ?? user.email} (${user.role}). Team scope: ${
@@ -92,13 +131,20 @@ export const buildContext = cache(async function buildContext(
   );
   lines.push("");
 
-  // Upcoming campaigns
+  // Upcoming campaigns — dates rendered in operator's locale +
+  // calendar + APP_TIMEZONE so "today", "this week", "tomorrow"
+  // agree with the rest of the admin UI.
   lines.push(`### Upcoming (next ${HORIZON_DAYS} days)`);
   if (upcoming.length === 0) {
     lines.push("_None scheduled in the window._");
   } else {
     for (const c of upcoming) {
-      const when = c.eventAt ? c.eventAt.toISOString() : "no date";
+      const when = c.eventAt
+        ? formatAdminDate(c.eventAt, locale, calendar, {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })
+        : "no date";
       const where = c.venue ? ` @ ${c.venue}` : "";
       lines.push(`- ${c.name} [${c.status}] ${when}${where}`);
     }
@@ -165,6 +211,11 @@ export const buildContext = cache(async function buildContext(
       liveFailures,
       vipCount: vips.length,
       notifications: notifs.length,
+    },
+    grounding: {
+      nowLocal,
+      tz,
+      todayKey,
     },
   };
 });
