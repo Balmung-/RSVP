@@ -1,4 +1,5 @@
 import { prisma } from "./db";
+import type { CampaignAttachment } from "@prisma/client";
 
 export const ATTACHMENT_KINDS = ["file", "map", "agenda", "parking"] as const;
 export type AttachmentKind = (typeof ATTACHMENT_KINDS)[number];
@@ -52,5 +53,91 @@ export async function createAttachment(campaignId: string, input: AttachmentInpu
 }
 
 export async function deleteAttachment(attachmentId: string, campaignId: string) {
+  // If the attachment points at one of our FileUpload rows AND nothing
+  // else references that URL, drop the bytes too. Prevents storage from
+  // leaking over time as attachments come and go.
+  const att = await prisma.campaignAttachment.findFirst({
+    where: { id: attachmentId, campaignId },
+    select: { url: true },
+  });
   await prisma.campaignAttachment.deleteMany({ where: { id: attachmentId, campaignId } });
+  if (!att) return;
+
+  const fileId = extractFileId(att.url);
+  if (!fileId) return;
+
+  const stillReferenced = await anyUrlReferencesFile(fileId, { excludeAttachmentId: attachmentId });
+  if (!stillReferenced) {
+    await prisma.fileUpload.deleteMany({ where: { id: fileId } }).catch(() => undefined);
+  }
+}
+
+// Turn /api/files/<cuid> (with optional trailing slash / qs) into <cuid>.
+// Returns null for anything that isn't a same-origin reference to our store.
+export function extractFileId(url: string): string | null {
+  const m = url.match(/^\/api\/files\/([a-z0-9]{16,})$/i);
+  return m ? m[1] : null;
+}
+
+async function anyUrlReferencesFile(
+  fileId: string,
+  opts: { excludeAttachmentId?: string } = {},
+): Promise<boolean> {
+  const needle = `/api/files/${fileId}`;
+  const [attCount, campaignCount] = await Promise.all([
+    prisma.campaignAttachment.count({
+      where: {
+        url: needle,
+        ...(opts.excludeAttachmentId ? { NOT: { id: opts.excludeAttachmentId } } : {}),
+      },
+    }),
+    prisma.campaign.count({
+      where: {
+        OR: [
+          { brandLogoUrl: needle },
+          { brandHeroUrl: needle },
+        ],
+      },
+    }),
+  ]);
+  return attCount > 0 || campaignCount > 0;
+}
+
+// Decorate attachments with FileUpload metadata (filename, size, contentType,
+// uploadedAt) when they point at /api/files/<id>. External URLs come back
+// as-is with `file: null`. Single batched query keeps the workspace fast.
+export type HydratedAttachment = CampaignAttachment & {
+  file: { filename: string; size: number; contentType: string; createdAt: Date } | null;
+};
+
+export async function hydrateAttachments(
+  attachments: CampaignAttachment[],
+): Promise<HydratedAttachment[]> {
+  const ids: string[] = [];
+  for (const a of attachments) {
+    const id = extractFileId(a.url);
+    if (id) ids.push(id);
+  }
+  if (ids.length === 0) {
+    return attachments.map((a) => ({ ...a, file: null }));
+  }
+  const files = await prisma.fileUpload.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, filename: true, size: true, contentType: true, createdAt: true },
+  });
+  const byId = new Map(files.map((f) => [f.id, f]));
+  return attachments.map((a) => {
+    const id = extractFileId(a.url);
+    const f = id ? byId.get(id) : undefined;
+    return {
+      ...a,
+      file: f ? { filename: f.filename, size: f.size, contentType: f.contentType, createdAt: f.createdAt } : null,
+    };
+  });
+}
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }

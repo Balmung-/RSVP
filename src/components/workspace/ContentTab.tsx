@@ -1,8 +1,9 @@
-import type { CampaignAttachment, CampaignQuestion, EventOption } from "@prisma/client";
+import type { CampaignQuestion, EventOption } from "@prisma/client";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { FileInput } from "@/components/FileInput";
+import { Icon } from "@/components/Icon";
 import { QUESTION_KINDS, SHOW_WHEN, needsOptions } from "@/lib/questions";
-import { ATTACHMENT_KINDS } from "@/lib/attachments";
+import { ATTACHMENT_KINDS, formatBytes, type HydratedAttachment } from "@/lib/attachments";
 
 const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 const dateFmt = new Intl.DateTimeFormat("en-GB", {
@@ -27,7 +28,7 @@ export function ContentTab({
 }: {
   canWrite: boolean;
   questions: CampaignQuestion[];
-  attachments: CampaignAttachment[];
+  attachments: HydratedAttachment[];
   dates: EventOption[];
   datePickCounts: Map<string, number>;
   addQuestionAction: (fd: FormData) => Promise<void> | void;
@@ -127,17 +128,40 @@ export function ContentTab({
         {attachments.length > 0 ? (
           <ul className="panel divide-y divide-ink-100 overflow-hidden">
             {attachments.map((a) => (
-              <li key={a.id} className="flex items-center justify-between px-5 py-3">
-                <div className="min-w-0">
-                  <div className="text-sm text-ink-900">{a.label}</div>
-                  <a
-                    href={a.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-ink-500 hover:text-ink-900 font-mono truncate max-w-[40ch] block"
+              <li key={a.id} className="flex items-center justify-between px-5 py-3 gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span
+                    className="h-9 w-9 rounded-md bg-ink-100 text-ink-500 grid place-items-center shrink-0"
+                    title={a.file?.contentType ?? undefined}
                   >
-                    {a.url}
-                  </a>
+                    <Icon name={iconForKind(a.kind)} size={15} />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-sm text-ink-900 truncate">{a.label}</div>
+                    {a.file ? (
+                      <div className="text-xs text-ink-500 flex items-center gap-2 mt-0.5 tabular-nums">
+                        <a
+                          href={a.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="truncate max-w-[28ch] hover:text-ink-900"
+                        >
+                          {a.file.filename}
+                        </a>
+                        <span className="text-ink-300">·</span>
+                        <span>{formatBytes(a.file.size)}</span>
+                      </div>
+                    ) : (
+                      <a
+                        href={a.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-ink-500 hover:text-ink-900 font-mono truncate max-w-[40ch] block mt-0.5"
+                      >
+                        {a.url}
+                      </a>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
                   <span className="text-[11px] uppercase tracking-wider text-ink-400">{a.kind}</span>
@@ -225,6 +249,13 @@ export function ContentTab({
       </Section>
     </div>
   );
+}
+
+function iconForKind(kind: string): "file-text" | "file" | "list" | "tag" {
+  if (kind === "agenda") return "file-text";
+  if (kind === "map") return "tag";
+  if (kind === "parking") return "list";
+  return "file";
 }
 
 function Section({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) {

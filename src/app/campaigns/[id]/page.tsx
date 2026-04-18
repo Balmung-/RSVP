@@ -36,6 +36,7 @@ import {
 import {
   createAttachment,
   deleteAttachment,
+  hydrateAttachments,
   isSafeUrl,
   ATTACHMENT_KINDS,
   type AttachmentKind,
@@ -521,7 +522,7 @@ type TabData = {
   scheduleCount?: number;
   // content
   questions?: Awaited<ReturnType<typeof prisma.campaignQuestion.findMany>>;
-  attachments?: Awaited<ReturnType<typeof prisma.campaignAttachment.findMany>>;
+  attachments?: Awaited<ReturnType<typeof hydrateAttachments>>;
   dates?: Awaited<ReturnType<typeof prisma.eventOption.findMany>>;
   datePickCounts?: Map<string, number>;
   contentCount?: number;
@@ -559,7 +560,7 @@ async function loadForTab(
     return { stages, scheduleCount, contentCount };
   }
   if (tab === "content") {
-    const [questions, attachments, dates, datePickRows] = await Promise.all([
+    const [questions, rawAttachments, dates, datePickRows] = await Promise.all([
       prisma.campaignQuestion.findMany({ where: { campaignId }, orderBy: [{ order: "asc" }, { createdAt: "asc" }] }),
       prisma.campaignAttachment.findMany({ where: { campaignId }, orderBy: [{ order: "asc" }, { createdAt: "asc" }] }),
       prisma.eventOption.findMany({ where: { campaignId }, orderBy: [{ startsAt: "asc" }, { order: "asc" }] }),
@@ -569,6 +570,7 @@ async function loadForTab(
         _count: { _all: true },
       }),
     ]);
+    const attachments = await hydrateAttachments(rawAttachments);
     const datePickCounts = new Map(datePickRows.map((r) => [r.eventOptionId as string, r._count._all]));
     return { questions, attachments, dates, datePickCounts, scheduleCount, contentCount };
   }
