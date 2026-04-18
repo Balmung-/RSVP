@@ -1,4 +1,5 @@
 import { prisma } from "./db";
+import { DELIVERED_OK_STATUSES, DELIVERED_FAIL_STATUSES } from "./statuses";
 import type { Prisma } from "@prisma/client";
 
 // Shared "live failure" logic for /deliverability, the campaign
@@ -42,7 +43,7 @@ export async function liveFailures(opts: LiveFailuresOptions = {}): Promise<Fail
 
   const failures = await prisma.invitation.findMany({
     where: {
-      status: opts.status ? opts.status : { in: ["failed", "bounced"] },
+      status: opts.status ? opts.status : { in: DELIVERED_FAIL_STATUSES },
       createdAt: { gte: since },
       ...(opts.channel ? { channel: opts.channel } : {}),
       ...(opts.campaignId ? { campaignId: opts.campaignId } : {}),
@@ -66,7 +67,7 @@ export async function liveFailures(opts: LiveFailuresOptions = {}): Promise<Fail
     by: ["inviteeId", "channel"],
     where: {
       inviteeId: { in: failures.map((f) => f.inviteeId) },
-      status: { in: ["sent", "delivered"] },
+      status: { in: DELIVERED_OK_STATUSES },
       ...(opts.campaignId ? { campaignId: opts.campaignId } : {}),
     },
     _max: { createdAt: true },
@@ -112,7 +113,7 @@ export async function filterLiveFailures<
     by: ["inviteeId", "channel"],
     where: {
       inviteeId: { in: failures.map((f) => f.inviteeId) },
-      status: { in: ["sent", "delivered"] },
+      status: { in: DELIVERED_OK_STATUSES },
       ...(scope.campaignId ? { campaignId: scope.campaignId } : {}),
     },
     _max: { createdAt: true },

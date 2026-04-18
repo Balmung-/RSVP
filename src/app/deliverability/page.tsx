@@ -11,6 +11,7 @@ import { setFlash } from "@/lib/flash";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 import { scopedCampaignWhere, canSeeCampaign } from "@/lib/teams";
 import { filterLiveFailures } from "@/lib/deliverability";
+import { mapConcurrent } from "@/lib/concurrency";
 
 export const dynamic = "force-dynamic";
 
@@ -83,20 +84,24 @@ async function retryAll(formData: FormData) {
     where: { id: { in: capped }, campaign: campaignScope },
     include: { campaign: true, invitee: true },
   });
+  // Parallelize at a conservative 5-wide fan-out so we don't serialize
+  // on provider latency but also don't flood a rate-limited SMTP. A
+  // 50-item batch at 500ms/send completes in ~5s instead of ~25s.
   let ok = 0;
   let fail = 0;
-  for (const r of rows) {
+  const results = await mapConcurrent(rows, 5, async (r) => {
     const res = r.channel === "email"
       ? await sendEmail(r.campaign, r.invitee)
       : await sendSms(r.campaign, r.invitee);
-    if (res.ok) ok++; else fail++;
     await logAction({
       kind: res.ok ? "invite.retry.ok" : "invite.retry.fail",
       refType: "invitation",
       refId: r.id,
       data: { channel: r.channel, error: res.ok ? null : res.error, bulk: true },
     });
-  }
+    return res.ok;
+  });
+  for (const r of results) if (r) ok++; else fail++;
   const suffix = deferred > 0 ? ` — ${deferred} more selected, click Retry again.` : "";
   setFlash({
     kind: fail === 0 && deferred === 0 ? "success" : "warn",

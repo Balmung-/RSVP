@@ -1,4 +1,5 @@
 import { prisma } from "./db";
+import { isNotFound } from "./prisma-errors";
 
 export const TEMPLATE_KINDS = ["email", "sms"] as const;
 export type TemplateKind = (typeof TEMPLATE_KINDS)[number];
@@ -63,7 +64,7 @@ export async function updateTemplate(
     });
     return { ok: true, templateId: id };
   } catch (e) {
-    if (String(e).includes("Record to update not found")) return { ok: false, reason: "not_found" };
+    if (isNotFound(e)) return { ok: false, reason: "not_found" };
     throw e;
   }
 }

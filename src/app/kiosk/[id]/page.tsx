@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
+import { buildArrivalsFeed } from "@/lib/arrivals";
 import { KioskBoard } from "@/components/KioskBoard";
 
 export const dynamic = "force-dynamic";
@@ -24,49 +25,8 @@ export default async function KioskPage({ params }: { params: { id: string } }) 
   if (!campaign) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
 
-  const [responses, agg, arrivedCount, arrivedGuestsAgg] = await Promise.all([
-    prisma.response.findMany({
-      where: { campaignId: params.id, attending: true },
-      include: { invitee: { select: { fullName: true, title: true, organization: true, rsvpToken: true } } },
-      orderBy: [{ checkedInAt: "desc" }, { respondedAt: "desc" }],
-      take: 50,
-    }),
-    prisma.response.aggregate({
-      where: { campaignId: params.id, attending: true },
-      _sum: { guestsCount: true },
-      _count: { _all: true },
-      _max: { checkedInAt: true, respondedAt: true },
-    }),
-    prisma.response.count({ where: { campaignId: params.id, attending: true, checkedInAt: { not: null } } }),
-    prisma.response.aggregate({
-      where: { campaignId: params.id, attending: true, checkedInAt: { not: null } },
-      _sum: { guestsCount: true },
-    }),
-  ]);
-
-  const initial = {
-    version: [
-      agg._max.checkedInAt?.toISOString() ?? "",
-      agg._max.respondedAt?.toISOString() ?? "",
-      agg._count._all,
-    ].join("|"),
-    totals: {
-      expected: agg._count._all,
-      arrived: arrivedCount,
-      pending: agg._count._all - arrivedCount,
-      expectedGuests: agg._sum.guestsCount ?? 0,
-      arrivedGuests: arrivedGuestsAgg._sum.guestsCount ?? 0,
-    },
-    rows: responses.map((r) => ({
-      id: r.id,
-      name: r.invitee.fullName,
-      title: r.invitee.title,
-      organization: r.invitee.organization,
-      token: r.invitee.rsvpToken,
-      guestsCount: r.guestsCount,
-      checkedInAt: r.checkedInAt?.toISOString() ?? null,
-    })),
-  };
+  // Kiosk tablets sit at the door, 50 rows is plenty on screen.
+  const initial = await buildArrivalsFeed(params.id, { take: 50 });
 
   return (
     <KioskBoard

@@ -2,6 +2,9 @@ import { prisma } from "./db";
 import { dedupKey, normalizeEmail, normalizePhone, parseContactsText } from "./contact";
 import { sendEmail, sendSms } from "./delivery";
 import { newRsvpToken } from "./tokens";
+import { isUniqueViolation } from "./prisma-errors";
+import { DELIVERED_OK_STATUSES } from "./statuses";
+import { mapConcurrent } from "./concurrency";
 import type { Prisma } from "@prisma/client";
 
 const COUNTRY = (process.env.DEFAULT_COUNTRY ?? "SA") as "SA";
@@ -165,8 +168,8 @@ export async function campaignStats(campaignId: string) {
     prisma.response.count({ where: { campaignId } }),
     prisma.response.count({ where: { campaignId, attending: true } }),
     prisma.response.count({ where: { campaignId, attending: false } }),
-    prisma.invitation.count({ where: { campaignId, channel: "email", status: { in: ["sent", "delivered"] } } }),
-    prisma.invitation.count({ where: { campaignId, channel: "sms", status: { in: ["sent", "delivered"] } } }),
+    prisma.invitation.count({ where: { campaignId, channel: "email", status: { in: DELIVERED_OK_STATUSES } } }),
+    prisma.invitation.count({ where: { campaignId, channel: "sms", status: { in: DELIVERED_OK_STATUSES } } }),
     prisma.response.aggregate({ where: { campaignId, attending: true }, _sum: { guestsCount: true } }),
   ]);
   const guests = guestsAgg._sum.guestsCount ?? 0;
@@ -204,26 +207,41 @@ export async function sendCampaign(
     include: { invitations: true },
   });
 
-  let email = 0, sms = 0, skipped = 0, failed = 0;
+  // Flatten into a job list up front, then fan out with bounded
+  // concurrency. Previously this was a serial loop — a 500-person
+  // campaign at 500ms per provider call took ~4 min and would clip
+  // Railway's request budget. At concurrency=5 the same campaign
+  // finishes in under a minute without flooding the provider.
+  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  const jobs: Job[] = [];
+  let skipped = 0;
+  for (const i of invitees) {
+    const hasEmailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
+    const hasSmsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
+    if ((opts.channel === "email" || opts.channel === "both") && i.email) {
+      if (opts.onlyUnsent && hasEmailSent) skipped++;
+      else jobs.push({ invitee: i, channel: "email" });
+    }
+    if ((opts.channel === "sms" || opts.channel === "both") && i.phoneE164) {
+      if (opts.onlyUnsent && hasSmsSent) skipped++;
+      else jobs.push({ invitee: i, channel: "sms" });
+    }
+  }
+
+  let email = 0, sms = 0, failed = 0;
 
   try {
-    for (const i of invitees) {
-      const hasEmailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
-      const hasSmsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
-
-      if ((opts.channel === "email" || opts.channel === "both") && i.email) {
-        if (opts.onlyUnsent && hasEmailSent) skipped++;
-        else {
-          const r = await sendEmail(campaign, i);
-          if (r.ok) email++; else failed++;
-        }
-      }
-      if ((opts.channel === "sms" || opts.channel === "both") && i.phoneE164) {
-        if (opts.onlyUnsent && hasSmsSent) skipped++;
-        else {
-          const r = await sendSms(campaign, i);
-          if (r.ok) sms++; else failed++;
-        }
+    const results = await mapConcurrent(jobs, 5, async (job) =>
+      job.channel === "email"
+        ? await sendEmail(campaign, job.invitee)
+        : await sendSms(campaign, job.invitee),
+    );
+    for (let k = 0; k < jobs.length; k++) {
+      const r = results[k];
+      if (r.ok) {
+        if (jobs[k].channel === "email") email++; else sms++;
+      } else {
+        failed++;
       }
     }
   } finally {
@@ -309,7 +327,7 @@ export async function createInvitee(
     });
     return { ok: true, inviteeId: row.id };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
     throw e;
   }
 }
@@ -336,7 +354,7 @@ export async function updateInvitee(
     });
     return { ok: true, inviteeId };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
     throw e;
   }
 }
@@ -376,15 +394,33 @@ export async function resendSelection(
     where: { campaignId, id: { in: inviteeIds } },
     include: { invitations: true },
   });
-  let email = 0, sms = 0, skipped = 0, failed = 0;
+  // Flatten to (invitee, channel) pairs so the concurrent runner can
+  // fan out across them. `skipped` pairs are resolved here so the
+  // parallel stage only does real sends.
+  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  const jobs: Job[] = [];
+  let skipped = 0;
   for (const i of invitees) {
     for (const ch of opts.channels) {
       const has = i.invitations.some((x) => x.channel === ch && x.status !== "failed");
       const hasAddr = ch === "email" ? !!i.email : !!i.phoneE164;
       if (!hasAddr) { skipped++; continue; }
       if (opts.onlyUnsent && has) { skipped++; continue; }
-      const r = ch === "email" ? await sendEmail(campaign, i) : await sendSms(campaign, i);
-      if (r.ok) { if (ch === "email") email++; else sms++; } else failed++;
+      jobs.push({ invitee: i, channel: ch });
+    }
+  }
+  const results = await mapConcurrent(jobs, 5, async (job) =>
+    job.channel === "email"
+      ? await sendEmail(campaign, job.invitee)
+      : await sendSms(campaign, job.invitee),
+  );
+  let email = 0, sms = 0, failed = 0;
+  for (let k = 0; k < jobs.length; k++) {
+    const res = results[k];
+    if (res.ok) {
+      if (jobs[k].channel === "email") email++; else sms++;
+    } else {
+      failed++;
     }
   }
   return { email, sms, skipped, failed };

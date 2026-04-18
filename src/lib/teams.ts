@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "./db";
+import { isUniqueViolation, isNotFound } from "./prisma-errors";
 
 export const TEAM_ROLES = ["lead", "member", "guest"] as const;
 export type TeamRole = (typeof TEAM_ROLES)[number];
@@ -52,7 +53,7 @@ export async function createTeam(input: TeamInput): Promise<TeamMutationResult> 
     });
     return { ok: true, teamId: row.id };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
     throw e;
   }
 }
@@ -75,8 +76,8 @@ export async function updateTeam(teamId: string, input: TeamInput): Promise<Team
     });
     return { ok: true, teamId };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
-    if (String(e).includes("Record to update not found")) return { ok: false, reason: "not_found" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
+    if (isNotFound(e)) return { ok: false, reason: "not_found" };
     throw e;
   }
 }

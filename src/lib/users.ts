@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { hashPassword, type Role, ROLES } from "./auth";
+import { isUniqueViolation, isNotFound } from "./prisma-errors";
 
 export type UserInput = {
   email: string;
@@ -50,7 +51,7 @@ export async function createUser(input: UserInput, password: string): Promise<Us
     });
     return { ok: true, userId: u.id };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate_email" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate_email" };
     throw e;
   }
 }
@@ -74,8 +75,8 @@ export async function updateUser(
     });
     return { ok: true, userId };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate_email" };
-    if (String(e).includes("Record to update not found")) return { ok: false, reason: "not_found" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate_email" };
+    if (isNotFound(e)) return { ok: false, reason: "not_found" };
     throw e;
   }
 }

@@ -52,6 +52,7 @@ import {
   requestApproval,
 } from "@/lib/approvals";
 import { canSeeCampaignRow } from "@/lib/teams";
+import { buildArrivalsFeed } from "@/lib/arrivals";
 
 export const dynamic = "force-dynamic";
 
@@ -609,48 +610,7 @@ async function loadForTab(
     return { questions, attachments, dates, datePickCounts, scheduleCount, contentCount };
   }
   if (tab === "arrivals") {
-    const [responses, agg, arrivedCount, arrivedGuestsAgg] = await Promise.all([
-      prisma.response.findMany({
-        where: { campaignId, attending: true },
-        include: { invitee: { select: { fullName: true, title: true, organization: true, rsvpToken: true } } },
-        orderBy: [{ checkedInAt: "desc" }, { respondedAt: "desc" }],
-        take: 500,
-      }),
-      prisma.response.aggregate({
-        where: { campaignId, attending: true },
-        _sum: { guestsCount: true },
-        _count: { _all: true },
-        _max: { checkedInAt: true, respondedAt: true },
-      }),
-      prisma.response.count({ where: { campaignId, attending: true, checkedInAt: { not: null } } }),
-      prisma.response.aggregate({
-        where: { campaignId, attending: true, checkedInAt: { not: null } },
-        _sum: { guestsCount: true },
-      }),
-    ]);
-    const arrivalsFeed = {
-      version: [
-        agg._max.checkedInAt?.toISOString() ?? "",
-        agg._max.respondedAt?.toISOString() ?? "",
-        agg._count._all,
-      ].join("|"),
-      totals: {
-        expected: agg._count._all,
-        arrived: arrivedCount,
-        pending: agg._count._all - arrivedCount,
-        expectedGuests: agg._sum.guestsCount ?? 0,
-        arrivedGuests: arrivedGuestsAgg._sum.guestsCount ?? 0,
-      },
-      rows: responses.map((r) => ({
-        id: r.id,
-        name: r.invitee.fullName,
-        title: r.invitee.title,
-        organization: r.invitee.organization,
-        token: r.invitee.rsvpToken,
-        guestsCount: r.guestsCount,
-        checkedInAt: r.checkedInAt?.toISOString() ?? null,
-      })),
-    };
+    const arrivalsFeed = await buildArrivalsFeed(campaignId);
     return { arrivalsFeed, scheduleCount, contentCount };
   }
   return { scheduleCount, contentCount };

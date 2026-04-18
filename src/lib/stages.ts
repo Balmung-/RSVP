@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { sendEmail, sendSms } from "./delivery";
 import { notifyAdmins } from "./notify";
+import { mapConcurrent } from "./concurrency";
 import type { Campaign, CampaignStage, Prisma } from "@prisma/client";
 
 export const STAGE_KINDS = ["invite", "reminder", "last_call", "thanks", "custom"] as const;
@@ -155,23 +156,45 @@ async function runStage(stage: CampaignStage): Promise<void> {
   const where = audienceWhere(stage.campaignId, stage.audience as AudienceKind);
   const invitees = await prisma.invitee.findMany({ where, include: { invitations: true } });
 
-  let sent = 0, skipped = 0, failed = 0;
   const isNonResponders = stage.audience === "non_responders";
+
+  // For non-responder stages, re-fetch response state for this audience
+  // in bulk before sending, so the per-invitee race-check below is a
+  // set membership test (not N individual findUniques). Narrows the
+  // race window by resolving all "already responded" invitees at the
+  // moment the stage runs.
+  const respondedSet = isNonResponders
+    ? new Set(
+        (await prisma.response.findMany({
+          where: { inviteeId: { in: invitees.map((i) => i.id) } },
+          select: { inviteeId: true },
+        })).map((r) => r.inviteeId),
+      )
+    : null;
+
+  // Flatten to (invitee, channel) pairs, drop skippable ones up front,
+  // then fan out across the provider calls with a concurrency cap.
+  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  const jobs: Job[] = [];
+  let skipped = 0;
   for (const i of invitees) {
-    // Re-check response right before send to close the race where an invitee
-    // RSVPs while the stage is iterating — we don't want a reminder landing
-    // seconds after they replied.
-    if (isNonResponders) {
-      const fresh = await prisma.response.findUnique({ where: { inviteeId: i.id } });
-      if (fresh) { skipped++; continue; }
+    if (respondedSet && respondedSet.has(i.id)) {
+      skipped++;
+      continue;
     }
     for (const ch of channels) {
       const addr = ch === "email" ? i.email : i.phoneE164;
       if (!addr) { skipped++; continue; }
-      const r = ch === "email" ? await sendEmail(effective, i) : await sendSms(effective, i);
-      if (r.ok) sent++; else failed++;
+      jobs.push({ invitee: i, channel: ch });
     }
   }
+  const results = await mapConcurrent(jobs, 5, async (job) =>
+    job.channel === "email"
+      ? await sendEmail(effective, job.invitee)
+      : await sendSms(effective, job.invitee),
+  );
+  let sent = 0, failed = 0;
+  for (const r of results) if (r.ok) sent++; else failed++;
 
   await prisma.campaignStage.update({
     where: { id: stage.id },

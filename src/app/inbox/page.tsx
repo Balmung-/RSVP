@@ -65,17 +65,18 @@ export default async function InboxPage({
 
   // Team scope: show only inbound messages whose linked invitee is in
   // a campaign the viewer can see, OR messages with no matched invitee
-  // (orphan inbound — any editor can pick these up).
-  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
-  const hasScope = Object.keys(campaignScope).length > 0;
-  const scopeFilter = hasScope
-    ? {
+  // (orphan inbound — any editor can pick these up). Admins see every
+  // message. Keying off isAdmin directly (not Object.keys on the
+  // scope object) keeps the branch unambiguous.
+  const isAdmin = hasRole(me, "admin");
+  const scopeFilter = isAdmin
+    ? {}
+    : {
         OR: [
           { inviteeId: null },
-          { invitee: { campaign: campaignScope } },
+          { invitee: { campaign: await scopedCampaignWhere(me.id, false) } },
         ],
-      }
-    : {};
+      };
 
   const [rows, counts] = await Promise.all([
     prisma.inboundMessage.findMany({

@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { dedupKey, normalizeEmail, normalizePhone } from "./contact";
+import { isUniqueViolation } from "./prisma-errors";
 import type { Contact, Prisma } from "@prisma/client";
 
 export const VIP_TIERS = ["royal", "minister", "vip", "standard"] as const;
@@ -81,7 +82,7 @@ export async function createContact(
     });
     return { ok: true, contactId: row.id };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
     throw e;
   }
 }
@@ -100,7 +101,7 @@ export async function updateContact(
     await prisma.contact.update({ where: { id: contactId }, data: { ...n.data, dedupKey: key } });
     return { ok: true, contactId };
   } catch (e) {
-    if (String(e).includes("Unique constraint")) return { ok: false, reason: "duplicate" };
+    if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
     throw e;
   }
 }
