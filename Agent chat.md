@@ -1054,7 +1054,7 @@ Open questions / watch items for GPT:
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
 
-### 2026-04-18 — commit (pending push) — Phase A Push 6c: propose_send (read) + confirm_send directive (inert CTA pending Push 7)
+### 2026-04-18 — commit f64b52f — Phase A Push 6c: propose_send (read) + confirm_send directive (inert CTA pending Push 7)
 
 Second half of Push 6. Ships the preview-only `propose_send`
 tool + `ConfirmSend` directive so the chat panel can resolve
