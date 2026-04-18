@@ -6,6 +6,7 @@ import { InviteePanel } from "@/components/InviteePanel";
 import { ArrivalsBoard } from "@/components/ArrivalsBoard";
 import { CampaignHeader, CampaignHeaderCrumb } from "@/components/workspace/CampaignHeader";
 import { CampaignPulse } from "@/components/workspace/CampaignPulse";
+import { AttentionStrip, type AttentionItem } from "@/components/workspace/AttentionStrip";
 import { campaignPulse } from "@/lib/pulse";
 import { InviteesTab } from "@/components/workspace/InviteesTab";
 import { ScheduleTab } from "@/components/workspace/ScheduleTab";
@@ -429,49 +430,16 @@ export default async function CampaignWorkspace({
         invited={stats.total}
         responded={stats.responded}
       />
-      <div className="mb-6">
+      {/* Pulse + attention items live on one compressed band below the
+          header: a continuous horizontal plane, no boxed banners. */}
+      <div className="mb-5 flex flex-col gap-3">
         <CampaignPulse
           buckets={pulse}
           totalAttending={stats.attending}
           totalDeclined={stats.declined}
         />
+        <AttentionStrip items={buildAttention({ campaign, pendingApprovalRow, pendingRequester, atRisk, canDelete })} />
       </div>
-      {pendingApprovalRow ? (
-        <div className="mb-6 max-w-4xl rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold px-4 py-3 flex items-center justify-between gap-4">
-          <div className="text-body">
-            An admin needs to approve this send — <span className="tabular-nums font-medium">{pendingApprovalRow.recipientCount.toLocaleString()} recipients</span> on <span className="uppercase">{pendingApprovalRow.channel}</span>.
-            {pendingRequester?.email ? (
-              <span className="text-mini text-ink-500 ms-2">Requested by {pendingRequester.email}</span>
-            ) : null}
-          </div>
-          {canDelete ? (
-            <Link href="/approvals" className="btn btn-soft text-mini">Review</Link>
-          ) : (
-            <span className="text-mini text-ink-500">Waiting on admin</span>
-          )}
-        </div>
-      ) : null}
-      {atRisk.total > 0 ? (
-        <div className="mb-6 max-w-4xl rounded-xl bg-signal-fail/10 border border-signal-fail/30 text-signal-fail px-4 py-3 flex items-center justify-between gap-4">
-          <div className="text-body">
-            <span className="tabular-nums font-medium">{atRisk.total.toLocaleString()}</span>{" "}
-            {atRisk.total === 1 ? "invitee isn't reachable" : "invitees aren't reachable"} —{" "}
-            <span className="text-mini text-ink-500">
-              {atRisk.email > 0 && atRisk.sms > 0
-                ? `${atRisk.email} email · ${atRisk.sms} SMS still failing`
-                : atRisk.email > 0
-                  ? `${atRisk.email} email bouncing or rejected`
-                  : `${atRisk.sms} SMS bouncing or rejected`}
-            </span>
-          </div>
-          <Link
-            href={`/deliverability?campaign=${campaign.id}`}
-            className="btn btn-soft text-mini shrink-0"
-          >
-            Review &amp; retry
-          </Link>
-        </div>
-      ) : null}
       <Tabs active={tab} items={tabsItems} />
 
       <div className="pt-8">
@@ -580,6 +548,45 @@ type TabData = {
     rows: Array<{ id: string; name: string; title: string | null; organization: string | null; token: string; guestsCount: number; checkedInAt: string | null }>;
   } | null;
 };
+
+// Collapse the two possible attention rows into a single strip input.
+// Approval first (action-needed), then at-risk (info-with-action).
+function buildAttention(params: {
+  campaign: { id: string };
+  pendingApprovalRow: { recipientCount: number; channel: string } | null;
+  pendingRequester: { email: string } | null;
+  atRisk: { total: number; email: number; sms: number };
+  canDelete: boolean;
+}): AttentionItem[] {
+  const out: AttentionItem[] = [];
+  if (params.pendingApprovalRow) {
+    out.push({
+      key: "approval",
+      tone: "warn",
+      text: `Admin approval pending — ${params.pendingApprovalRow.recipientCount.toLocaleString()} on ${params.pendingApprovalRow.channel}`,
+      detail: params.pendingRequester?.email
+        ? `Requested by ${params.pendingRequester.email}`
+        : null,
+      action: params.canDelete ? { label: "Review", href: "/approvals" } : null,
+    });
+  }
+  if (params.atRisk.total > 0) {
+    const detail =
+      params.atRisk.email > 0 && params.atRisk.sms > 0
+        ? `${params.atRisk.email} email · ${params.atRisk.sms} SMS failing`
+        : params.atRisk.email > 0
+          ? `${params.atRisk.email} email bouncing`
+          : `${params.atRisk.sms} SMS bouncing`;
+    out.push({
+      key: "atrisk",
+      tone: "fail",
+      text: `${params.atRisk.total.toLocaleString()} ${params.atRisk.total === 1 ? "invitee isn't reachable" : "invitees aren't reachable"}`,
+      detail,
+      action: { label: "Review & retry", href: `/deliverability?campaign=${params.campaign.id}` },
+    });
+  }
+  return out;
+}
 
 async function loadForTab(
   campaignId: string,

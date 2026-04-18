@@ -141,18 +141,22 @@ export default async function Dashboard() {
         </Link>
       }
     >
-      <div className="grid grid-cols-4 gap-6 mb-12">
-        <Tile label={T.activeCampaigns} value={activeCampaigns} />
-        <Tile
+      {/* One horizontal reading strip instead of four stacked tiles.
+          Primary numbers inline, secondary labels recessed. Delivery-
+          failure count becomes a link when non-zero; otherwise it's
+          just a quiet number. */}
+      <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-12 text-ink-600">
+        <Stat label={T.activeCampaigns} value={activeCampaigns} />
+        <Stat
           label={T.sendingNow}
           value={sendingCampaigns}
-          tone={sendingCampaigns > 0 ? "hold" : "default"}
+          tone={sendingCampaigns > 0 ? "hold" : undefined}
         />
-        <Tile label={T.responsesThisWeek} value={totalResponses} />
-        <Tile
+        <Stat label={T.responsesThisWeek} value={totalResponses} />
+        <Stat
           label={T.deliveryFailures7d}
           value={failedInvitations}
-          tone={failedInvitations > 0 ? "fail" : "default"}
+          tone={failedInvitations > 0 ? "fail" : undefined}
           href={failedInvitations > 0 ? "/deliverability" : undefined}
         />
       </div>
@@ -334,47 +338,61 @@ function SectionHeader({
   );
 }
 
-function Tile({
+// Inline Stat — number dominates, label recessed beneath. Tone is a
+// small colored dot, not a colored field, so the strip stays calm
+// unless something is actually happening.
+function Stat({
   label,
   value,
-  tone = "default",
+  tone,
   href,
 }: {
   label: string;
   value: number;
-  tone?: "default" | "hold" | "fail";
+  tone?: "hold" | "fail";
   href?: string;
 }) {
   const dot =
-    tone === "hold" ? "bg-signal-hold animate-pulse"
-    : tone === "fail" ? "bg-signal-fail"
-    : "bg-ink-300";
+    tone === "hold"
+      ? "bg-signal-hold animate-pulse"
+      : tone === "fail"
+        ? "bg-signal-fail"
+        : null;
   const body = (
-    <>
-      <span className="inline-flex items-center gap-2 text-micro uppercase text-ink-400">
-        <span className={`dot ${dot}`} />
-        {label}
-      </span>
+    <span className="inline-flex items-baseline gap-2 group">
+      {dot ? (
+        <span
+          className={`h-1.5 w-1.5 rounded-full translate-y-[-3px] ${dot}`}
+          aria-hidden
+        />
+      ) : null}
       <span
         className="text-ink-900 tabular-nums"
-        style={{ fontSize: "28px", lineHeight: "34px", letterSpacing: "-0.02em", fontWeight: 500 }}
+        style={{
+          fontSize: "24px",
+          lineHeight: "28px",
+          letterSpacing: "-0.015em",
+          fontWeight: 500,
+        }}
       >
         {value.toLocaleString()}
       </span>
-    </>
+      <span className="text-micro uppercase tracking-wider text-ink-400">
+        {label}
+      </span>
+    </span>
   );
   if (href) {
     return (
-      <Link href={href} className="panel-quiet p-5 flex flex-col gap-1 hover:border-ink-200 transition-colors">
+      <Link
+        href={href}
+        className="text-ink-900 hover:text-ink-700 transition-colors"
+      >
         {body}
       </Link>
     );
   }
-  return (
-    <div className="panel-quiet p-5 flex flex-col gap-1">
-      {body}
-    </div>
-  );
+  return body;
 }
 
 function ResponseBar({

@@ -11,9 +11,11 @@ import { CommandPalette } from "./CommandPalette";
 import { CommandHint } from "./CommandHint";
 import { NotificationBell } from "./NotificationBell";
 
-// The dominant canvas. Edges are quiet: a thin rail, a thin top seam.
-// Pages can set `compactTitle` when they render their own display-size
-// title in the body, so we don't double-H1.
+// The shell reads as a single horizontal plane. A 56px icon rail on
+// the edge holds navigation; it recedes, never asserts itself, and
+// the workspace owns the rest of the canvas. Labels live in tooltips
+// (hover) and in ⌘K (keyboard) — the rail's job is orientation, not
+// exposition. One dominant through-line: the page.
 
 export async function Shell({
   title,
@@ -34,68 +36,69 @@ export async function Shell({
   const showTeams = teamsEnabled() && isAdmin;
   const locale = readAdminLocale();
   const T = adminDict(locale);
-  // Consolidated notification feed. When it's non-empty the header's
-  // bell shows a single dot; the detail is hidden behind a click.
-  // The bell is the single dominant "attention" signal — sidebar nav
-  // links no longer carry count badges.
   const notifications = me ? await getNotifications(me.id, isAdmin) : [];
 
   return (
-    <div className="min-h-screen grid grid-cols-[240px_1fr]">
-      <aside className="border-r border-ink-100 bg-ink-0 px-4 py-6 flex flex-col">
-        <Link href="/" className="flex items-center gap-2.5 mb-10 px-3">
-          <span className="h-6 w-6 rounded-md bg-ink-900 grid place-items-center">
-            <span className="h-1.5 w-1.5 rounded-full bg-ink-0" />
-          </span>
-          <span className="text-[15px] font-medium tracking-tight">Einai</span>
+    <div className="min-h-screen grid grid-cols-[56px_1fr]">
+      <aside className="border-e border-ink-100 bg-ink-0 flex flex-col items-center py-4 gap-1">
+        <Link
+          href="/"
+          className="h-8 w-8 rounded-md bg-ink-900 grid place-items-center mb-4"
+          title="Einai"
+          aria-label="Einai · Overview"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-ink-0" />
         </Link>
-        <nav className="flex flex-col gap-0.5">
-          <NavLink href="/" icon="dashboard">{T.overview}</NavLink>
-          <NavLink href="/campaigns" icon="calendar-check">{T.campaigns}</NavLink>
-          <NavLink href="/contacts" icon="users">{T.contacts}</NavLink>
-          <NavLink href="/templates" icon="file-text">{locale === "ar" ? "القوالب" : "Templates"}</NavLink>
-          <NavLink href="/inbox" icon="inbox">{T.inbox}</NavLink>
+        <nav className="flex flex-col items-center gap-1">
+          <RailLink href="/" icon="dashboard" label={T.overview} hint="g h" />
+          <RailLink href="/campaigns" icon="calendar-check" label={T.campaigns} hint="g c" />
+          <RailLink href="/contacts" icon="users" label={T.contacts} hint="g p" />
+          <RailLink
+            href="/templates"
+            icon="file-text"
+            label={locale === "ar" ? "القوالب" : "Templates"}
+            hint="g t"
+          />
+          <RailLink href="/inbox" icon="inbox" label={T.inbox} hint="g i" />
           {isAdmin ? (
-            <NavLink href="/approvals" icon="circle-alert">
-              {locale === "ar" ? "الموافقات" : "Approvals"}
-            </NavLink>
+            <RailLink
+              href="/approvals"
+              icon="circle-alert"
+              label={locale === "ar" ? "الموافقات" : "Approvals"}
+              hint="g a"
+            />
           ) : null}
           {isAdmin ? (
-            <NavLink href="/deliverability" icon="warning">
-              {T.deliverability}
-            </NavLink>
+            <RailLink href="/deliverability" icon="warning" label={T.deliverability} hint="g d" />
           ) : null}
           {isAdmin ? (
-            <NavLink href="/unsubscribes" icon="eye-off">
-              {locale === "ar" ? "المنسحبون" : "Unsubscribes"}
-            </NavLink>
+            <RailLink
+              href="/unsubscribes"
+              icon="eye-off"
+              label={locale === "ar" ? "المنسحبون" : "Unsubscribes"}
+              hint="g u"
+            />
           ) : null}
-          {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
-          {isAdmin ? <NavLink href="/users" icon="user-plus">{T.people}</NavLink> : null}
-          {isAdmin ? <NavLink href="/events" icon="list">{T.events}</NavLink> : null}
+          {showTeams ? <RailLink href="/teams" icon="tag" label={T.teams} hint="g m" /> : null}
+          {isAdmin ? (
+            <RailLink href="/users" icon="user-plus" label={T.people} />
+          ) : null}
+          {isAdmin ? <RailLink href="/events" icon="list" label={T.events} hint="g e" /> : null}
         </nav>
-        <div className="mt-auto pt-4 border-t border-ink-100">
+        <div className="mt-auto flex flex-col items-center gap-1">
+          <RailLink href="/settings" icon="settings" label="Settings" hint="g s" />
           <Link
-            href="/settings"
-            className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 hover:bg-ink-100 transition-colors"
+            href="/account/password"
+            className="h-8 w-8 rounded-md bg-ink-100 grid place-items-center text-mini font-medium text-ink-600 hover:bg-ink-200 hover:text-ink-900 transition-colors"
+            title={me?.email ?? "Account"}
+            aria-label={me?.email ?? "Account"}
           >
-            <span className="h-7 w-7 rounded-full bg-ink-100 text-mini font-medium text-ink-600 grid place-items-center">
-              {me?.email?.[0]?.toUpperCase() ?? "?"}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="text-mini text-ink-900 truncate" title={me?.email ?? ""}>
-                {me?.email ?? "Not signed in"}
-              </div>
-              <div className="text-[10px] uppercase tracking-wider text-ink-400 mt-0.5">
-                {me?.role ?? ""}
-              </div>
-            </div>
-            <Icon name="settings" size={14} className="text-ink-400" />
+            {me?.email?.[0]?.toUpperCase() ?? "?"}
           </Link>
         </div>
       </aside>
 
-      <main className="flex flex-col">
+      <main className="flex flex-col min-w-0">
         {me?.mustChangePassword ? (
           <div className="bg-signal-hold/10 border-b border-signal-hold/30 text-signal-hold px-10 py-2.5 flex items-center justify-between">
             <span className="text-body">
@@ -130,7 +133,7 @@ export async function Shell({
             </div>
           </header>
         )}
-        <div className="flex-1 px-10 py-10">{children}</div>
+        <div className="flex-1 px-10 py-10 min-w-0">{children}</div>
       </main>
       {flash ? <Toast flash={flash} /> : null}
       <CommandPalette isAdmin={isAdmin} teamsOn={showTeams} />
@@ -138,29 +141,25 @@ export async function Shell({
   );
 }
 
-function NavLink({
+function RailLink({
   href,
-  children,
   icon,
-  badge,
+  label,
+  hint,
 }: {
   href: string;
-  children: ReactNode;
   icon: IconName;
-  badge?: number;
+  label: string;
+  hint?: string;
 }) {
   return (
     <Link
       href={href}
-      className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-body text-ink-600 hover:bg-ink-100 hover:text-ink-900 transition-colors"
+      className="group relative h-9 w-9 rounded-md grid place-items-center text-ink-500 hover:text-ink-900 hover:bg-ink-100 transition-colors"
+      aria-label={label}
+      title={hint ? `${label} · ${hint}` : label}
     >
-      <Icon name={icon} size={16} className="text-ink-400" />
-      <span className="flex-1">{children}</span>
-      {typeof badge === "number" && badge > 0 ? (
-        <span className="rounded-full bg-signal-hold/15 text-signal-hold text-[10px] font-medium px-2 py-0.5 tabular-nums">
-          {badge}
-        </span>
-      ) : null}
+      <Icon name={icon} size={16} />
     </Link>
   );
 }

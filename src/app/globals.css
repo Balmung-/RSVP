@@ -217,6 +217,20 @@ body {
   opacity: 1;
 }
 
+/* Motion: respect the OS-level reduced-motion preference. The app's
+   animations are calm by design, but anyone who's asked not to see
+   motion shouldn't get drawer slides, toast entries, or modal zooms. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Print */
 @media print {
   .no-print { display: none !important; }

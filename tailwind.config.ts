@@ -54,9 +54,12 @@ const config: Config = {
         float: "0 2px 6px rgba(0,0,0,0.04), 0 16px 40px rgba(0,0,0,0.08)",
       },
       borderRadius: { xl: "14px", "2xl": "20px" },
+      // Motion per directive: glide / reveal / align / retract.
+      // Nothing should overshoot or bounce. The `glide` curve is
+      // decelerative, arriving softly; that's the only motion voice
+      // the app should speak with.
       transitionTimingFunction: {
         glide: "cubic-bezier(0.2, 0.7, 0.1, 1)",
-        spring: "cubic-bezier(0.34, 1.56, 0.64, 1)",
       },
       keyframes: {
         "drawer-in": {
@@ -84,7 +87,7 @@ const config: Config = {
         "drawer-in": "drawer-in 220ms cubic-bezier(0.2, 0.7, 0.1, 1) both",
         "drawer-in-rtl": "drawer-in-rtl 220ms cubic-bezier(0.2, 0.7, 0.1, 1) both",
         "fade-in": "fade-in 180ms ease-out both",
-        "toast-in": "toast-in 240ms cubic-bezier(0.34, 1.56, 0.64, 1) both",
+        "toast-in": "toast-in 220ms cubic-bezier(0.2, 0.7, 0.1, 1) both",
         "modal-in": "modal-in 200ms cubic-bezier(0.2, 0.7, 0.1, 1) both",
       },
     },
