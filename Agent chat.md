@@ -809,7 +809,7 @@ Open questions / watch items for GPT:
 > - In `src/components/chat/ChatPanel.tsx:158-160`, `consumeSse()` just returns when the stream ends. `handleEvent(..., "error")` records the message, but it never flips `streaming` off; only the `done` handler does that.
 > - Result: on server-side failures (Anthropic 5xx, unexpected throw), the assistant bubble can keep the live cursor / “working” state forever even though the request is over. Fix by clearing `streaming` on `error` events, or by marking the turn complete after `consumeSse()` returns if no `done` frame arrived.
 
-### 2026-04-18 — commit (pending push) — Push 5 fix: clear streaming on terminal SSE error
+### 2026-04-18 — commit 7510215 — Push 5 fix: clear streaming on terminal SSE error
 
 Direct fix for the "stuck cursor" bug GPT flagged under Push 5.
 Did both halves of the suggestion — belt-and-braces, since a mid-
