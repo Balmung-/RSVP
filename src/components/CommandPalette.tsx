@@ -69,8 +69,43 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
     setHits([]);
   }, []);
 
+  // Two-key "g <x>" navigation à la Gmail. The prefix window is
+  // bounded by a ref timer so a lone `g` doesn't freeze other keys;
+  // arrival of any non-recognized second key clears the state.
+  const gPrefixRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const gActive = useRef(false);
+  const clearGPrefix = useCallback(() => {
+    gActive.current = false;
+    if (gPrefixRef.current) {
+      clearTimeout(gPrefixRef.current);
+      gPrefixRef.current = null;
+    }
+  }, []);
+
   // Global shortcuts.
   useEffect(() => {
+    // g <x> destinations. Scoped to routes that actually exist for
+    // the current role — the navigation menu already knows what's
+    // visible, we mirror that here so an editor pressing "g a" for
+    // approvals silently falls through instead of 404'ing.
+    const gRoutes: Record<string, string> = {
+      h: "/",
+      c: "/campaigns",
+      p: "/contacts",
+      t: "/templates",
+      i: "/inbox",
+      s: "/settings",
+      ...(isAdmin
+        ? {
+            a: "/approvals",
+            d: "/deliverability",
+            u: "/unsubscribes",
+            e: "/events",
+          }
+        : {}),
+      ...(teamsOn ? { m: "/teams" } : {}),
+    };
+
     function onKey(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
       const inField = !!target?.closest("input, textarea, select, [contenteditable='true']");
@@ -78,20 +113,54 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
       if (meta && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setOpen((v) => !v);
-      } else if (e.key === "/" && !inField && !open) {
-        e.preventDefault();
-        setOpen(true);
-      } else if (e.key === "?" && !inField && !open) {
-        e.preventDefault();
-        setHelp(true);
-      } else if (e.key === "Escape") {
+        clearGPrefix();
+        return;
+      }
+      if (e.key === "Escape") {
         if (help) setHelp(false);
         else if (open) close();
+        clearGPrefix();
+        return;
+      }
+      if (inField || open || help) return;
+
+      if (e.key === "/") {
+        e.preventDefault();
+        setOpen(true);
+        clearGPrefix();
+        return;
+      }
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelp(true);
+        clearGPrefix();
+        return;
+      }
+
+      // Two-key navigation. If we're mid-prefix and the key resolves,
+      // navigate; otherwise arm / re-arm the prefix on 'g'.
+      if (gActive.current) {
+        const key = e.key.toLowerCase();
+        const dest = gRoutes[key];
+        clearGPrefix();
+        if (dest) {
+          e.preventDefault();
+          router.push(dest);
+        }
+        return;
+      }
+      if (e.key.toLowerCase() === "g") {
+        gActive.current = true;
+        if (gPrefixRef.current) clearTimeout(gPrefixRef.current);
+        // 1.2s is longer than a two-finger gesture feels but shorter
+        // than a typo's attention span — long enough for intent, short
+        // enough to not dangle.
+        gPrefixRef.current = setTimeout(() => clearGPrefix(), 1200);
       }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, help, close]);
+  }, [open, help, close, clearGPrefix, router, isAdmin, teamsOn]);
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 10);
@@ -274,15 +343,30 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
           <div
             role="dialog"
             aria-modal="true"
-            className="max-w-sm mx-auto mt-24 panel bg-ink-0 shadow-float p-6 animate-modal-in"
+            className="max-w-md mx-auto mt-24 panel bg-ink-0 shadow-float p-6 animate-modal-in"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-sub text-ink-900 mb-4">Keyboard shortcuts</h2>
-            <ul className="flex flex-col gap-2 text-body text-ink-700">
+            <div className="text-micro uppercase tracking-wider text-ink-400 mb-2">Global</div>
+            <ul className="flex flex-col gap-2 text-body text-ink-700 mb-5">
               <Shortcut keys={["⌘", "K"]} label="Open command palette" />
               <Shortcut keys={["/"]} label="Open command palette" />
               <Shortcut keys={["?"]} label="Show this help" />
               <Shortcut keys={["Esc"]} label="Close any dialog" />
+            </ul>
+            <div className="text-micro uppercase tracking-wider text-ink-400 mb-2">Jump to</div>
+            <ul className="flex flex-col gap-2 text-body text-ink-700">
+              <Shortcut keys={["g", "h"]} label="Overview" />
+              <Shortcut keys={["g", "c"]} label="Campaigns" />
+              <Shortcut keys={["g", "p"]} label="Contacts" />
+              <Shortcut keys={["g", "t"]} label="Templates" />
+              <Shortcut keys={["g", "i"]} label="Inbox" />
+              <Shortcut keys={["g", "s"]} label="Settings" />
+              {isAdmin ? <Shortcut keys={["g", "a"]} label="Approvals" /> : null}
+              {isAdmin ? <Shortcut keys={["g", "d"]} label="Deliverability" /> : null}
+              {isAdmin ? <Shortcut keys={["g", "u"]} label="Unsubscribes" /> : null}
+              {isAdmin ? <Shortcut keys={["g", "e"]} label="Events" /> : null}
+              {teamsOn ? <Shortcut keys={["g", "m"]} label="Teams" /> : null}
             </ul>
           </div>
         </div>
