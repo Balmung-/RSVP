@@ -11,6 +11,10 @@ import {
   ActivityStream,
   type ActivityStreamProps,
 } from "./directives/ActivityStream";
+import {
+  ConfirmDraft,
+  type ConfirmDraftProps,
+} from "./directives/ConfirmDraft";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -67,6 +71,13 @@ export function DirectiveRenderer({
       return (
         <ActivityStream
           props={directive.props as unknown as ActivityStreamProps}
+          fmt={fmt}
+        />
+      );
+    case "confirm_draft":
+      return (
+        <ConfirmDraft
+          props={directive.props as unknown as ConfirmDraftProps}
           fmt={fmt}
         />
       );
