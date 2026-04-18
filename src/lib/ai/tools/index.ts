@@ -1,5 +1,8 @@
 import type { DispatchResult, ToolCtx, ToolDef } from "./types";
 import { listCampaignsTool } from "./list_campaigns";
+import { campaignDetailTool } from "./campaign_detail";
+import { searchContactsTool } from "./search_contacts";
+import { recentActivityTool } from "./recent_activity";
 
 // The AI tool registry. Tools self-register by being pushed into
 // `tools` below (one file per tool, imported here). For the scaffold
@@ -18,8 +21,20 @@ import { listCampaignsTool } from "./list_campaigns";
 // route) are responsible for building ctx from an authenticated user
 // and for the rate limiter. Dispatch assumes ctx is trustworthy.
 
+// Typed-to-untyped cast via `unknown` is deliberate. Each tool
+// declares its own `Input` shape on `ToolDef<Input>` so handlers
+// can trust narrowed fields — but the registry holds the set as a
+// uniform `ToolDef`. A direct `as ToolDef` fails when Input has
+// required fields (the handler signature isn't assignable to
+// `(input: Record<string, unknown>, …)`), so we go through
+// `unknown`. Dispatch is still safe: the per-tool `validate()`
+// runs before the handler sees the input, turning any
+// mis-shaped object into a structured error result.
 export const tools: ToolDef[] = [
-  listCampaignsTool as ToolDef,
+  listCampaignsTool as unknown as ToolDef,
+  campaignDetailTool as unknown as ToolDef,
+  searchContactsTool as unknown as ToolDef,
+  recentActivityTool as unknown as ToolDef,
 ];
 
 export function getTool(name: string): ToolDef | undefined {

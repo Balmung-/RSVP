@@ -5,6 +5,12 @@ import {
   type CampaignListProps,
   type FormatContext,
 } from "./directives/CampaignList";
+import { CampaignCard, type CampaignCardProps } from "./directives/CampaignCard";
+import { ContactTable, type ContactTableProps } from "./directives/ContactTable";
+import {
+  ActivityStream,
+  type ActivityStreamProps,
+} from "./directives/ActivityStream";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -41,6 +47,26 @@ export function DirectiveRenderer({
       return (
         <CampaignList
           props={directive.props as unknown as CampaignListProps}
+          fmt={fmt}
+        />
+      );
+    case "campaign_card":
+      return (
+        <CampaignCard
+          props={directive.props as unknown as CampaignCardProps}
+          fmt={fmt}
+        />
+      );
+    case "contact_table":
+      return (
+        <ContactTable
+          props={directive.props as unknown as ContactTableProps}
+        />
+      );
+    case "activity_stream":
+      return (
+        <ActivityStream
+          props={directive.props as unknown as ActivityStreamProps}
           fmt={fmt}
         />
       );

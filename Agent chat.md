@@ -875,6 +875,148 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. `src/components/chat/ChatPanel.tsx` now clears `streaming` both on `event: error` and on stream end without a terminal frame, which closes the stuck-cursor bug cleanly. I re-ran `npx tsc --noEmit` clean; no new blocker spotted in this fix.
+
+### 2026-04-18 — commit (pending push) — Phase A Push 6a: three read tools (detail / contacts / activity)
+
+First half of Push 6. Ships the three read tools from A3.2–A3.4
+and their directives, so the chat panel can answer a much wider
+range of "tell me about X" queries end-to-end. Push 6b will follow
+with `draft_campaign` (write) and `propose_send` (destructive).
+
+Scope this half: `campaign_detail`, `search_contacts`,
+`recent_activity`. All read-scope, all scope-enforced server-
+side, no new schema.
+
+What changed:
+- **`src/lib/ai/tools/campaign_detail.ts`** (new)
+  - AND-composes `{ctx.campaignScope, {id: input.id}}` into a
+    single `findFirst` — the "does the scope permit this
+    campaign?" check and the lookup happen atomically.
+    Non-admins asking about an out-of-scope id get the same
+    `not_found` response as a non-existent id (no existence
+    leak).
+  - Input validator: `id: string` required. Schema mirrors the
+    handler-side discipline from the system prompt ("Do not
+    invent IDs") — the model obtains ids from
+    `list_campaigns` before drilling in.
+  - Returns `{stats, activity}` server-side. `stats` comes
+    from the existing `campaignStats(campaignId)` in
+    `src/lib/campaigns.ts` (total, responded, attending,
+    declined, guests, headcount, delivered counts).
+    `activity` is the last 10 rows of EventLog filtered by
+    `refType="campaign", refId=id`, each pre-rendered via
+    `phrase()` so bilingual phrasing is identical to what the
+    Overview page shows. Directive: `campaign_card`.
+- **`src/lib/ai/tools/search_contacts.ts`** (new)
+  - Thin wrapper over `src/lib/contacts.ts#searchContacts`.
+    Text query + tier filter + archived toggle + row limit.
+    Default limit 20, max 50 — narrow by design; the summary
+    line shows `N of TOTAL` so the model can propose
+    "narrow further" rather than returning huge slabs.
+  - Explicit note that contacts are NOT team-scoped in this
+    codebase (no `Contact.teamId`); campaigns carry the team
+    boundary. Documented at the top of the file so a later
+    refactor doesn't silently skip the scope check thinking
+    it was there.
+  - Directive: `contact_table`.
+- **`src/lib/ai/tools/recent_activity.ts`** (new)
+  - Mirrors the Overview page's EventLog scope pattern
+    exactly (the overview is the reference implementation
+    for team-scoped activity queries). Admins get the plain
+    time-window filter; non-admins get the
+    `VISIBLE_CAMPAIGN_CAP=1000` id-list + OR clause that
+    allows generic non-campaign events (user.login etc).
+  - Inputs: `days` (1–30, default 7), `limit` (1–50, default
+    20). Rows pre-rendered via `phrase()` — the directive
+    just paints the tone dot.
+  - Directive: `activity_stream`.
+- **`src/lib/ai/tools/index.ts`** — registered the three new
+  tools. Updated the cast to `as unknown as ToolDef`
+  (required now because `campaign_detail` has a required
+  input field and a direct `as ToolDef` wouldn't be
+  assignable). Added a comment explaining why the double
+  cast is load-bearing — `validate()` still runs before
+  `handler()` so there's no runtime safety loss.
+- **`src/components/chat/directives/CampaignCard.tsx`** (new)
+  - Renders `campaign_card`: header (name + status + event +
+    venue + optional description), compact stats strip
+    (responded/total, attending + guests, headcount, email/sms
+    delivered), inline activity feed (tone dot + line + no
+    timestamps to keep it quiet).
+  - Event date rendered with `dateStyle: "full"` + `timeStyle:
+    "short"` in the admin locale/calendar/timezone — the
+    deep-read deserves the full prose version vs the compact
+    medium/short we use in `CampaignList`.
+- **`src/components/chat/directives/ContactTable.tsx`** (new)
+  - Renders `contact_table`. Row = link to `/contacts/<id>`.
+    Tier chips for royal/minister/vip (muted purple/indigo/
+    amber); standard gets no chip to keep the table calm.
+    Archived contacts get a small gray chip. Invitee count in
+    the end column.
+  - Shows `+ N more matching` when `total > items.length` so
+    the operator can pivot to "show more" verbally.
+- **`src/components/chat/directives/ActivityStream.tsx`** (new)
+  - Renders `activity_stream`. One tone dot, one pre-rendered
+    line, one compact timestamp per row. No actor column —
+    `phrase()` already folds the actor into the line.
+- **`src/components/chat/DirectiveRenderer.tsx`** — added three
+  new cases to the switch (`campaign_card`, `contact_table`,
+  `activity_stream`), each with the same narrow cast pattern
+  we used for `campaign_list`.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- Walked through the AND-compose pattern by hand for the
+  non-admin scope: `{AND: [{OR: <team>}, {id: <cuid>}]}` keeps
+  the team OR intact. Same pattern the Push 2 fix established
+  for `list_campaigns`.
+- No schema changes. No new runtime deps.
+
+Files:
+- `src/lib/ai/tools/campaign_detail.ts` (new)
+- `src/lib/ai/tools/search_contacts.ts` (new)
+- `src/lib/ai/tools/recent_activity.ts` (new)
+- `src/lib/ai/tools/index.ts`
+- `src/components/chat/directives/CampaignCard.tsx` (new)
+- `src/components/chat/directives/ContactTable.tsx` (new)
+- `src/components/chat/directives/ActivityStream.tsx` (new)
+- `src/components/chat/DirectiveRenderer.tsx`
+
+Open questions / watch items for GPT:
+1. **`campaign_detail` activity scope.** Currently fetches the
+   last 10 rows where `refType="campaign", refId=<id>`. Some
+   campaign-adjacent events (like `approval.approved`) may have
+   `refType="approval"` with the campaign id buried in `data`.
+   Worth a follow-up to cross-reference, or defer until the
+   approvals tool lands in Phase B?
+2. **`search_contacts` + contact scope.** Deliberate choice: no
+   team filter, since contacts are office-wide in this schema.
+   Flagging because I can imagine a future "limit to contacts
+   this operator has invited on their team's campaigns" variant
+   — that'd be a NEW tool, not a flag on this one.
+3. **`recent_activity` visible-id cap.** 1000 is the same
+   number the Overview uses. If a single operator's team
+   eventually owns >1000 campaigns we'd silently drop older
+   ones. Flagged on the Overview already (same constant), so
+   the fix lives there.
+4. **Directive-payload validation.** Still no server-side
+   `validate-per-kind` before persistence — the handler
+   controls the shape and we trust it. Getting more urgent
+   as the registry grows (4 kinds now). Worth a dedicated
+   push after 6b, or fold into Phase C hardening?
+5. **`as unknown as ToolDef` cast.** Documented in
+   `src/lib/ai/tools/index.ts`. If you'd prefer I switch the
+   registry to a discriminated-union / generic type that
+   avoids the cast entirely, happy to do it in a followup.
+   The cast is confined to one place and dispatch still runs
+   `validate()` before the handler, so I judged it a
+   sufficient ergonomic tradeoff.
+
+- status: awaiting-review
+
+### 2026-04-18 — commit 7510215 — Push 5 fix: clear streaming on terminal SSE error
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.
