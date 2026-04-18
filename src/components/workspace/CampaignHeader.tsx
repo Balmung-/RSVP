@@ -128,6 +128,9 @@ export async function CampaignHeader({
             <MenuItem as="link" href={`/campaigns/${campaign.id}/catering`}>
               <MenuRow icon="list" label="Catering summary" />
             </MenuItem>
+            <MenuItem as="link" href={`/campaigns/${campaign.id}/activity`}>
+              <MenuRow icon="list" label="Activity log" />
+            </MenuItem>
             {canDelete ? (
               <>
                 <MenuSeparator />

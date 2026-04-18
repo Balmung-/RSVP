@@ -29,6 +29,18 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
 
     case "campaign.deleted":
       return { line: `${actor} deleted campaign "${data.name ?? "?"}".`, tone: "warn" };
+    case "campaign.export":
+      return { line: `${actor} exported responses to CSV${typeof data.rows === "number" ? ` (${data.rows} rows)` : ""}.`, tone: "default" };
+
+    case "approval.requested":
+      return {
+        line: `${actor} requested admin approval — ${fmtCount(data.recipients)} recipient${data.recipients === 1 ? "" : "s"} on ${channelLabel(data.channel)}.`,
+        tone: "warn",
+      };
+    case "approval.approved":
+      return { line: `${actor} approved the send — ${fmtCount(data.recipients)} on ${channelLabel(data.channel)}.`, tone: "success" };
+    case "approval.rejected":
+      return { line: `${actor} rejected the send.${data.note ? ` "${String(data.note).slice(0, 120)}"` : ""}`, tone: "fail" };
 
     case "import.completed":
       return {
@@ -41,8 +53,7 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
       };
 
     case "invite.sent": {
-      const ch = data.channel ?? "message";
-      return { line: `Invitation sent via ${ch}.`, tone: "default" };
+      return { line: `Invitation sent via ${channelLabel(data.channel)}.`, tone: "default" };
     }
     case "invite.delivered":
       return { line: `Delivery confirmed.`, tone: "success" };
@@ -50,6 +61,10 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
       return { line: `Delivery failed — ${data.error ?? "provider error"}.`, tone: "fail" };
     case "invite.bounced":
       return { line: `Delivery bounced.`, tone: "fail" };
+    case "invite.retry.ok":
+      return { line: `${actor} retried and the resend succeeded.`, tone: "success" };
+    case "invite.retry.fail":
+      return { line: `${actor} retried — still failing${data.error ? ` (${data.error})` : ""}.`, tone: "fail" };
 
     case "rsvp.submitted":
       return {
@@ -64,6 +79,65 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
         line: `Stage completed — ${data.sent ?? 0} sent, ${data.failed ?? 0} failed.`,
         tone: data.failed > 0 ? "warn" : "success",
       };
+    case "stage.failed":
+      return { line: `Stage failed${data.error ? ` — ${data.error}` : "."}`, tone: "fail" };
+
+    case "inbound.applied":
+      return {
+        line: data.intent === "attending"
+          ? `Auto-applied an attending reply from ${channelLabel(data.channel)}.`
+          : data.intent === "declined"
+            ? `Auto-applied a declined reply from ${channelLabel(data.channel)}.`
+            : `Auto-processed an inbound ${String(data.intent ?? "reply")}.`,
+        tone: "success",
+      };
+    case "inbound.reviewed":
+      return { line: `${actor} applied "${data.decision ?? "?"}" from ${channelLabel(data.channel)} inbox.`, tone: "default" };
+    case "inbound.ack.sent":
+      return { line: `Sent a ${data.intent ?? ""} acknowledgment via ${channelLabel(data.channel)}.`, tone: "default" };
+    case "inbound.ack.failed":
+      return { line: `Acknowledgment failed to deliver${data.error ? ` — ${data.error}` : "."}`, tone: "warn" };
+
+    case "unsubscribe.one_click":
+      return { line: `A recipient unsubscribed via one-click.`, tone: "warn" };
+    case "contact.unsubscribed":
+      return { line: `${actor} marked a contact opted out.`, tone: "warn" };
+    case "contact.resubscribed":
+      return { line: `${actor} restored consent for a contact.`, tone: "default" };
+    case "contact.deleted":
+      return { line: `${actor} deleted a contact.`, tone: "warn" };
+
+    case "template.created":
+      return { line: `${actor} created a template.`, tone: "default" };
+    case "template.updated":
+      return { line: `${actor} updated a template.`, tone: "default" };
+    case "template.archived":
+      return { line: `${actor} archived a template.`, tone: "default" };
+    case "template.unarchived":
+      return { line: `${actor} unarchived a template.`, tone: "default" };
+    case "template.deleted":
+      return { line: `${actor} deleted a template.`, tone: "warn" };
+
+    case "team.updated":
+      return { line: `${actor} updated team settings.`, tone: "default" };
+    case "team.member_added":
+      return { line: `${actor} added a team member.`, tone: "default" };
+    case "team.member_removed":
+      return { line: `${actor} removed a team member.`, tone: "default" };
+    case "team.archived":
+      return { line: `${actor} archived the team.`, tone: "default" };
+    case "team.unarchived":
+      return { line: `${actor} unarchived the team.`, tone: "default" };
+    case "team.deleted":
+      return { line: `${actor} deleted the team.`, tone: "warn" };
+
+    case "user.2fa_enabled":
+      return { line: `${actor} turned on two-step sign-in.`, tone: "success" };
+    case "user.2fa_disabled":
+      return { line: `${actor} turned off two-step sign-in.`, tone: "warn" };
+
+    case "unsubscribes.export":
+      return { line: `${actor} exported the unsubscribe list${typeof data.rows === "number" ? ` (${data.rows} rows)` : ""}.`, tone: "default" };
 
     case "checkin.arrived":
       return { line: `An invitee arrived at the event${data.guests ? ` (+${data.guests})` : ""}.`, tone: "success" };
@@ -82,4 +156,16 @@ function safeJSON(raw: string | null | undefined): Record<string, unknown> & { [
   } catch {
     return {};
   }
+}
+
+function channelLabel(ch: unknown): string {
+  if (ch === "email") return "email";
+  if (ch === "sms") return "SMS";
+  if (ch === "both") return "email + SMS";
+  if (typeof ch === "string" && ch) return ch;
+  return "message";
+}
+
+function fmtCount(n: unknown): string {
+  return typeof n === "number" ? n.toLocaleString() : "?";
 }
