@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Campaign, Team } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
 import { FileInput } from "./FileInput";
+import { Field } from "./Field";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
 // The submit action is whatever the caller binds — we just collect fields.
@@ -164,11 +165,3 @@ export function CampaignForm({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

@@ -1,4 +1,5 @@
 import type { Invitee } from "@prisma/client";
+import { Field } from "./Field";
 
 // Shared between /invitees/new and /invitees/[id]/edit.
 // The form emits raw strings — validation + normalization live in the action.
@@ -106,11 +107,3 @@ export function InviteeForm({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

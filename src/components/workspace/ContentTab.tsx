@@ -4,6 +4,7 @@ import { FileInput } from "@/components/FileInput";
 import { Icon } from "@/components/Icon";
 import { QUESTION_KINDS, SHOW_WHEN, needsOptions } from "@/lib/questions";
 import { ATTACHMENT_KINDS, formatBytes, type HydratedAttachment } from "@/lib/attachments";
+import { Field } from "@/components/Field";
 
 const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 const dateFmt = new Intl.DateTimeFormat("en-GB", {
@@ -270,11 +271,3 @@ function Section({ title, hint, children }: { title: string; hint: string; child
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

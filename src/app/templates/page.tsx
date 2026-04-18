@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { listTemplates, type TemplateKind } from "@/lib/templates";
+import { FilterPill, FilterLabel } from "@/components/FilterPill";
 
 export const dynamic = "force-dynamic";
 
@@ -23,17 +24,6 @@ export default async function TemplatesPage({
 
   const canWrite = hasRole(me, "editor");
 
-  const chip = (href: string, label: string, active: boolean) => (
-    <Link
-      href={href}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-mini transition-colors ${
-        active ? "bg-ink-900 text-ink-0" : "bg-ink-100 text-ink-600 hover:bg-ink-200"
-      }`}
-    >
-      {label}
-    </Link>
-  );
-
   return (
     <Shell
       title="Templates"
@@ -47,13 +37,47 @@ export default async function TemplatesPage({
         ) : null
       }
     >
-      <div className="flex items-center gap-2 mb-6 flex-wrap">
-        {chip("/templates", "All", !kind && !locale)}
-        {chip("/templates?kind=email", "Email", kind === "email")}
-        {chip("/templates?kind=sms", "SMS", kind === "sms")}
-        <span className="h-4 w-px bg-ink-200 mx-2" />
-        {chip("/templates?locale=en", "EN", locale === "en")}
-        {chip("/templates?locale=ar", "AR", locale === "ar")}
+      <div className="flex items-center gap-3 mb-6 flex-wrap">
+        <FilterLabel>Kind</FilterLabel>
+        <div className="flex items-center gap-1">
+          <FilterPill href="/templates" active={!kind}>All</FilterPill>
+          <FilterPill
+            href={`/templates?kind=email${locale ? `&locale=${locale}` : ""}`}
+            active={kind === "email"}
+          >
+            Email
+          </FilterPill>
+          <FilterPill
+            href={`/templates?kind=sms${locale ? `&locale=${locale}` : ""}`}
+            active={kind === "sms"}
+          >
+            SMS
+          </FilterPill>
+        </div>
+        <FilterLabel>Locale</FilterLabel>
+        <div className="flex items-center gap-1">
+          <FilterPill
+            href={kind ? `/templates?kind=${kind}` : "/templates"}
+            active={!locale}
+          >
+            Any
+          </FilterPill>
+          <FilterPill
+            href={`/templates?locale=en${kind ? `&kind=${kind}` : ""}`}
+            active={locale === "en"}
+          >
+            EN
+          </FilterPill>
+          <FilterPill
+            href={`/templates?locale=ar${kind ? `&kind=${kind}` : ""}`}
+            active={locale === "ar"}
+          >
+            AR
+          </FilterPill>
+        </div>
+        {(kind || locale) ? (
+          <Link href="/templates" className="text-mini text-ink-500 hover:text-ink-900 ms-auto">Clear</Link>
+        ) : null}
       </div>
 
       {templates.length === 0 ? (

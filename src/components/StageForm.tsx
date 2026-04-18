@@ -1,6 +1,7 @@
 import type { CampaignStage } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
 import { STAGE_KINDS, AUDIENCE_KINDS } from "@/lib/stages";
+import { Field } from "./Field";
 
 // Shared between add/edit stage. Thin form — parsing + normalization happen
 // in the server action so this stays dumb.
@@ -105,11 +106,3 @@ export function StageForm({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
+import { Field } from "@/components/Field";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { canSeeCampaign, canSeeCampaignRow } from "@/lib/teams";
@@ -212,11 +213,3 @@ function PreviewCard({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-micro uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

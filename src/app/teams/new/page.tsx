@@ -5,6 +5,7 @@ import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { createTeam, teamsEnabled } from "@/lib/teams";
 import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
+import { Field } from "@/components/Field";
 
 export const dynamic = "force-dynamic";
 
@@ -76,11 +77,3 @@ export default async function NewTeam({ searchParams }: { searchParams: { e?: st
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-micro uppercase text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

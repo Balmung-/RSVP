@@ -1,5 +1,6 @@
 import type { Contact } from "@prisma/client";
 import { VIP_TIERS, VIP_LABEL } from "@/lib/contacts";
+import { Field } from "./Field";
 
 export function ContactForm({
   contact,
@@ -128,11 +129,3 @@ export function ContactForm({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-micro uppercase text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

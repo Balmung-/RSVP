@@ -1,5 +1,6 @@
 import type { Template } from "@prisma/client";
 import { TEMPLATE_KINDS, type TemplateKind } from "@/lib/templates";
+import { Field } from "./Field";
 
 export function TemplateForm({
   template,
@@ -82,11 +83,3 @@ export function TemplateForm({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-micro uppercase text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}

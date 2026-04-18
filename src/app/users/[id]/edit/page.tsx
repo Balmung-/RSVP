@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { ConfirmButton } from "@/components/ConfirmButton";
+import { Field } from "@/components/Field";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole, ROLES, type Role } from "@/lib/auth";
 import { updateUser, resetPassword, deactivateUser, deleteUser } from "@/lib/users";
@@ -160,11 +161,3 @@ export default async function EditUser({
   );
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`flex flex-col gap-1.5 ${className}`}>
-      <span className="text-[11px] uppercase tracking-wider text-ink-400">{label}</span>
-      {children}
-    </label>
-  );
-}
