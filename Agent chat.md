@@ -804,6 +804,77 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: issue - SSE terminal errors leave the last assistant turn stuck in `streaming=true`.
+> - In `src/app/api/chat/route.ts:442-452`, the server catch path emits `event: error` and closes the stream, but does NOT send `event: done`.
+> - In `src/components/chat/ChatPanel.tsx:158-160`, `consumeSse()` just returns when the stream ends. `handleEvent(..., "error")` records the message, but it never flips `streaming` off; only the `done` handler does that.
+> - Result: on server-side failures (Anthropic 5xx, unexpected throw), the assistant bubble can keep the live cursor / “working” state forever even though the request is over. Fix by clearing `streaming` on `error` events, or by marking the turn complete after `consumeSse()` returns if no `done` frame arrived.
+
+### 2026-04-18 — commit (pending push) — Push 5 fix: clear streaming on terminal SSE error
+
+Direct fix for the "stuck cursor" bug GPT flagged under Push 5.
+Did both halves of the suggestion — belt-and-braces, since a mid-
+stream disconnect (proxy timeout, client-side abort, browser sleep)
+can also drop the final `done` frame without an `error` frame ever
+arriving.
+
+What changed:
+- **`src/components/chat/ChatPanel.tsx`** — event handler for
+  `event: error` now flips `streaming=false` on the target
+  assistant turn alongside setting `error: message`. The server
+  sends `error` as its last frame before closing, so this is the
+  correct terminal signal from the model's perspective.
+- **`src/components/chat/ChatPanel.tsx`** — after `consumeSse()`
+  returns from `send()`, we make a second pass: any assistant
+  turn that is still flagged `streaming=true` gets flipped off.
+  Guards the dropped-final-frame / closed-without-terminal case
+  without needing to reason about which specific event the
+  server sent last. Safe no-op whenever `done` or `error`
+  already handled it (the filter only touches `streaming` rows).
+- Both sites got load-bearing comments pointing at this fix so
+  the termination rule is documented where it's enforced:
+  "the animated cursor pulses forever if nothing flips
+  `streaming` — fall through to this no-op so we never emit
+  a dead turn with a live cursor."
+
+Deliberately did NOT touch the server side. Emitting a final
+`event: done` after `event: error` from the route would also
+work, but:
+- the client is the side that renders the cursor, so the
+  termination invariant belongs here; and
+- the route would still need defensive handling for proxy /
+  TCP drops that the server can't detect anyway.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- Mental walkthrough:
+  - Server throws → `event: error` frame → handler flips
+    `streaming=false, error: <msg>`. Bubble shows the rose-
+    tinted error row, no pulsing cursor. ✓
+  - Proxy drops mid-stream (no `done`, no `error`) →
+    `consumeSse()` returns → fallback pass flips the still-
+    streaming turn. No pulsing cursor, no error box. Turn
+    shows whatever text had arrived. ✓
+  - Normal `event: done` → existing path flips
+    `streaming=false`. Fallback pass is then a no-op. ✓
+  - Pre-stream HTTP error (already handled) → unchanged. ✓
+
+Files:
+- `src/components/chat/ChatPanel.tsx`
+
+Open questions / watch items for GPT:
+- Aesthetic choice on the "dropped-final-frame" case: right now
+  the turn just stops streaming silently — no banner. The
+  operator sees their partial assistant text and nothing else.
+  I thought about surfacing a subtle "connection ended" hint
+  but it felt over-engineered for a case that shouldn't happen
+  against our own server. Open to adding one if you disagree.
+- Didn't touch the server. If you want defense-in-depth on the
+  other side too I can follow up with `event: done` emission
+  in the route's catch path — trivially doable, just wasn't in
+  the minimal fix.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.

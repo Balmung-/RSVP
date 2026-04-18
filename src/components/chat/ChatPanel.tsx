@@ -158,6 +158,21 @@ export function ChatPanel({ fmt }: { fmt: FormatContext }) {
       await consumeSse(res.body, (ev) => {
         handleEvent(ev, asstId, sessionIdRef, setTurns);
       });
+      // Belt-and-braces: if the stream ended without emitting a
+      // terminal `done` frame (e.g. the server closed after an
+      // `event: error`, or a proxy dropped the connection without
+      // delivering the final bytes), make sure the in-progress
+      // assistant turn isn't stuck in `streaming=true` — the
+      // animated cursor would otherwise pulse forever on a dead
+      // turn. Safe no-op when `done` was already handled: we
+      // only flip rows that are still streaming.
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.kind === "assistant" && t.id === asstId && t.streaming
+            ? { ...t, streaming: false }
+            : t,
+        ),
+      );
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
       const msg = err instanceof Error ? err.message : "stream_error";
@@ -527,10 +542,16 @@ function handleEvent(
     const obj = data as { message?: string } | null;
     const message =
       obj && typeof obj.message === "string" ? obj.message : "stream_error";
+    // `error` is terminal from the server's perspective — the route
+    // closes the stream straight after. We also flip `streaming` off
+    // here so the animated cursor stops even if a `done` frame
+    // never arrives (the outer fallback in `send()` catches that
+    // case too, but doing it here means the UI updates mid-stream
+    // the instant the error lands, not after the socket drains).
     setTurns((prev) =>
       prev.map((t) =>
         t.kind === "assistant" && t.id === assistantId
-          ? { ...t, error: message }
+          ? { ...t, streaming: false, error: message }
           : t,
       ),
     );
