@@ -60,8 +60,19 @@ export async function maybeSendDailyDigest(now: Date = new Date()): Promise<Dige
   if (!enabled()) return { sent: false as const, reason: "disabled" };
   if (localHour(now) < digestHour()) return { sent: false as const, reason: "too_early" };
   const dateKey = localDateKey(now);
+  // Idempotency: look for a digest.sent event whose data carries this
+  // specific key-value pair. Narrowing by (1) kind, (2) a distinctive
+  // substring that includes the field name, and (3) a 36h lookback so
+  // yesterday's digest can never match eliminates the false-positive
+  // risk from a different event kind that happens to contain today's
+  // date elsewhere in its JSON.
+  const dayStart = new Date(now.getTime() - 36 * 3600_000);
   const already = await prisma.eventLog.findFirst({
-    where: { kind: "digest.sent", data: { contains: dateKey } },
+    where: {
+      kind: "digest.sent",
+      createdAt: { gte: dayStart },
+      data: { contains: `"dateKey":"${dateKey}"` },
+    },
     select: { id: true },
   });
   if (already) return { sent: false as const, reason: "already_sent" };

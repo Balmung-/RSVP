@@ -257,9 +257,14 @@ export { normalizeChannels, audienceWhere };
 // Quick-add: drop in a "remind non-responders N hours before the event"
 // stage without the operator having to do offset math. Returns an error
 // code when the campaign has no eventAt, the offset would put the
-// reminder in the past, or a reminder already exists within ±15 minutes
-// of this time (collision guard — keeps someone mashing the button from
-// queuing five identical stages).
+// reminder in the past, or a quick-reminder already exists within ±15
+// minutes of this time (collision guard — keeps someone mashing the
+// button from queuing five identical stages).
+//
+// Collision check is scoped to kind=reminder + audience=non_responders
+// on purpose: a hand-built reminder with a different audience (e.g.
+// "attending" reconfirmation) shares the calendar but serves a
+// different goal, so we don't consider it a collision.
 export async function addStandardReminder(
   campaignId: string,
   offsetHoursBefore: number,

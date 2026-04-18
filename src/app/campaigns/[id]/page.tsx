@@ -177,7 +177,8 @@ async function addReminderAction(campaignId: string, formData: FormData) {
   "use server";
   await requireRole("editor");
   const raw = Number(formData.get("hoursBefore"));
-  const allowed = [1, 4, 24, 72, 168] as const;
+  // Must stay in sync with REMINDER_OFFSETS in ScheduleTab.tsx.
+  const allowed = [1, 4, 24, 168] as const;
   const hours: number = (allowed as readonly number[]).includes(raw) ? raw : 24;
   const res = await addStandardReminder(campaignId, hours);
   if (!res.ok) {

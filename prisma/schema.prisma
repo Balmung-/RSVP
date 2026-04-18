@@ -189,6 +189,9 @@ model Invitation {
 
   @@index([campaignId, channel, status])
   @@index([providerId])
+  // Supports the daily digest and /deliverability queries that scan all
+  // failing/bounced invitations in the last N days across every campaign.
+  @@index([status, createdAt])
 }
 
 // A Response captures the invitee's RSVP answer. One per invitee.
