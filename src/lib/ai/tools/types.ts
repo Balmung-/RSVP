@@ -17,6 +17,16 @@ export type ToolScope = "read" | "write" | "destructive";
 // The request-scoped context every handler receives. Built in
 // src/lib/ai/ctx.ts from the authenticated session; no handler should
 // call getCurrentUser() directly — use ctx.user.
+//
+// IMPORTANT — scope composition rule. `campaignScope` is
+// `Prisma.CampaignWhereInput` and may itself contain top-level
+// boolean keys (`OR` for the non-admin team filter). NEVER compose
+// it into a handler's `where` by object-spreading (`{...campaignScope,
+// OR: [...]}`) — a second top-level `OR` on the spread target will
+// silently clobber the first and drop team scoping. Always compose
+// with an AND array: `{ AND: [campaignScope, otherClause, ...] }`.
+// See the Push 2 audit in `Agent chat.md` for the concrete leak we
+// caught with this mistake.
 export type ToolCtx = {
   user: User;
   isAdmin: boolean;
