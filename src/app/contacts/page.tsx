@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { isAuthed } from "@/lib/auth";
 import { searchContacts, VIP_LABEL, type VipTier, resolveContactOptOuts, contactOptOutState } from "@/lib/contacts";
+import { FilterPill, FilterLabel } from "@/components/FilterPill";
 
 export const dynamic = "force-dynamic";
 
@@ -91,8 +92,11 @@ export default async function ContactsPage({
         </Link>
       }
     >
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
-        <form method="get" className="flex-1 relative max-w-md">
+      {/* Horizontal filter strip — search on the left (slim, no panel),
+          tier pills inline on the right. Same composition as the other
+          list pages so the whole app reads as one. */}
+      <div className="flex items-center gap-3 mb-6 flex-wrap">
+        <form method="get" className="relative flex-1 max-w-md">
           <label className="sr-only" htmlFor="contact-search">Search contacts</label>
           <Icon name="search" size={14} className="absolute start-3 top-1/2 -translate-y-1/2 text-ink-400" />
           <input
@@ -104,18 +108,18 @@ export default async function ContactsPage({
           />
           {tier !== "all" ? <input type="hidden" name="tier" value={tier} /> : null}
         </form>
-        <div className="flex items-center gap-1 text-mini">
-          <TierChip label="All" active={tier === "all"} href={tierHref("all")} />
+        <FilterLabel>Tier</FilterLabel>
+        <div className="flex items-center gap-1">
+          <FilterPill href={tierHref("all")} active={tier === "all"}>All</FilterPill>
           {(["royal", "minister", "vip", "standard"] as const).map((t) => (
-            <TierChip
-              key={t}
-              label={VIP_LABEL[t]}
-              href={tierHref(t)}
-              active={tier === t}
-              dot={tierDot[t]}
-            />
+            <FilterPill key={t} href={tierHref(t)} active={tier === t} dot={tierDot[t]}>
+              {VIP_LABEL[t]}
+            </FilterPill>
           ))}
         </div>
+        {(q || tier !== "all") ? (
+          <Link href="/contacts" className="text-mini text-ink-500 hover:text-ink-900">Clear</Link>
+        ) : null}
       </div>
 
       {rows.length === 0 ? (
@@ -189,26 +193,3 @@ export default async function ContactsPage({
   );
 }
 
-function TierChip({
-  label,
-  href,
-  active,
-  dot,
-}: {
-  label: string;
-  href: string;
-  active: boolean;
-  dot?: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 transition-colors ${
-        active ? "bg-ink-900 text-ink-0" : "bg-ink-100 text-ink-600 hover:bg-ink-200"
-      }`}
-    >
-      {dot ? <span className={`dot ${active ? "bg-ink-0" : dot}`} /> : null}
-      {label}
-    </Link>
-  );
-}

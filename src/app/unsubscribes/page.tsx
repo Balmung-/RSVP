@@ -4,7 +4,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
 import { requireRole } from "@/lib/auth";
-import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
+import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
+import { FilterPill, FilterLabel } from "@/components/FilterPill";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,6 @@ export default async function UnsubscribesPage({
   await requireRole("admin");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
-  const T = adminDict(locale);
 
   const channel =
     searchParams.channel === "email" || searchParams.channel === "sms" ? searchParams.channel : "all";
@@ -93,31 +93,34 @@ export default async function UnsubscribesPage({
         </Link>
       }
     >
-      <div className="grid grid-cols-3 gap-6 mb-8 max-w-3xl">
-        <Tile label={locale === "ar" ? "الإجمالي" : "Total"} value={totalAll} />
-        <Tile label={locale === "ar" ? "بريد" : "Email"} value={emailCount} />
-        <Tile label={locale === "ar" ? "رسائل" : "SMS"} value={smsCount} />
+      <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-8">
+        <Stat label={locale === "ar" ? "الإجمالي" : "Total"} value={totalAll} />
+        <Stat label={locale === "ar" ? "بريد" : "Email"} value={emailCount} />
+        <Stat label={locale === "ar" ? "رسائل" : "SMS"} value={smsCount} />
       </div>
 
-      <form method="get" className="mb-6 flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1.5 flex-1 max-w-xs">
-          <span className="text-micro uppercase text-ink-400">{T.search}</span>
+      <div className="mb-6 flex items-center gap-3 flex-wrap">
+        <form method="get" className="relative flex-1 max-w-md">
+          <Icon name="search" size={14} className="absolute start-3 top-1/2 -translate-y-1/2 text-ink-400" />
           <input
             name="q"
             type="search"
             defaultValue={q}
             placeholder={locale === "ar" ? "بحث بالبريد / الرقم / السبب" : "email, phone, reason"}
-            className="field"
+            className="field ps-9"
           />
-        </label>
-        {channel !== "all" ? <input type="hidden" name="channel" value={channel} /> : null}
-        <button className="btn btn-ghost">{T.filter}</button>
-        <div className="flex items-center gap-1 ms-auto">
+          {channel !== "all" ? <input type="hidden" name="channel" value={channel} /> : null}
+        </form>
+        <FilterLabel>{locale === "ar" ? "القناة" : "Channel"}</FilterLabel>
+        <div className="flex items-center gap-1">
           <FilterPill href={qs({ channel: undefined, q: q || undefined })} active={channel === "all"}>All</FilterPill>
           <FilterPill href={qs({ channel: "email", q: q || undefined })} active={channel === "email"}>Email</FilterPill>
           <FilterPill href={qs({ channel: "sms", q: q || undefined })} active={channel === "sms"}>SMS</FilterPill>
         </div>
-      </form>
+        {(q || channel !== "all") ? (
+          <Link href="/unsubscribes" className="text-mini text-ink-500 hover:text-ink-900">Clear</Link>
+        ) : null}
+      </div>
 
       {rows.length === 0 ? (
         <EmptyState
@@ -188,39 +191,21 @@ function humanReason(reason: string, locale: "en" | "ar"): string {
   return reason;
 }
 
-function Tile({ label, value }: { label: string; value: number }) {
+function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="panel-quiet p-5 flex flex-col gap-1">
-      <span className="text-micro uppercase text-ink-400">{label}</span>
+    <span className="inline-flex items-baseline gap-2">
       <span
         className="text-ink-900 tabular-nums"
-        style={{ fontSize: "28px", lineHeight: "34px", letterSpacing: "-0.02em", fontWeight: 500 }}
+        style={{
+          fontSize: "24px",
+          lineHeight: "28px",
+          letterSpacing: "-0.015em",
+          fontWeight: 500,
+        }}
       >
         {value.toLocaleString()}
       </span>
-    </div>
-  );
-}
-
-function FilterPill({
-  href,
-  active,
-  children,
-}: {
-  href: string;
-  active: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className={`px-2.5 py-1 rounded-md text-mini transition-colors ${
-        active
-          ? "bg-ink-900 text-ink-0"
-          : "bg-ink-100 text-ink-600 hover:bg-ink-200 hover:text-ink-900"
-      }`}
-    >
-      {children}
-    </Link>
+      <span className="text-micro uppercase tracking-wider text-ink-400">{label}</span>
+    </span>
   );
 }

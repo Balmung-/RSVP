@@ -9,6 +9,7 @@ import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { applyReviewerDecision } from "@/lib/inbound";
 import { setFlash } from "@/lib/flash";
+import { FilterPill, FilterLabel } from "@/components/FilterPill";
 
 export const dynamic = "force-dynamic";
 
@@ -98,15 +99,27 @@ export default async function InboxPage({
     <Shell
       title="Inbox"
       crumb="Inbound replies"
-      actions={
-        <div className="flex items-center gap-1 text-mini">
-          <FilterChip label="Needs review" href="/inbox?status=needs_review" active={status === "needs_review"} count={countMap.get("needs_review")} />
-          <FilterChip label="Processed" href="/inbox?status=processed" active={status === "processed"} count={countMap.get("processed")} />
-          <FilterChip label="Ignored" href="/inbox?status=ignored" active={status === "ignored"} count={countMap.get("ignored")} />
-          <FilterChip label="All" href="/inbox?status=all" active={!status} />
-        </div>
-      }
     >
+      {/* One strip, pills only — the inbox has a single filter axis so
+          this is the shortest of the list-page strips. Counts live
+          inline on each pill so the operator sees the queue shape
+          without drilling. */}
+      <div className="mb-6 flex items-center gap-3 flex-wrap">
+        <FilterLabel>Queue</FilterLabel>
+        <div className="flex items-center gap-1">
+          <FilterPill href="/inbox?status=needs_review" active={status === "needs_review"}>
+            Needs review · {countMap.get("needs_review") ?? 0}
+          </FilterPill>
+          <FilterPill href="/inbox?status=processed" active={status === "processed"}>
+            Processed · {countMap.get("processed") ?? 0}
+          </FilterPill>
+          <FilterPill href="/inbox?status=ignored" active={status === "ignored"}>
+            Ignored · {countMap.get("ignored") ?? 0}
+          </FilterPill>
+          <FilterPill href="/inbox?status=all" active={!status}>All</FilterPill>
+        </div>
+      </div>
+
       {rows.length === 0 ? (
         <EmptyState icon="inbox" title="Inbox is clear">
           Email and SMS replies from invitees land here. When intent is unambiguous
@@ -181,31 +194,6 @@ export default async function InboxPage({
   );
 }
 
-function FilterChip({
-  label,
-  href,
-  active,
-  count,
-}: {
-  label: string;
-  href: string;
-  active: boolean;
-  count?: number;
-}) {
-  return (
-    <Link
-      href={href}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 transition-colors ${
-        active ? "bg-ink-900 text-ink-0" : "bg-ink-100 text-ink-600 hover:bg-ink-200"
-      }`}
-    >
-      {label}
-      {typeof count === "number" ? (
-        <span className={active ? "text-ink-300" : "text-ink-500"}>{count}</span>
-      ) : null}
-    </Link>
-  );
-}
 
 function IntentBadge({ intent }: { intent: string }) {
   const tone =

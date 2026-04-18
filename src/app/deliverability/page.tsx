@@ -8,7 +8,9 @@ import { requireRole, hasRole } from "@/lib/auth";
 import { sendEmail, sendSms } from "@/lib/delivery";
 import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
-import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
+import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
+import { FilterPill, FilterLabel } from "@/components/FilterPill";
+import { CampaignScopeSelect } from "./CampaignScopeSelect";
 import { scopedCampaignWhere, canSeeCampaign } from "@/lib/teams";
 import { filterLiveFailures } from "@/lib/deliverability";
 import { mapConcurrent } from "@/lib/concurrency";
@@ -118,7 +120,6 @@ export default async function Deliverability({
   const me = await requireRole("editor");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
-  const T = adminDict(locale);
 
   const channel = searchParams.channel === "email" || searchParams.channel === "sms" ? searchParams.channel : "all";
   const statusFilter =
@@ -192,46 +193,55 @@ export default async function Deliverability({
       title={locale === "ar" ? "قابلية الإرسال" : "Deliverability"}
       crumb={locale === "ar" ? "إخفاقات الإرسال الحيّة" : "Live send failures"}
     >
-      <div className="grid grid-cols-3 gap-6 mb-8 max-w-3xl">
-        <Tile
+      <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-8">
+        <Stat
           label={locale === "ar" ? "إخفاقات حيّة" : "Live failures"}
           value={live.length}
-          tone={live.length > 0 ? "fail" : "default"}
+          tone={live.length > 0 ? "fail" : undefined}
         />
-        <Tile label={locale === "ar" ? "عبر البريد" : "Email"} value={emailCount} />
-        <Tile label={locale === "ar" ? "عبر الرسائل" : "SMS"} value={smsCount} hint={bouncedCount ? `${bouncedCount} bounced` : undefined} />
+        <Stat label={locale === "ar" ? "عبر البريد" : "Email"} value={emailCount} />
+        <Stat
+          label={locale === "ar" ? "عبر الرسائل" : "SMS"}
+          value={smsCount}
+          hint={bouncedCount ? `${bouncedCount} bounced` : undefined}
+        />
       </div>
 
+      {/* One horizontal filter strip — channel, status, campaign-scope.
+          Pills live on the line; the campaign dropdown inlines alongside.
+          No nested <form>, no separate submit button; the select reloads
+          via a small client handler. Reset link appears only when any
+          filter is active. */}
       <div className="mb-6 flex flex-wrap items-center gap-3">
-        <FilterGroup label={locale === "ar" ? "القناة" : "Channel"}>
+        <FilterLabel>{locale === "ar" ? "القناة" : "Channel"}</FilterLabel>
+        <div className="flex items-center gap-1">
           <FilterPill href={qs({ channel: undefined })} active={channel === "all"}>All</FilterPill>
           <FilterPill href={qs({ channel: "email" })} active={channel === "email"}>Email</FilterPill>
           <FilterPill href={qs({ channel: "sms" })} active={channel === "sms"}>SMS</FilterPill>
-        </FilterGroup>
-        <FilterGroup label={locale === "ar" ? "الحالة" : "Status"}>
+        </div>
+        <FilterLabel>{locale === "ar" ? "الحالة" : "Status"}</FilterLabel>
+        <div className="flex items-center gap-1">
           <FilterPill href={qs({ status: undefined })} active={statusFilter === "all"}>All</FilterPill>
           <FilterPill href={qs({ status: "failed" })} active={statusFilter === "failed"}>Failed</FilterPill>
           <FilterPill href={qs({ status: "bounced" })} active={statusFilter === "bounced"}>Bounced</FilterPill>
-        </FilterGroup>
+        </div>
         {campaignNames.length > 0 ? (
-          <form method="get" className="flex items-center gap-2">
-            <label className="text-micro uppercase text-ink-400">
-              {locale === "ar" ? "الحملة" : "Campaign"}
-            </label>
-            <select
-              name="campaign"
-              defaultValue={campaignId ?? "all"}
-              className="field py-1.5 text-mini min-w-[10rem]"
-            >
-              <option value="all">All</option>
-              {campaignNames.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            {channel !== "all" ? <input type="hidden" name="channel" value={channel} /> : null}
-            {statusFilter !== "all" ? <input type="hidden" name="status" value={statusFilter} /> : null}
-            <button className="btn btn-ghost text-mini">{T.filter}</button>
-          </form>
+          <>
+            <FilterLabel>{locale === "ar" ? "الحملة" : "Campaign"}</FilterLabel>
+            <CampaignScopeSelect
+              campaigns={campaignNames}
+              selected={campaignId ?? "all"}
+              qs={qs}
+            />
+          </>
+        ) : null}
+        {(channel !== "all" || statusFilter !== "all" || campaignId) ? (
+          <Link
+            href="/deliverability"
+            className="text-mini text-ink-500 hover:text-ink-900 ms-auto"
+          >
+            {locale === "ar" ? "مسح" : "Clear"}
+          </Link>
         ) : null}
       </div>
 
@@ -302,63 +312,37 @@ export default async function Deliverability({
   );
 }
 
-function Tile({
+// Inline number + label — same shape as the dashboard's reading
+// strip so all the office-wide pages speak one visual voice.
+function Stat({
   label,
   value,
-  tone = "default",
+  tone,
   hint,
 }: {
   label: string;
   value: number;
-  tone?: "default" | "fail";
+  tone?: "fail";
   hint?: string;
 }) {
-  const dot = tone === "fail" ? "bg-signal-fail" : "bg-ink-300";
   return (
-    <div className="panel-quiet p-5 flex flex-col gap-1">
-      <span className="inline-flex items-center gap-2 text-micro uppercase text-ink-400">
-        <span className={`dot ${dot}`} />
-        {label}
-      </span>
+    <span className="inline-flex items-baseline gap-2">
+      {tone === "fail" ? (
+        <span className="h-1.5 w-1.5 rounded-full translate-y-[-3px] bg-signal-fail" aria-hidden />
+      ) : null}
       <span
         className="text-ink-900 tabular-nums"
-        style={{ fontSize: "28px", lineHeight: "34px", letterSpacing: "-0.02em", fontWeight: 500 }}
+        style={{
+          fontSize: "24px",
+          lineHeight: "28px",
+          letterSpacing: "-0.015em",
+          fontWeight: 500,
+        }}
       >
         {value.toLocaleString()}
       </span>
-      {hint ? <span className="text-mini text-ink-400">{hint}</span> : null}
-    </div>
-  );
-}
-
-function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-micro uppercase text-ink-400">{label}</span>
-      <div className="flex items-center gap-1">{children}</div>
-    </div>
-  );
-}
-
-function FilterPill({
-  href,
-  active,
-  children,
-}: {
-  href: string;
-  active: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className={`px-2.5 py-1 rounded-md text-mini transition-colors ${
-        active
-          ? "bg-ink-900 text-ink-0"
-          : "bg-ink-100 text-ink-600 hover:bg-ink-200 hover:text-ink-900"
-      }`}
-    >
-      {children}
-    </Link>
+      <span className="text-micro uppercase tracking-wider text-ink-400">{label}</span>
+      {hint ? <span className="text-mini text-ink-400">· {hint}</span> : null}
+    </span>
   );
 }

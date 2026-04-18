@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Pagination } from "@/components/Pagination";
+import { Icon } from "@/components/Icon";
+import { FilterPill } from "@/components/FilterPill";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 
@@ -70,49 +72,49 @@ export default async function EventsPage({
         </span>
       }
     >
-      <form method="get" className="flex flex-wrap items-end gap-3 mb-4">
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] uppercase tracking-wider text-ink-400">Kind</span>
+      {/* One slim row for the two text filters — no labels, just
+          placeholders — and one row of kind chips with inline counts.
+          The chips ARE the discovery mechanism; the inputs are there
+          for when you already know what you want. */}
+      <form method="get" className="mb-4 flex items-center gap-3 flex-wrap">
+        <div className="relative flex-1 max-w-xs">
+          <Icon name="filter" size={13} className="absolute start-3 top-1/2 -translate-y-1/2 text-ink-400" />
           <input
             name="kind"
-            className="field max-w-[14rem]"
+            className="field ps-8 py-1.5 text-mini"
             defaultValue={kindFilter}
-            placeholder="e.g. rsvp.submitted"
+            placeholder="kind · e.g. rsvp.submitted"
           />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] uppercase tracking-wider text-ink-400">Actor</span>
+        </div>
+        <div className="relative flex-1 max-w-xs">
+          <Icon name="user" size={13} className="absolute start-3 top-1/2 -translate-y-1/2 text-ink-400" />
           <input
             name="actor"
-            className="field max-w-[14rem]"
+            className="field ps-8 py-1.5 text-mini"
             defaultValue={actorFilter}
-            placeholder="email or 'system'"
+            placeholder="actor · email or 'system'"
           />
-        </label>
-        <button className="btn-ghost mb-0.5">Filter</button>
-        {kindFilter || actorFilter ? (
-          <Link href="/events" className="btn-ghost mb-0.5">Clear</Link>
+        </div>
+        <button className="btn btn-ghost text-mini">Filter</button>
+        {(kindFilter || actorFilter) ? (
+          <Link href="/events" className="text-mini text-ink-500 hover:text-ink-900">Clear</Link>
         ) : null}
       </form>
 
       {kinds.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5 mb-6 text-xs">
+        <div className="mb-6 flex flex-wrap gap-1">
           {kinds.map((k) => {
             const qs = new URLSearchParams();
             qs.set("kind", k.kind);
             if (actorFilter) qs.set("actor", actorFilter);
             return (
-              <Link
+              <FilterPill
                 key={k.kind}
                 href={`/events?${qs.toString()}`}
-                className={`rounded-full px-3 py-1 ${
-                  kindFilter === k.kind
-                    ? "bg-ink-900 text-ink-0"
-                    : "bg-ink-100 text-ink-600 hover:bg-ink-200"
-                }`}
+                active={kindFilter === k.kind}
               >
-                {k.kind} <span className="opacity-60">· {k._count._all}</span>
-              </Link>
+                {k.kind} · {k._count._all}
+              </FilterPill>
             );
           })}
         </div>
