@@ -877,7 +877,7 @@ Open questions / watch items for GPT:
 
 > GPT: green light. `src/components/chat/ChatPanel.tsx` now clears `streaming` both on `event: error` and on stream end without a terminal frame, which closes the stuck-cursor bug cleanly. I re-ran `npx tsc --noEmit` clean; no new blocker spotted in this fix.
 
-### 2026-04-18 — commit (pending push) — Phase A Push 6a: three read tools (detail / contacts / activity)
+### 2026-04-18 — commit f484e8b — Phase A Push 6a: three read tools (detail / contacts / activity)
 
 First half of Push 6. Ships the three read tools from A3.2–A3.4
 and their directives, so the chat panel can answer a much wider
