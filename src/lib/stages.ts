@@ -253,3 +253,49 @@ export async function runStageNow(stageId: string, campaignId: string) {
 }
 
 export { normalizeChannels, audienceWhere };
+
+// Quick-add: drop in a "remind non-responders N hours before the event"
+// stage without the operator having to do offset math. Returns an error
+// code when the campaign has no eventAt, the offset would put the
+// reminder in the past, or a reminder already exists within ±15 minutes
+// of this time (collision guard — keeps someone mashing the button from
+// queuing five identical stages).
+export async function addStandardReminder(
+  campaignId: string,
+  offsetHoursBefore: number,
+): Promise<
+  | { ok: true; id: string; scheduledFor: Date }
+  | { ok: false; reason: "no_event_date" | "offset_in_past" | "duplicate" }
+> {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { eventAt: true },
+  });
+  if (!campaign?.eventAt) return { ok: false as const, reason: "no_event_date" };
+  const scheduledFor = new Date(campaign.eventAt.getTime() - offsetHoursBefore * 3600_000);
+  if (scheduledFor.getTime() < Date.now() - 60_000) {
+    return { ok: false as const, reason: "offset_in_past" };
+  }
+  const collisionWindow = 15 * 60_000;
+  const near = await prisma.campaignStage.findFirst({
+    where: {
+      campaignId,
+      kind: "reminder",
+      audience: "non_responders",
+      scheduledFor: {
+        gte: new Date(scheduledFor.getTime() - collisionWindow),
+        lte: new Date(scheduledFor.getTime() + collisionWindow),
+      },
+    },
+    select: { id: true },
+  });
+  if (near) return { ok: false as const, reason: "duplicate" };
+  const row = await createStage(campaignId, {
+    kind: "reminder",
+    name: `Reminder · ${offsetHoursBefore}h before`,
+    scheduledFor,
+    channels: ["email", "sms"],
+    audience: "non_responders",
+  });
+  return { ok: true as const, id: row.id, scheduledFor };
+}

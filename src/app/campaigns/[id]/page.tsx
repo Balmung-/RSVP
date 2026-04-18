@@ -19,7 +19,7 @@ import {
   findDuplicates,
   liveFailureCount,
 } from "@/lib/campaigns";
-import { listStages, runStageNow } from "@/lib/stages";
+import { listStages, runStageNow, addStandardReminder } from "@/lib/stages";
 import { duplicateCampaign } from "@/lib/campaign-duplicate";
 import { setFlash } from "@/lib/flash";
 import { readAdminLocale } from "@/lib/adminLocale";
@@ -170,6 +170,30 @@ async function runStageAction(campaignId: string, formData: FormData) {
   await requireRole("editor");
   const stageId = String(formData.get("stageId"));
   if (stageId) await runStageNow(stageId, campaignId);
+  redirect(`/campaigns/${campaignId}?tab=schedule`);
+}
+
+async function addReminderAction(campaignId: string, formData: FormData) {
+  "use server";
+  await requireRole("editor");
+  const raw = Number(formData.get("hoursBefore"));
+  const allowed = [1, 4, 24, 72, 168] as const;
+  const hours: number = (allowed as readonly number[]).includes(raw) ? raw : 24;
+  const res = await addStandardReminder(campaignId, hours);
+  if (!res.ok) {
+    const msg =
+      res.reason === "no_event_date"
+        ? "Set an event date on the campaign first."
+        : res.reason === "offset_in_past"
+          ? `That offset lands in the past for this event.`
+          : "A reminder already exists near that time.";
+    setFlash({ kind: "warn", text: msg });
+  } else {
+    setFlash({
+      kind: "success",
+      text: `Reminder queued for ${hours}h before the event.`,
+    });
+  }
   redirect(`/campaigns/${campaignId}?tab=schedule`);
 }
 
@@ -451,7 +475,9 @@ export default async function CampaignWorkspace({
           <ScheduleTab
             campaignId={campaign.id}
             stages={tabData.stages ?? []}
+            eventAt={campaign.eventAt}
             runNowAction={runStageAction.bind(null, campaign.id)}
+            addReminderAction={addReminderAction.bind(null, campaign.id)}
             canWrite={canWrite}
           />
         ) : null}
