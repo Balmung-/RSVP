@@ -13,16 +13,25 @@ import { verifyTotp } from "@/lib/totp";
 
 export const dynamic = "force-dynamic";
 
+function safeReturnTo(raw: string | undefined | null): string {
+  // Only allow same-origin relative paths, never protocol-relative or
+  // absolute URLs that could bounce a session into attacker hands.
+  if (!raw) return "/";
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
+  if (raw.length > 300) return "/";
+  return raw;
+}
+
 async function loginAction(formData: FormData) {
   "use server";
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
+  const returnTo = safeReturnTo(String(formData.get("returnTo") ?? ""));
   const user = await authenticateWithPassword(email, password);
-  if (!user) redirect("/login?e=1");
-  // If the user has confirmed 2FA, defer session issuance.
+  if (!user) redirect(`/login?e=1${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
   if (user.totpConfirmedAt && user.totpSecret) {
     issuePending(user.id);
-    redirect("/login?step=2fa");
+    redirect(`/login?step=2fa${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
   }
   const h = headers();
   await startSession(user.id, {
@@ -32,33 +41,41 @@ async function loginAction(formData: FormData) {
   await prisma.eventLog.create({
     data: { kind: "user.login", refType: "user", refId: user.id, actorId: user.id },
   });
-  redirect("/");
+  redirect(returnTo);
 }
 
 async function verify2fa(formData: FormData) {
   "use server";
   const pendingId = readPending();
+  const returnTo = safeReturnTo(String(formData.get("returnTo") ?? ""));
   if (!pendingId) redirect("/login?e=expired");
   const user = await prisma.user.findUnique({ where: { id: pendingId } });
   if (!user || !user.active || !user.totpSecret) redirect("/login?e=expired");
   const token = String(formData.get("token") ?? "");
-  if (!verifyTotp(token, user.totpSecret)) redirect("/login?step=2fa&e=wrong_code");
+  if (!verifyTotp(token, user!.totpSecret!)) {
+    redirect(`/login?step=2fa&e=wrong_code${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
+  }
   clearPending();
   const h = headers();
-  await startSession(user.id, {
+  await startSession(user!.id, {
     ip: h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? undefined,
     userAgent: h.get("user-agent") ?? undefined,
   });
   await prisma.eventLog.create({
-    data: { kind: "user.login", refType: "user", refId: user.id, actorId: user.id, data: JSON.stringify({ twoFactor: true }) },
+    data: { kind: "user.login", refType: "user", refId: user!.id, actorId: user!.id, data: JSON.stringify({ twoFactor: true }) },
   });
-  redirect("/");
+  redirect(returnTo);
 }
 
-export default async function Login({ searchParams }: { searchParams: { e?: string; step?: string } }) {
-  if (await isAuthed()) redirect("/");
+export default async function Login({
+  searchParams,
+}: {
+  searchParams: { e?: string; step?: string; returnTo?: string };
+}) {
+  if (await isAuthed()) redirect(safeReturnTo(searchParams.returnTo));
   const brand = process.env.APP_BRAND ?? "Einai";
   const step2fa = searchParams.step === "2fa" && readPending();
+  const returnTo = safeReturnTo(searchParams.returnTo);
 
   return (
     <div className="min-h-screen bg-ink-50 grid grid-cols-1 md:grid-cols-[1.15fr_1fr]">
@@ -81,6 +98,7 @@ export default async function Login({ searchParams }: { searchParams: { e?: stri
       <main className="flex items-center justify-center px-6 py-16">
         {step2fa ? (
           <form action={verify2fa} className="w-full max-w-sm flex flex-col gap-6">
+            <input type="hidden" name="returnTo" value={returnTo} />
             <div className="md:hidden flex items-center gap-2.5 mb-4">
               <span className="h-2 w-2 rounded-full bg-ink-900" />
               <span className="text-[15px] font-medium tracking-tight">{brand}</span>
@@ -114,6 +132,7 @@ export default async function Login({ searchParams }: { searchParams: { e?: stri
           </form>
         ) : (
           <form action={loginAction} className="w-full max-w-sm flex flex-col gap-6" aria-label="Sign in">
+            <input type="hidden" name="returnTo" value={returnTo} />
             <div className="md:hidden flex items-center gap-2.5 mb-4">
               <span className="h-2 w-2 rounded-full bg-ink-900" />
               <span className="text-[15px] font-medium tracking-tight">{brand}</span>

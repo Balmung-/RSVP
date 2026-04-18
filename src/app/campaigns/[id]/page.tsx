@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Tabs, type TabItem } from "@/components/Tabs";
@@ -47,7 +48,6 @@ import {
   needsApproval,
   pendingApproval,
   requestApproval,
-  approvalThreshold,
 } from "@/lib/approvals";
 
 export const dynamic = "force-dynamic";
@@ -106,6 +106,20 @@ async function sendAction(formData: FormData) {
       detail: `An admin needs to approve this send (${recipients.toLocaleString()} recipients).`,
     });
     redirect(`/campaigns/${id}`);
+  }
+
+  // Admin direct-send closes any outstanding pending approval for this
+  // campaign so /approvals doesn't keep a stale row.
+  if (myRole === "admin") {
+    await prisma.sendApproval.updateMany({
+      where: { campaignId: id, status: "pending" },
+      data: {
+        status: "approved",
+        decidedBy: me.id,
+        decidedAt: new Date(),
+        decisionNote: "Admin sent directly.",
+      },
+    });
   }
 
   await sendCampaign(id, { channel, onlyUnsent: true });
@@ -289,6 +303,12 @@ export default async function CampaignWorkspace({
   };
 
   const pendingApprovalRow = await pendingApproval(campaign.id);
+  const pendingRequester = pendingApprovalRow
+    ? await prisma.user.findUnique({
+        where: { id: pendingApprovalRow.requestedBy },
+        select: { email: true },
+      })
+    : null;
 
   // Per-tab data loaders. Only pay for what we render.
   const tabData = await loadForTab(campaign.id, tab, searchParams);
@@ -372,6 +392,9 @@ export default async function CampaignWorkspace({
         <div className="mb-6 max-w-4xl rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold px-4 py-3 flex items-center justify-between gap-4">
           <div className="text-body">
             An admin needs to approve this send — <span className="tabular-nums font-medium">{pendingApprovalRow.recipientCount.toLocaleString()} recipients</span> on <span className="uppercase">{pendingApprovalRow.channel}</span>.
+            {pendingRequester?.email ? (
+              <span className="text-mini text-ink-500 ms-2">Requested by {pendingRequester.email}</span>
+            ) : null}
           </div>
           {canDelete ? (
             <Link href="/approvals" className="btn btn-soft text-mini">Review</Link>

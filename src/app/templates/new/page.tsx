@@ -5,6 +5,7 @@ import { TemplateForm } from "@/components/TemplateForm";
 import { requireRole } from "@/lib/auth";
 import { createTemplate, TEMPLATE_KINDS, type TemplateKind } from "@/lib/templates";
 import { setFlash } from "@/lib/flash";
+import { logAction } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,12 @@ async function create(formData: FormData) {
     me.id,
   );
   if (!res.ok) redirect(`/templates/new?e=${res.reason}`);
+  await logAction({
+    kind: "template.created",
+    refType: "template",
+    refId: res.templateId,
+    data: { kind, locale },
+  });
   setFlash({ kind: "success", text: "Template saved" });
   redirect("/templates");
 }

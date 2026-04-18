@@ -14,6 +14,7 @@ import {
   type TemplateKind,
 } from "@/lib/templates";
 import { setFlash } from "@/lib/flash";
+import { logAction } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,12 @@ async function save(id: string, formData: FormData) {
     tags: String(formData.get("tags") ?? ""),
   });
   if (!res.ok) redirect(`/templates/${id}/edit?e=${res.reason}`);
+  await logAction({
+    kind: "template.updated",
+    refType: "template",
+    refId: id,
+    data: { kind, locale },
+  });
   setFlash({ kind: "success", text: "Template updated" });
   redirect("/templates");
 }
@@ -41,6 +48,7 @@ async function archive(id: string) {
   "use server";
   await requireRole("editor");
   await archiveTemplate(id);
+  await logAction({ kind: "template.archived", refType: "template", refId: id });
   redirect("/templates");
 }
 
@@ -48,6 +56,7 @@ async function unarchive(id: string) {
   "use server";
   await requireRole("editor");
   await unarchiveTemplate(id);
+  await logAction({ kind: "template.unarchived", refType: "template", refId: id });
   redirect(`/templates/${id}/edit`);
 }
 
@@ -55,6 +64,7 @@ async function remove(id: string) {
   "use server";
   await requireRole("admin");
   await deleteTemplateRecord(id);
+  await logAction({ kind: "template.deleted", refType: "template", refId: id });
   setFlash({ kind: "warn", text: "Template deleted" });
   redirect("/templates");
 }
