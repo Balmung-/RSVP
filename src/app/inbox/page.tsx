@@ -5,7 +5,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { scopedCampaignWhere } from "@/lib/teams";
 import { applyReviewerDecision } from "@/lib/inbound";
 import { setFlash } from "@/lib/flash";
 
@@ -16,13 +17,27 @@ const fmt = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "
 
 async function decide(formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
   const id = String(formData.get("id"));
   const decision = String(formData.get("decision")) as
     | "apply_attending"
     | "apply_declined"
     | "unsubscribe"
     | "ignore";
+  // Team scope: reviewer can only act on messages tied to a campaign
+  // they can see. Messages with no linked invitee (sender couldn't be
+  // matched) stay open to any editor — they're not team-owned.
+  const msg = await prisma.inboundMessage.findUnique({
+    where: { id },
+    select: { invitee: { select: { campaign: { select: { teamId: true } } } } },
+  });
+  if (msg?.invitee?.campaign) {
+    const { canSeeCampaignRow } = await import("@/lib/teams");
+    if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), msg.invitee.campaign.teamId))) {
+      setFlash({ kind: "warn", text: "You don't have access to that campaign." });
+      redirect("/inbox");
+    }
+  }
   const res = await applyReviewerDecision(id, decision);
   setFlash({
     kind: res.ok ? "success" : "warn",
@@ -48,9 +63,23 @@ export default async function InboxPage({
         ? "ignored"
         : "needs_review";
 
+  // Team scope: show only inbound messages whose linked invitee is in
+  // a campaign the viewer can see, OR messages with no matched invitee
+  // (orphan inbound — any editor can pick these up).
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+  const hasScope = Object.keys(campaignScope).length > 0;
+  const scopeFilter = hasScope
+    ? {
+        OR: [
+          { inviteeId: null },
+          { invitee: { campaign: campaignScope } },
+        ],
+      }
+    : {};
+
   const [rows, counts] = await Promise.all([
     prisma.inboundMessage.findMany({
-      where: status ? { status } : {},
+      where: { ...(status ? { status } : {}), ...scopeFilter },
       include: { invitee: { select: { id: true, fullName: true, campaignId: true } } },
       orderBy: { createdAt: "desc" },
       take: 100,
@@ -58,6 +87,7 @@ export default async function InboxPage({
     prisma.inboundMessage.groupBy({
       by: ["status"],
       _count: { _all: true },
+      where: scopeFilter,
     }),
   ]);
 

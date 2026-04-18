@@ -7,19 +7,45 @@ import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
-import { teamsEnabled, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
+import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
 async function updateCampaign(id: string, formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
+  const isAdmin = hasRole(me, "admin");
+  // Must be able to see the campaign in the first place. Prevents
+  // an editor POST-ing updates to a team-B campaignId by replaying
+  // a bound action reference.
+  if (!(await canSeeCampaign(me.id, isAdmin, id))) redirect(`/campaigns`);
+
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) redirect(`/campaigns/${id}/edit`);
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
   const locale = rawLocale === "ar" ? "ar" : "en";
   const rawColor = String(formData.get("brandColor") ?? "").trim();
   const brandColor = /^#[0-9A-Fa-f]{3,8}$/.test(rawColor) ? rawColor : null;
+
+  // Team reassignment: admins can move a campaign to any team.
+  // Non-admins can only set it to one of their own teams (or
+  // office-wide / null). If they submit a team id outside that set,
+  // we ignore it and keep the existing teamId — never silently
+  // transfer ownership to a team they don't belong to.
+  let teamPatch: { teamId: string | null } | Record<string, never> = {};
+  if (teamsEnabled()) {
+    const submitted = String(formData.get("teamId") ?? "").trim() || null;
+    if (isAdmin) {
+      teamPatch = { teamId: submitted };
+    } else {
+      const allowed = new Set(await teamIdsForUser(me.id));
+      if (submitted === null || allowed.has(submitted)) {
+        teamPatch = { teamId: submitted };
+      }
+      // else: drop the patch so the current teamId is preserved.
+    }
+  }
+
   await prisma.campaign.update({
     where: { id },
     data: {
@@ -35,9 +61,7 @@ async function updateCampaign(id: string, formData: FormData) {
       brandColor,
       brandLogoUrl: safeUrl(String(formData.get("brandLogoUrl") ?? "")),
       brandHeroUrl: safeUrl(String(formData.get("brandHeroUrl") ?? "")),
-      ...(teamsEnabled()
-        ? { teamId: String(formData.get("teamId") ?? "").trim() || null }
-        : {}),
+      ...teamPatch,
     },
   });
   redirect(`/campaigns/${id}`);
@@ -57,7 +81,11 @@ function safeUrl(raw: string): string | null {
 
 async function deleteCampaign(id: string) {
   "use server";
-  await requireRole("admin");
+  const me = await requireRole("admin");
+  // Admins see every campaign, but run the check anyway so the action
+  // still returns cleanly if the campaignId was spoofed to something
+  // that doesn't exist (rather than throwing on delete).
+  if (!(await canSeeCampaign(me.id, true, id))) redirect(`/campaigns`);
   const campaign = await prisma.campaign.findUnique({ where: { id }, select: { name: true } });
   await prisma.campaign.delete({ where: { id } });
   await logAction({

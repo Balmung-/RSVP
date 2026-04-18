@@ -22,7 +22,18 @@ export default async function Dashboard() {
   // Scope every campaign-linked query so a team-scoped editor only
   // sees tiles, lists, and activity relevant to their teams plus
   // office-wide. Admins pass through unscoped.
-  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+  const isAdmin = hasRole(me, "admin");
+  const campaignScope = await scopedCampaignWhere(me.id, isAdmin);
+  // EventLog has no campaignId column, so to keep the activity feed
+  // scoped we upfront a list of visible campaign IDs and filter
+  // refType=campaign rows against it. Campaign-linked events with
+  // other refTypes (invitation/invitee/stage) are dropped from the
+  // feed when scoped — they were low signal on the overview anyway,
+  // and the campaign activity page remains the detailed view.
+  const visibleCampaignIds = isAdmin
+    ? null
+    : (await prisma.campaign.findMany({ where: campaignScope, select: { id: true } }))
+        .map((c) => c.id);
   const fmtFull = (d: Date | null | undefined) =>
     formatAdminDate(d, locale, calendar, { dateStyle: "medium", timeStyle: "short" });
   const fmtTime = (d: Date | null | undefined) =>
@@ -77,7 +88,22 @@ export default async function Dashboard() {
       },
     }),
     prisma.eventLog.findMany({
-      where: { createdAt: { gte: weekAgo } },
+      where: {
+        createdAt: { gte: weekAgo },
+        ...(visibleCampaignIds === null
+          ? {}
+          : {
+              OR: [
+                { refType: null },
+                {
+                  refType: {
+                    notIn: ["campaign", "invitation", "invitee", "stage", "response"],
+                  },
+                },
+                { refType: "campaign", refId: { in: visibleCampaignIds } },
+              ],
+            }),
+      },
       include: { actor: { select: { email: true, fullName: true } } },
       orderBy: { createdAt: "desc" },
       take: 25,
