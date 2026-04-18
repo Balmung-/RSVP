@@ -5,8 +5,9 @@ import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
 import { campaignStats } from "@/lib/campaigns";
+import { scopedCampaignWhere } from "@/lib/teams";
 import {
   readAdminLocale,
   readAdminCalendar,
@@ -30,12 +31,17 @@ const statusColor: Record<string, string> = {
 };
 
 export default async function CampaignsPage() {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
   const T = adminDict(locale);
 
+  // When teams are enabled, non-admins only see campaigns from their
+  // teams plus unassigned (office-wide) campaigns. Admins see all.
+  const where = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
   const campaigns = await prisma.campaign.findMany({
+    where,
     orderBy: [{ status: "asc" }, { eventAt: "asc" }, { createdAt: "desc" }],
   });
 

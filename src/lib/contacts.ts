@@ -193,11 +193,13 @@ export async function searchContacts(params: {
 }
 
 // VIP watch: top tiers across active campaigns, with response state.
-export async function vipWatch() {
+// Accepts an optional Campaign where scope so the dashboard can filter
+// to the caller's teams when TEAMS_ENABLED. Empty scope = office-wide.
+export async function vipWatch(campaignScope: Prisma.CampaignWhereInput = {}) {
   const invitees = await prisma.invitee.findMany({
     where: {
       contact: { vipTier: { in: ["royal", "minister", "vip"] } },
-      campaign: { status: { in: ["draft", "active", "sending"] } },
+      campaign: { status: { in: ["draft", "active", "sending"] }, ...campaignScope },
     },
     include: {
       contact: { select: { fullName: true, vipTier: true, organization: true } },

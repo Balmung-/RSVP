@@ -4,7 +4,8 @@ import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { scopedCampaignWhere } from "@/lib/teams";
 import { phrase, type ActivityRecord } from "@/lib/activity";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
@@ -13,10 +14,15 @@ import { Badge } from "@/components/Badge";
 export const dynamic = "force-dynamic";
 
 export default async function Dashboard() {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
   const T = adminDict(locale);
+  // Scope every campaign-linked query so a team-scoped editor only
+  // sees tiles, lists, and activity relevant to their teams plus
+  // office-wide. Admins pass through unscoped.
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
   const fmtFull = (d: Date | null | undefined) =>
     formatAdminDate(d, locale, calendar, { dateStyle: "medium", timeStyle: "short" });
   const fmtTime = (d: Date | null | undefined) =>
@@ -44,22 +50,31 @@ export default async function Dashboard() {
       where: {
         status: { in: ["draft", "active", "sending"] },
         eventAt: { gte: now, lte: weekAhead },
+        ...campaignScope,
       },
       orderBy: { eventAt: "asc" },
       take: 6,
     }),
-    prisma.campaign.count({ where: { status: "active" } }),
-    prisma.campaign.count({ where: { status: "sending" } }),
-    prisma.response.count({ where: { respondedAt: { gte: weekAgo } } }),
-    prisma.response.count({ where: { respondedAt: { gte: weekAgo }, attending: true } }),
+    prisma.campaign.count({ where: { status: "active", ...campaignScope } }),
+    prisma.campaign.count({ where: { status: "sending", ...campaignScope } }),
+    prisma.response.count({
+      where: { respondedAt: { gte: weekAgo }, campaign: campaignScope },
+    }),
+    prisma.response.count({
+      where: { respondedAt: { gte: weekAgo }, attending: true, campaign: campaignScope },
+    }),
     prisma.campaignStage.findMany({
-      where: { status: "failed", updatedAt: { gte: weekAgo } },
+      where: { status: "failed", updatedAt: { gte: weekAgo }, campaign: campaignScope },
       include: { campaign: { select: { id: true, name: true } } },
       orderBy: { updatedAt: "desc" },
       take: 5,
     }),
     prisma.invitation.count({
-      where: { status: { in: ["failed", "bounced"] }, createdAt: { gte: weekAgo } },
+      where: {
+        status: { in: ["failed", "bounced"] },
+        createdAt: { gte: weekAgo },
+        campaign: campaignScope,
+      },
     }),
     prisma.eventLog.findMany({
       where: { createdAt: { gte: weekAgo } },
@@ -67,8 +82,8 @@ export default async function Dashboard() {
       orderBy: { createdAt: "desc" },
       take: 25,
     }),
-    prisma.campaign.count(),
-    vipWatch(),
+    prisma.campaign.count({ where: campaignScope }),
+    vipWatch(campaignScope),
   ]);
 
   if (totalCampaigns === 0) {

@@ -4,10 +4,10 @@ import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
-import { teamsEnabled } from "@/lib/teams";
+import { teamsEnabled, canSeeCampaignRow } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -70,9 +70,11 @@ async function deleteCampaign(id: string) {
 }
 
 export default async function EditCampaign({ params }: { params: { id: string } }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
   const teams = teamsEnabled()
     ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })

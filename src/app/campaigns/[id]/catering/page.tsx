@@ -5,7 +5,8 @@ import { Stat } from "@/components/Stat";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { canSeeCampaignRow } from "@/lib/teams";
 import { parseOptions, type QuestionKind } from "@/lib/questions";
 
 export const dynamic = "force-dynamic";
@@ -17,10 +18,12 @@ export const dynamic = "force-dynamic";
 //  - per-contact dietary notes pulled from the linked Contact row
 
 export default async function CateringReport({ params }: { params: { id: string } }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
 
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
 
   const [responses, questions] = await Promise.all([
     prisma.response.findMany({

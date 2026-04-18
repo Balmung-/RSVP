@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 
 export const TEAM_ROLES = ["lead", "member", "guest"] as const;
@@ -133,4 +134,60 @@ export async function teamIdsForUser(userId: string): Promise<string[]> {
     select: { teamId: true },
   });
   return rows.map((r) => r.teamId);
+}
+
+// Produces a Prisma where clause that limits Campaign queries to
+// those the user can see. Rules:
+//   - Admins always see everything (`role=admin`).
+//   - When TEAMS_ENABLED=false, everyone sees everything (feature off).
+//   - Otherwise, non-admins see:
+//       (a) campaigns with no team assignment (office-wide), plus
+//       (b) campaigns in teams they're a member of.
+// The returned object plugs directly into a `Campaign.where` clause or
+// an `AND` list.
+export async function scopedCampaignWhere(
+  userId: string,
+  isAdmin: boolean,
+): Promise<Prisma.CampaignWhereInput> {
+  if (isAdmin || !teamsEnabled()) return {};
+  const ids = await teamIdsForUser(userId);
+  return {
+    OR: [
+      { teamId: null },
+      ...(ids.length > 0 ? [{ teamId: { in: ids } }] : []),
+    ],
+  };
+}
+
+// Quick yes/no: does this user have access to this specific campaign?
+// Admins always do; TEAMS_ENABLED=false treats every campaign as
+// office-wide. Used for guarding /campaigns/[id]/* routes.
+export async function canSeeCampaign(
+  userId: string,
+  isAdmin: boolean,
+  campaignId: string,
+): Promise<boolean> {
+  if (isAdmin || !teamsEnabled()) return true;
+  const c = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { teamId: true },
+  });
+  if (!c) return false;
+  if (c.teamId === null) return true;
+  const ids = await teamIdsForUser(userId);
+  return ids.includes(c.teamId);
+}
+
+// Same check, but when it's already known the campaign exists and we
+// hold its teamId — skips the extra round-trip. Handy in pages that
+// already fetched the full Campaign row for rendering.
+export async function canSeeCampaignRow(
+  userId: string,
+  isAdmin: boolean,
+  teamId: string | null,
+): Promise<boolean> {
+  if (isAdmin || !teamsEnabled()) return true;
+  if (teamId === null) return true;
+  const ids = await teamIdsForUser(userId);
+  return ids.includes(teamId);
 }

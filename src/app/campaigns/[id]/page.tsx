@@ -51,6 +51,7 @@ import {
   pendingApproval,
   requestApproval,
 } from "@/lib/approvals";
+import { canSeeCampaign } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -297,6 +298,11 @@ export default async function CampaignWorkspace({
 
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
+  // Team isolation: when TEAMS_ENABLED, non-admins can only open
+  // campaigns belonging to a team they're a member of or campaigns
+  // with no team assignment (office-wide). 404 on a miss rather than
+  // 403 — avoids leaking that a specific campaign exists.
+  if (me && !(await canSeeCampaign(me.id, canDelete, campaign.id))) notFound();
 
   const tabRaw = (searchParams.tab as Tab) ?? "invitees";
   const tab: Tab = (TABS as readonly string[]).includes(tabRaw) ? (tabRaw as Tab) : "invitees";

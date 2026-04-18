@@ -3,7 +3,8 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { StageForm } from "@/components/StageForm";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { canSeeCampaignRow } from "@/lib/teams";
 import { parseLocalInput } from "@/lib/time";
 import {
   createStage,
@@ -50,9 +51,11 @@ export default async function NewStage({
   params: { id: string };
   searchParams: { e?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const action = add.bind(null, c.id);
   const error =
     searchParams.e === "invalid"

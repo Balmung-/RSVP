@@ -2,14 +2,18 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { canSeeCampaign, canSeeCampaignRow } from "@/lib/teams";
 import { testSendEmail, testSendSms } from "@/lib/testsend";
 
 export const dynamic = "force-dynamic";
 
 async function run(campaignId: string, formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), campaignId))) {
+    redirect(`/campaigns`);
+  }
   const channel = String(formData.get("channel") ?? "email");
   const to = String(formData.get("to") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim() || undefined;
@@ -42,9 +46,11 @@ export default async function TestSend({
   params: { id: string };
   searchParams: { to?: string; name?: string; channel?: string; status?: string; detail?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const action = run.bind(null, c.id);
 
   const lastStatus = searchParams.status;

@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { canSeeCampaignRow } from "@/lib/teams";
 import { PrintButton } from "@/components/PrintButton";
 
 export const dynamic = "force-dynamic";
@@ -23,9 +24,11 @@ export default async function Roster({
   params: { id: string };
   searchParams: { sensitive?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
   const invitees = await prisma.invitee.findMany({
     where: { campaignId: params.id },
     include: { response: true },

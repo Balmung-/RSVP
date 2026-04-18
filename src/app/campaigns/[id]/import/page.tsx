@@ -2,7 +2,8 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { canSeeCampaignRow } from "@/lib/teams";
 import { importInvitees } from "@/lib/campaigns";
 import { setFlash } from "@/lib/flash";
 
@@ -40,9 +41,11 @@ Jane Harrison,,British Embassy,jane@ukmission.sa,+442071234567,en,1
 محمد العتيبي,وكيل,وزارة السياحة,,+966551112223,ar,0`;
 
 export default async function ImportPage({ params }: { params: { id: string } }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
 
   return (
     <Shell
