@@ -27,14 +27,25 @@ export default async function Dashboard() {
   const campaignScope = await scopedCampaignWhere(me.id, isAdmin);
   // EventLog has no campaignId column, so to keep the activity feed
   // scoped we upfront a list of visible campaign IDs and filter
-  // refType=campaign rows against it. Campaign-linked events with
-  // other refTypes (invitation/invitee/stage) are dropped from the
-  // feed when scoped — they were low signal on the overview anyway,
-  // and the campaign activity page remains the detailed view.
+  // refType=campaign rows against it. Capped at 1000 so the IN list
+  // can never blow past Postgres's parameter ceiling; the overview
+  // feed is always a small recent window anyway, so a scoped editor
+  // with more campaigns than the cap sees their most recent 1000
+  // campaigns' events — acceptable for an oversight surface.
+  // Campaign-linked events with other refTypes (invitation/invitee/
+  // stage) are dropped from the feed when scoped; the per-campaign
+  // activity page remains the detailed view.
+  const VISIBLE_CAMPAIGN_CAP = 1000;
   const visibleCampaignIds = isAdmin
     ? null
-    : (await prisma.campaign.findMany({ where: campaignScope, select: { id: true } }))
-        .map((c) => c.id);
+    : (
+        await prisma.campaign.findMany({
+          where: campaignScope,
+          select: { id: true },
+          orderBy: { updatedAt: "desc" },
+          take: VISIBLE_CAMPAIGN_CAP,
+        })
+      ).map((c) => c.id);
   const fmtFull = (d: Date | null | undefined) =>
     formatAdminDate(d, locale, calendar, { dateStyle: "medium", timeStyle: "short" });
   const fmtTime = (d: Date | null | undefined) =>

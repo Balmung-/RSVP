@@ -1,21 +1,58 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import type { NotificationItem } from "@/lib/notifications";
 
 // Header notification surface. One dot when anything needs attention,
-// nothing when clear. Details are recessed behind a <details> reveal
-// so the outer read stays clean — no badge numbers in the bar.
+// nothing when clear. Detail is hidden until the user opens it.
 //
-// Directive fit:
-//   - one dominant signal (the dot)
-//   - secondary tool recessed (details / summary)
-//   - controlled access (click to open)
-//   - rare + sharp (only shows when something is actually pending)
+// Controlled open state with two close triggers:
+//   1. pathname change (user navigated away via any link)
+//   2. click outside the popover
+// The underlying element is still <details>/<summary> so the
+// keyboard behavior (Enter to toggle, Escape via native focus
+// handling) comes for free. We just observe the DOM's open state
+// and force it shut in those two cases.
+//
+// Directive fit: single dot signal, complexity hidden, controlled
+// access, closes cleanly after a decision.
 
 export function NotificationBell({ items }: { items: NotificationItem[] }) {
+  const ref = useRef<HTMLDetailsElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const pathname = usePathname();
   const active = items.length > 0;
+
+  // Close on navigation. If the user just clicked a notification row,
+  // the target page is now rendering and the panel should retract.
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  // Close on outside-click. Ignore clicks inside the details itself;
+  // anywhere else on the page retracts the panel.
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (!ref.current) return;
+      if (e.target instanceof Node && !ref.current.contains(e.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
   return (
-    <details className="relative group">
+    <details
+      ref={ref}
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+      className="relative"
+    >
       <summary
         className="list-none cursor-pointer select-none inline-flex items-center justify-center h-8 w-8 rounded-full text-ink-500 hover:text-ink-900 hover:bg-ink-100 transition-colors"
         aria-label={active ? `${items.length} items need attention` : "Notifications"}

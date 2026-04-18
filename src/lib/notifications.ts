@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { prisma } from "./db";
 import { scopedCampaignWhere } from "./teams";
 import { DELIVERED_FAIL_STATUSES } from "./statuses";
@@ -8,6 +9,11 @@ import { DELIVERED_FAIL_STATUSES } from "./statuses";
 // binary — dot or no dot; the detail only appears when the user opens
 // the panel. Matches the directive: one sharp signal, complexity
 // hidden until asked for.
+//
+// Wrapped in React.cache so a single request that renders the Shell
+// (which queries this) alongside any future caller in the same tree
+// deduplicates the four Prisma counts. Per-request scope — subsequent
+// requests still get fresh data.
 
 export type NotificationItem = {
   kind: "approval" | "failures" | "inbox" | "vip";
@@ -17,7 +23,7 @@ export type NotificationItem = {
   tone: "warn" | "fail" | "default";
 };
 
-export async function getNotifications(
+export const getNotifications = cache(async function getNotifications(
   userId: string,
   isAdmin: boolean,
 ): Promise<NotificationItem[]> {
@@ -98,5 +104,5 @@ export async function getNotifications(
   }
 
   return out;
-}
+});
 

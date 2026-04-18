@@ -263,35 +263,11 @@ model Contact {
   createdBy       String?
 
   invitees        Invitee[]
-  members         ContactGroupMember[]
 
   @@index([vipTier])
   @@index([fullName])
   @@index([email])
   @@index([phoneE164])
-}
-
-model ContactGroup {
-  id          String   @id @default(cuid())
-  name        String
-  description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  members     ContactGroupMember[]
-
-  @@index([name])
-}
-
-model ContactGroupMember {
-  id         String       @id @default(cuid())
-  groupId    String
-  group      ContactGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  contactId  String
-  contact    Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  createdAt  DateTime     @default(now())
-
-  @@unique([groupId, contactId])
-  @@index([contactId])
 }
 
 // --- Files -----------------------------------------------------
