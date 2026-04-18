@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { scopedCampaignWhere } from "@/lib/teams";
+import { rateLimit } from "@/lib/ratelimit";
 import { prisma } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -9,17 +11,34 @@ export const runtime = "nodejs";
 // Keeps the result shape consistent so the UI can render them uniformly.
 
 export async function GET(req: Request) {
-  if (!(await isAuthed())) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  // Per-user rate limit. Command palette typing fires this on every
+  // keystroke via the UI debounce — 30/burst refilling two per second
+  // is plenty for legit typing and shuts down scripted mining.
+  const rl = rateLimit(`search:${me.id}`, { capacity: 30, refillPerSec: 2 });
+  if (!rl.ok) {
+    return NextResponse.json({ ok: false, error: "rate_limited" }, { status: 429 });
+  }
   const url = new URL(req.url);
   const q = (url.searchParams.get("q") ?? "").trim();
   if (!q || q.length < 2) return NextResponse.json({ ok: true, results: [] });
 
+  // Respect team scope on the campaign arm of the search so non-admin
+  // editors don't discover team-B campaigns via name substring match.
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+
   const [campaigns, contacts] = await Promise.all([
     prisma.campaign.findMany({
       where: {
-        OR: [
-          { name: { contains: q, mode: "insensitive" } },
-          { venue: { contains: q, mode: "insensitive" } },
+        AND: [
+          campaignScope,
+          {
+            OR: [
+              { name: { contains: q, mode: "insensitive" } },
+              { venue: { contains: q, mode: "insensitive" } },
+            ],
+          },
         ],
       },
       orderBy: { createdAt: "desc" },

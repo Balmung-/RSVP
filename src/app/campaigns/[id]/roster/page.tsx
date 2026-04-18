@@ -29,11 +29,18 @@ export default async function Roster({
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
+  // Print roster caps at 5000 rows — a paper roster beyond that is
+  // unreadable anyway, and without a cap we'd load and render the
+  // entire invitee table into memory for big events.
+  const ROSTER_CAP = 5000;
   const invitees = await prisma.invitee.findMany({
     where: { campaignId: params.id },
     include: { response: true },
     orderBy: [{ organization: "asc" }, { fullName: "asc" }],
+    take: ROSTER_CAP,
   });
+  const totalInvited = await prisma.invitee.count({ where: { campaignId: params.id } });
+  const truncated = totalInvited > invitees.length;
   const sensitive = searchParams.sensitive === "1";
 
   const attending = invitees.filter((i) => i.response?.attending);
@@ -82,6 +89,12 @@ export default async function Roster({
           <div className="meta mt-0.5">
             Attending {attending.length} · Headcount {attendingHeadcount} · Declined {declined.length} · Pending {pending.length}
           </div>
+          {truncated ? (
+            <div className="meta mt-1 text-signal-fail">
+              Roster truncated to {ROSTER_CAP.toLocaleString()} of {totalInvited.toLocaleString()} invitees.
+              Export CSV for the full list.
+            </div>
+          ) : null}
         </div>
         <div className="no-print flex items-center gap-3">
           <a

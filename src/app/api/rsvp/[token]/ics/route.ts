@@ -18,13 +18,14 @@ export async function GET(_req: Request, { params }: { params: { token: string }
       response: { include: { eventOption: true } },
     },
   });
+  // Uniform 404 for any non-emittable state — invalid token, declined,
+  // no event time set. Otherwise "valid token, wrong state" responds
+  // differently (409) from "invalid token" (404) and becomes a token
+  // enumeration oracle.
   if (!invitee) return new NextResponse("Not Found", { status: 404 });
-  if (!invitee.response?.attending) {
-    return new NextResponse("RSVP not confirmed as attending.", { status: 409 });
-  }
-
+  if (!invitee.response?.attending) return new NextResponse("Not Found", { status: 404 });
   const window = eventWindowForCampaign(invitee.campaign, invitee.response.eventOption);
-  if (!window) return new NextResponse("No event time set.", { status: 409 });
+  if (!window) return new NextResponse("Not Found", { status: 404 });
 
   const description =
     (invitee.campaign.description ?? "") +

@@ -116,6 +116,49 @@ function clampInt(s: string | undefined, min: number, max: number, def: number) 
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+// Bulk version of campaignStats for list views. Computes total /
+// responded / headcount for every campaign in `ids` with three
+// grouped queries total — not seven per campaign. Returns a Map
+// keyed on campaignId so callers pick the row they need by id.
+export async function bulkCampaignStats(ids: string[]): Promise<
+  Map<string, { total: number; responded: number; headcount: number }>
+> {
+  const out = new Map<string, { total: number; responded: number; headcount: number }>();
+  for (const id of ids) out.set(id, { total: 0, responded: 0, headcount: 0 });
+  if (ids.length === 0) return out;
+  const [invitees, responses, attending] = await Promise.all([
+    prisma.invitee.groupBy({
+      by: ["campaignId"],
+      where: { campaignId: { in: ids } },
+      _count: { _all: true },
+    }),
+    prisma.response.groupBy({
+      by: ["campaignId"],
+      where: { campaignId: { in: ids } },
+      _count: { _all: true },
+    }),
+    prisma.response.groupBy({
+      by: ["campaignId"],
+      where: { campaignId: { in: ids }, attending: true },
+      _count: { _all: true },
+      _sum: { guestsCount: true },
+    }),
+  ]);
+  for (const r of invitees) {
+    const s = out.get(r.campaignId);
+    if (s) s.total = r._count._all;
+  }
+  for (const r of responses) {
+    const s = out.get(r.campaignId);
+    if (s) s.responded = r._count._all;
+  }
+  for (const r of attending) {
+    const s = out.get(r.campaignId);
+    if (s) s.headcount = r._count._all + (r._sum.guestsCount ?? 0);
+  }
+  return out;
+}
+
 export async function campaignStats(campaignId: string) {
   const [total, responded, attending, declined, sentEmail, sentSms, guestsAgg] = await Promise.all([
     prisma.invitee.count({ where: { campaignId } }),

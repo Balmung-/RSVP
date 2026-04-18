@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole } from "@/lib/auth";
-import { campaignStats } from "@/lib/campaigns";
+import { bulkCampaignStats } from "@/lib/campaigns";
 import { scopedCampaignWhere } from "@/lib/teams";
 import {
   readAdminLocale,
@@ -17,7 +17,7 @@ import {
   type AdminCalendar,
 } from "@/lib/adminLocale";
 
-type Stats = Awaited<ReturnType<typeof campaignStats>>;
+type Stats = { total: number; responded: number; headcount: number };
 type ListRow = { c: Campaign; stats: Stats };
 
 export const dynamic = "force-dynamic";
@@ -45,9 +45,13 @@ export default async function CampaignsPage() {
     orderBy: [{ status: "asc" }, { eventAt: "asc" }, { createdAt: "desc" }],
   });
 
-  const rows = await Promise.all(
-    campaigns.map(async (c) => ({ c, stats: await campaignStats(c.id) })),
-  );
+  // One query set for every campaign's stats instead of 7 per campaign.
+  // Keeps the list snappy when the office has many campaigns.
+  const statsById = await bulkCampaignStats(campaigns.map((c) => c.id));
+  const rows: ListRow[] = campaigns.map((c) => ({
+    c,
+    stats: statsById.get(c.id) ?? { total: 0, responded: 0, headcount: 0 },
+  }));
 
   const upcoming = rows.filter((r) => ["draft", "active", "sending"].includes(r.c.status));
   const past = rows.filter((r) => ["closed", "archived"].includes(r.c.status));

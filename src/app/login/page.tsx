@@ -10,6 +10,7 @@ import {
 } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { verifyTotp } from "@/lib/totp";
+import { rateLimit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,19 @@ async function loginAction(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
   const returnTo = safeReturnTo(String(formData.get("returnTo") ?? ""));
+
+  // Two-key rate limiter: per-IP catches credential-stuffing across
+  // many accounts, per-email catches spray against a single account.
+  // ~5 attempts per burst, refill one per ~12s — legitimate retypes
+  // aren't blocked, a script doing 60/min is.
+  const h0 = headers();
+  const ip = h0.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
+  const byIp = rateLimit(`login:ip:${ip}`, { capacity: 5, refillPerSec: 0.08 });
+  const byEmail = rateLimit(`login:email:${email || "_"}`, { capacity: 5, refillPerSec: 0.08 });
+  if (!byIp.ok || !byEmail.ok) {
+    redirect(`/login?e=throttled${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
+  }
+
   const user = await authenticateWithPassword(email, password);
   if (!user) redirect(`/login?e=1${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
   if (user.totpConfirmedAt && user.totpSecret) {
@@ -49,6 +63,14 @@ async function verify2fa(formData: FormData) {
   const pendingId = readPending();
   const returnTo = safeReturnTo(String(formData.get("returnTo") ?? ""));
   if (!pendingId) redirect("/login?e=expired");
+  // Brute-force guard on the 6-digit code. Per-pending-id caps a
+  // single handshake to a handful of tries — the pending cookie
+  // expires in 5 minutes, but a script could otherwise grind
+  // 1,000,000 codes in that window.
+  const byPending = rateLimit(`2fa:${pendingId}`, { capacity: 5, refillPerSec: 0.1 });
+  if (!byPending.ok) {
+    redirect(`/login?step=2fa&e=throttled${returnTo !== "/" ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`);
+  }
   const user = await prisma.user.findUnique({ where: { id: pendingId } });
   if (!user || !user.active || !user.totpSecret) redirect("/login?e=expired");
   const token = String(formData.get("token") ?? "");
@@ -126,6 +148,8 @@ export default async function Login({
             </label>
             {searchParams.e === "wrong_code" ? (
               <p role="alert" className="text-xs text-signal-fail">Wrong code — codes rotate every 30s.</p>
+            ) : searchParams.e === "throttled" ? (
+              <p role="alert" className="text-xs text-signal-fail">Too many attempts. Try again in a minute.</p>
             ) : null}
             <button className="btn btn-primary w-full py-3">Verify</button>
             <a href="/login" className="text-mini text-ink-400 hover:text-ink-900 text-center">Cancel</a>
@@ -153,7 +177,11 @@ export default async function Login({
 
             {searchParams.e ? (
               <p role="alert" className="text-xs text-signal-fail">
-                {searchParams.e === "expired" ? "That sign-in step expired. Try again." : "Incorrect email or password."}
+                {searchParams.e === "expired"
+                  ? "That sign-in step expired. Try again."
+                  : searchParams.e === "throttled"
+                    ? "Too many attempts. Try again in a minute."
+                    : "Incorrect email or password."}
               </p>
             ) : null}
 

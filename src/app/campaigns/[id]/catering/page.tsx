@@ -25,7 +25,12 @@ export default async function CateringReport({ params }: { params: { id: string 
   if (!campaign) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
 
-  const [responses, questions] = await Promise.all([
+  // Cap the attending query so a 50k-RSVP event doesn't stall the
+  // render loading every row with relations. Catering reports over
+  // 5000 attendees aggregate on sampled data — the CSV export is the
+  // ground-truth for very large events.
+  const CATERING_CAP = 5000;
+  const [responses, questions, totalAttending] = await Promise.all([
     prisma.response.findMany({
       where: { campaignId: params.id, attending: true },
       include: {
@@ -34,12 +39,15 @@ export default async function CateringReport({ params }: { params: { id: string 
         },
         answers: true,
       },
+      take: CATERING_CAP,
     }),
     prisma.campaignQuestion.findMany({
       where: { campaignId: params.id },
       orderBy: { order: "asc" },
     }),
+    prisma.response.count({ where: { campaignId: params.id, attending: true } }),
   ]);
+  const cateringTruncated = totalAttending > responses.length;
 
   const attending = responses.length;
   const totalGuests = responses.reduce((n, r) => n + r.guestsCount, 0);
@@ -125,6 +133,13 @@ export default async function CateringReport({ params }: { params: { id: string 
         <Stat label="Guests" value={totalGuests} />
         <Stat label="Mouths to feed" value={mouths} hint={`${attending} + ${totalGuests}`} />
       </div>
+
+      {cateringTruncated ? (
+        <p className="text-body text-signal-fail mb-8 max-w-2xl">
+          Showing the first {responses.length.toLocaleString()} of {totalAttending.toLocaleString()} attendees.
+          Per-question counts and dietary notes on this page are sampled; export CSV for the complete set.
+        </p>
+      ) : null}
 
       {questions.length === 0 && contactDietary.length === 0 ? (
         <p className="text-body text-ink-500 max-w-xl">

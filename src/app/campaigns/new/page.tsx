@@ -5,24 +5,37 @@ import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { TemplatePicker } from "@/components/TemplatePicker";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { isAuthed, requireRole, hasRole, getCurrentUser } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
-import { teamsEnabled } from "@/lib/teams";
+import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
 
 export const dynamic = "force-dynamic";
 
 async function createCampaign(formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) return;
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
   const locale = rawLocale === "ar" ? "ar" : "en";
   const rawColor = String(formData.get("brandColor") ?? "").trim();
   const brandColor = /^#[0-9A-Fa-f]{3,8}$/.test(rawColor) ? rawColor : null;
+
+  // Mirror the edit-path guard: non-admins can only create a campaign
+  // in a team they belong to (or office-wide). Admins pass through.
+  // Otherwise an editor could orphan a new campaign into a team they
+  // don't see by picking a team ID from another editor's session.
   const teamIdRaw = String(formData.get("teamId") ?? "").trim();
-  const teamId = teamIdRaw && teamsEnabled() ? teamIdRaw : null;
+  let teamId: string | null = null;
+  if (teamIdRaw && teamsEnabled()) {
+    if (hasRole(me, "admin")) {
+      teamId = teamIdRaw;
+    } else {
+      const allowed = new Set(await teamIdsForUser(me.id));
+      teamId = allowed.has(teamIdRaw) ? teamIdRaw : null;
+    }
+  }
   const c = await prisma.campaign.create({
     data: {
       name,
@@ -60,10 +73,17 @@ export default async function NewCampaign({
 }: {
   searchParams: { tpl?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+  const isAdmin = hasRole(me, "admin");
   const [teams, templates] = await Promise.all([
     teamsEnabled()
-      ? prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+      ? isAdmin
+        ? prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+        : prisma.team.findMany({
+            where: { archivedAt: null, id: { in: await teamIdsForUser(me.id) } },
+            orderBy: { name: "asc" },
+          })
       : Promise.resolve([]),
     listTemplates(),
   ]);
