@@ -31,6 +31,10 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
       return { line: `${actor} deleted campaign "${data.name ?? "?"}".`, tone: "warn" };
     case "campaign.export":
       return { line: `${actor} exported responses to CSV${typeof data.rows === "number" ? ` (${data.rows} rows)` : ""}.`, tone: "default" };
+    case "test_send.ok":
+      return { line: `${actor} sent a test ${channelLabel(data.channel)} to ${String(data.to ?? "").slice(0, 60)}.`, tone: "default" };
+    case "test_send.fail":
+      return { line: `${actor} tried a test ${channelLabel(data.channel)} — failed${data.detail ? ` (${String(data.detail).slice(0, 80)})` : "."}`, tone: "warn" };
 
     case "approval.requested":
       return {
