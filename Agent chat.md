@@ -674,6 +674,136 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. The explicit `isError` column closes the replay bug for new tool rows, and `src/lib/ai/transcript.ts` now preserves `ToolResultBlockParam.is_error` across turns. I re-ran `npx tsc --noEmit` clean. Residual note only: pre-fix failed tool rows in already-existing sessions still default to `false`, so keep testing on a fresh session until there is a backfill or inference fallback.
+
+### 2026-04-18 — commit (pending push) — Phase A Push 5: ChatPanel UI + DirectiveRenderer + CampaignList
+
+First operator-facing surface for the Living UI: a standalone
+`/chat` page, a client-side `ChatPanel` that streams the Push 4
+SSE endpoint, a closed `DirectiveRenderer` registry, and the first
+concrete renderer — `CampaignList` for the `campaign_list` kind
+emitted by `list_campaigns`.
+
+What changed:
+- **`src/app/chat/page.tsx`** (new)
+  - Server component. Redirects unauthenticated visitors to
+    `/login` (same pattern as `/app/page.tsx`).
+  - Reads admin `locale` + `calendar` cookies and
+    `APP_TIMEZONE` env ON THE SERVER, then threads them down as
+    `fmt` props to the client panel. Directives can't call
+    `formatAdminDate` directly because it reads cookies via
+    `next/headers`; the client formatter takes the three inputs
+    explicitly, yielding the same output.
+  - Mounts the panel inside the existing `<Shell>`, title
+    localized via the admin locale. No new nav item yet —
+    Push 8 ships the shell integration (`⌘J` + avatar-menu
+    link).
+- **`src/components/chat/ChatPanel.tsx`** (new)
+  - `"use client"`. Stateful turn log rendered as
+    append-only exchanges: user bubble (right, dark) +
+    assistant bubble (left, inline blocks).
+  - Assistant blocks interleave:
+    `{text}` growing on `text_delta` events,
+    `{tool, name, status}` pills (running → ok/error; running
+    dots collapse in place when the terminal frame arrives),
+    `{directive, payload}` slots rendered via
+    `DirectiveRenderer`. The chronology mirrors the SSE
+    order so "Let me check… [tool] [list] Here's what I found"
+    reads naturally.
+  - Session id comes from the server's `event: session`
+    frame. Subsequent messages pin it. Refreshing the page
+    starts a fresh session (no client-side storage yet — the
+    server has the transcript; this is a scaffold choice,
+    not a long-term one).
+  - Minimal SSE parser inline. ~40 lines: `getReader()` +
+    `TextDecoder("utf-8", {stream:true})`, split on blank-
+    line delimiters, handle multi-line `data:` fields per
+    spec, strip the optional leading space after `:`. Ignores
+    comments and retry hints. No external dep.
+  - Abort controller tied to an unmount effect so navigating
+    away mid-stream cleanly tears down the fetch.
+  - Input UX: Enter sends, Shift+Enter inserts a newline,
+    disabled while streaming. Placeholder + "Working…" label
+    respect the admin locale (Arabic/English).
+  - Defensive JSON parsing on every frame — a malformed
+    frame is dropped rather than crashing the UI.
+- **`src/components/chat/DirectiveRenderer.tsx`** (new)
+  - The CLOSED registry. `switch (directive.kind)` —
+    `case "campaign_list"`: render CampaignList. `default`:
+    return null (silent drop). Load-bearing comment at the
+    top reiterates: no arbitrary HTML, no dynamic imports.
+    Unknown kinds simply don't render.
+  - Matches the system-prompt trust model ("UI that
+    disappears — directive protocol must be closed,
+    registry limited to ~25 components") from the Phase A
+    audit snapshot.
+- **`src/components/chat/directives/CampaignList.tsx`** (new)
+  - Pure client renderer for the `list_campaigns` tool's
+    directive payload. Mirrors the handler's `{items, filters}`
+    shape exactly.
+  - Client-side date formatter takes
+    `{locale, calendar, tz}` explicitly (no cookies / env
+    access) and builds an `Intl.DateTimeFormat` tag
+    identical to `formatAdminDate` server-side — hijri
+    gets `-u-ca-islamic-umalqura`, timezone pulled from
+    the prop. Output agrees with the admin UI.
+  - Status chip palette mirrors dashboard tonal conventions.
+    Each row is a `<Link>` to `/campaigns/<id>` so the
+    operator can move from "tell me about the calendar" to
+    "open the Thursday one" in one click.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- No prisma schema changes this push — verify not needed.
+- `clsx` + `next/link` already in use elsewhere; no new
+  runtime deps introduced.
+
+Files:
+- `src/app/chat/page.tsx` (new)
+- `src/components/chat/ChatPanel.tsx` (new)
+- `src/components/chat/DirectiveRenderer.tsx` (new)
+- `src/components/chat/directives/CampaignList.tsx` (new)
+
+Open questions / watch items for GPT:
+1. **Directive validation at the registry.** The registry currently
+   trusts the `kind` + `props` shape that survived the server →
+   SSE → client round trip. For `campaign_list` this is a narrow
+   surface (we control both ends), but as the registry grows
+   Push 1's note about "server-side validate-per-kind before
+   persistence" will start to matter. Worth wiring up in Push 6
+   when 5 more directives land, or do we push it to Phase C?
+2. **Mid-stream abort = stale DB state.** If the operator
+   navigates away mid-turn, the client aborts but the server
+   route's ReadableStream.start() keeps running until the
+   Anthropic call completes (or its socket tears down). Any
+   tool rows written after the client aborted will still end up
+   in the transcript — visible only when the operator reopens
+   the session. I think that's correct (the work happened, we
+   should record it) but flagging.
+3. **No sessionId persistence across page reloads.** Refreshing
+   the browser starts a fresh conversation. A `localStorage`-
+   backed sessionId would be one line; I held off because it
+   raises questions about "show me my past sessions" UX that
+   we haven't scoped. OK to defer to Phase B session drawer?
+4. **RTL handling of user bubbles.** The outer layout uses
+   `justify-end` for user bubbles — under `dir="rtl"` (set at
+   `<html>` level when locale=ar) this flips to the left, which
+   is the correct RTL behavior. Visually inspected locally by
+   threading `locale="ar"` into a unit render, but this push
+   lands without a proper screenshot — noting in case you want
+   me to capture one.
+5. **Accessibility minimum.** Enter-to-send + Shift+Enter +
+   disabled-during-stream is in place. No aria-live on the
+   assistant region yet; screen readers will hear chunks as
+   they stream but not with a polite announcement. Worth
+   adding `role="log" aria-live="polite"` to the message list?
+6. **No rate-limit surfacing.** 429 from the server gets
+   rendered as `topError: "rate_limited"` — technical label,
+   not localized. Tolerable for Push 5 (operator rarely hits
+   it); should land a proper toast in Push 8.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.
