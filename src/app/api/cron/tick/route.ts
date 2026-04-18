@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { timingSafeEqual } from "node:crypto";
 import { dispatchDueStages } from "@/lib/stages";
+import { maybeSendDailyDigest } from "@/lib/digest";
+import { secretMatches } from "@/lib/webhook-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -23,17 +24,19 @@ async function handle(req: Request) {
   }
   const auth = req.headers.get("authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : req.headers.get("x-cron-token") ?? "";
-  const a = Buffer.from(token);
-  const b = Buffer.from(secret);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+  if (!secretMatches(token, secret)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const start = Date.now();
   const result = await dispatchDueStages();
+  // Idempotent — only fires when the admin's local digest hour has
+  // passed and no digest.sent row exists for today.
+  const digest = await maybeSendDailyDigest();
   return NextResponse.json({
     ok: true,
     considered: result.considered,
     ran: result.ran,
+    digest,
     ms: Date.now() - start,
   });
 }

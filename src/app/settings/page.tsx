@@ -48,6 +48,7 @@ export default async function Settings() {
   const cronReady = !!process.env.CRON_SECRET;
   const inboundReady = !!process.env.INBOUND_EMAIL_DOMAIN && !!process.env.INBOUND_WEBHOOK_SECRET;
   const autoAckOn = (process.env.INBOUND_AUTO_ACK ?? "true").toLowerCase() !== "false";
+  const digestOn = ["true", "1", "on"].includes((process.env.DELIVERABILITY_DIGEST ?? "").toLowerCase());
   const teamsOn = (process.env.TEAMS_ENABLED ?? "").toLowerCase() === "true";
 
   return (
@@ -92,6 +93,7 @@ export default async function Settings() {
           <Row label="Cron tick" value={cronReady ? "configured" : "disabled"} live={cronReady} />
           <Row label="Inbound replies" value={inboundReady ? "configured" : "disabled"} live={inboundReady} />
           <Row label="Inbound auto-ack" value={autoAckOn ? "on" : "off"} live={autoAckOn} />
+          <Row label="Daily digest" value={digestOn ? "on" : "off"} live={digestOn} />
           <Row label="Strict health" value={strictHealth ? "on" : "off"} live={strictHealth} />
           <Row label="Teams feature" value={teamsOn ? "enabled" : "disabled"} live={teamsOn} />
         </div>
