@@ -55,6 +55,8 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
     if (isAdmin) {
       base.push({ id: "go-users", label: "People", href: "/users", icon: "user-plus" });
       base.push({ id: "go-events", label: "Activity log", href: "/events", icon: "list" });
+      base.push({ id: "go-deliverability", label: "Deliverability", hint: "Chase failed sends", href: "/deliverability", icon: "warning" });
+      base.push({ id: "go-approvals", label: "Approvals", href: "/approvals", icon: "circle-alert" });
     }
     return base;
   }, [isAdmin, teamsOn]);

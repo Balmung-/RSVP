@@ -112,6 +112,7 @@ export default async function Dashboard() {
           label={T.deliveryFailures7d}
           value={failedInvitations}
           tone={failedInvitations > 0 ? "fail" : "default"}
+          href={failedInvitations > 0 ? "/deliverability" : undefined}
         />
       </div>
 
@@ -296,17 +297,19 @@ function Tile({
   label,
   value,
   tone = "default",
+  href,
 }: {
   label: string;
   value: number;
   tone?: "default" | "hold" | "fail";
+  href?: string;
 }) {
   const dot =
     tone === "hold" ? "bg-signal-hold animate-pulse"
     : tone === "fail" ? "bg-signal-fail"
     : "bg-ink-300";
-  return (
-    <div className="panel-quiet p-5 flex flex-col gap-1">
+  const body = (
+    <>
       <span className="inline-flex items-center gap-2 text-micro uppercase text-ink-400">
         <span className={`dot ${dot}`} />
         {label}
@@ -317,6 +320,18 @@ function Tile({
       >
         {value.toLocaleString()}
       </span>
+    </>
+  );
+  if (href) {
+    return (
+      <Link href={href} className="panel-quiet p-5 flex flex-col gap-1 hover:border-ink-200 transition-colors">
+        {body}
+      </Link>
+    );
+  }
+  return (
+    <div className="panel-quiet p-5 flex flex-col gap-1">
+      {body}
     </div>
   );
 }

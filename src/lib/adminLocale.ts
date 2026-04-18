@@ -116,6 +116,7 @@ export const adminT = {
     sendingNow: "Sending now",
     responsesThisWeek: "Responses this week",
     deliveryFailures7d: "Delivery failures (7d)",
+    deliverability: "Deliverability",
   },
   ar: {
     overview: "نظرة عامة",
@@ -185,6 +186,7 @@ export const adminT = {
     sendingNow: "جاري الإرسال الآن",
     responsesThisWeek: "ردود هذا الأسبوع",
     deliveryFailures7d: "فشل الإرسال (٧ أيام)",
+    deliverability: "قابلية الإرسال",
   },
 } as const;
 

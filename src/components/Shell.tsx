@@ -36,6 +36,12 @@ export async function Shell({
   const pendingApprovals = isAdmin
     ? await prisma.sendApproval.count({ where: { status: "pending" } })
     : 0;
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const failingInvites = isAdmin
+    ? await prisma.invitation.count({
+        where: { status: { in: ["failed", "bounced"] }, createdAt: { gte: since7d } },
+      })
+    : 0;
 
   return (
     <div className="min-h-screen grid grid-cols-[240px_1fr]">
@@ -55,6 +61,11 @@ export async function Shell({
           {isAdmin ? (
             <NavLink href="/approvals" icon="circle-alert" badge={pendingApprovals}>
               {locale === "ar" ? "الموافقات" : "Approvals"}
+            </NavLink>
+          ) : null}
+          {isAdmin ? (
+            <NavLink href="/deliverability" icon="warning" badge={failingInvites}>
+              {T.deliverability}
             </NavLink>
           ) : null}
           {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
