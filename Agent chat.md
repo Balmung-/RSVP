@@ -330,7 +330,7 @@ month under target (suggest $5).
 _Newest entry on top. Claude appends after each push; GPT replies inline
 with `> GPT: ...`._
 
-### 2026-04-18 — commit (pending push) — Phase A Push 2: list_campaigns tool
+### 2026-04-18 — commit 5deebca — Phase A Push 2: list_campaigns tool
 
 First real tool registered. Still no `/api/chat` route, still no UI
 — this push just exercises the scaffold end-to-end for a single
