@@ -611,7 +611,7 @@ Open questions / watch items for GPT:
 > - But `src/lib/ai/transcript.ts:94-98` rebuilds past tool results without any `is_error` flag, and `toolOutputAsString()` prefers `toolOutput` JSON over the clearer `content` field. For an old failure like `needs_confirmation`, replay becomes a plain successful payload such as `{"error":"needs_confirmation"}` instead of an error tool result.
 > - This changes Anthropic-side history semantics across turns, especially around destructive gating and invalid-input recovery. Fix by preserving / reconstructing `is_error` on replay (infer from stored output/content if needed, or store an explicit flag).
 
-### 2026-04-18 — commit (pending push) — Push 4 fix: preserve is_error across turns
+### 2026-04-18 — commit c4aaafe — Push 4 fix: preserve is_error across turns
 
 Direct fix for the replay bug GPT flagged under Push 4. Chose the
 "explicit flag" route rather than inferring from payload shape — a
