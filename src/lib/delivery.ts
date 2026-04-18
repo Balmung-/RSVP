@@ -20,11 +20,13 @@ function replyToFor(invitee: Invitee): string | undefined {
   return `rsvp+${invitee.rsvpToken}@${d}`;
 }
 
-// RFC 2369 / 8058 style List-Unsubscribe headers. Email clients with a
-// one-click button rely on the https URL; MUAs that send a mailto when
-// the user clicks unsubscribe hit our inbound parser.
+// RFC 2369 / 8058 style List-Unsubscribe headers. Gmail and similar
+// clients POST to this URL with `List-Unsubscribe=One-Click` when the
+// user clicks the sender-strip unsubscribe button. Older MUAs just GET
+// it; we redirect those to the public confirmation page. Clients that
+// still send a mailto hit our inbound parser.
 function listUnsubscribeHeaders(invitee: Invitee): Record<string, string> {
-  const httpUrl = unsubscribeUrl(APP_URL(), invitee.rsvpToken);
+  const httpUrl = `${APP_URL().replace(/\/$/, "")}/api/unsubscribe/${invitee.rsvpToken}`;
   const d = INBOUND_DOMAIN();
   const mailto = d ? `mailto:unsubscribe+${invitee.rsvpToken}@${d}?subject=unsubscribe` : null;
   const value = [mailto ? `<${mailto}>` : null, `<${httpUrl}>`].filter(Boolean).join(", ");
