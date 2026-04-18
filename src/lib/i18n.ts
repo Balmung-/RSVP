@@ -21,6 +21,9 @@ export const dict = {
       at: "at",
       alreadyResponded: "You have already responded.",
       update: "Update response",
+      pickDate: "Please pick a date before submitting.",
+      reviewErrors: "Please fix the highlighted fields.",
+      privacy: "Your response is stored by {{brand}} for the event's protocol records.",
     },
     email: {
       defaultSubject: "Invitation — {{campaign}}",
@@ -53,6 +56,9 @@ export const dict = {
       at: "في",
       alreadyResponded: "تم استلام ردكم مسبقاً.",
       update: "تعديل الرد",
+      pickDate: "يرجى اختيار التاريخ قبل الإرسال.",
+      reviewErrors: "يرجى مراجعة الحقول المطلوبة.",
+      privacy: "يتم حفظ ردكم لدى {{brand}} لأغراض التنظيم البروتوكولي للفعالية.",
     },
     email: {
       defaultSubject: "دعوة — {{campaign}}",

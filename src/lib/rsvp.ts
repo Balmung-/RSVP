@@ -7,7 +7,14 @@ export type SubmitResult =
   | { ok: true }
   | {
       ok: false;
-      reason: "not_found" | "closed" | "deadline" | "rate_limited" | "invalid" | "answers_invalid";
+      reason:
+        | "not_found"
+        | "closed"
+        | "deadline"
+        | "rate_limited"
+        | "invalid"
+        | "answers_invalid"
+        | "event_option_required";
       errors?: Record<string, string>;
     };
 
@@ -63,11 +70,17 @@ export async function submitResponse(params: {
   const validation = validateAnswers(applicable, params.answers ?? {});
   if (!validation.ok) return { ok: false, reason: "answers_invalid", errors: validation.errors };
 
-  // Event option must belong to this campaign.
+  // Event option must belong to this campaign. If the campaign has
+  // event options AND the invitee says they're attending, one must
+  // be picked — otherwise we'd silently store null and catering /
+  // seating counts would be wrong.
   let eventOptionId: string | null = null;
   if (params.eventOptionId) {
     const belongs = c.eventOptions.some((o) => o.id === params.eventOptionId);
     if (belongs) eventOptionId = params.eventOptionId;
+  }
+  if (params.attending && c.eventOptions.length > 0 && !eventOptionId) {
+    return { ok: false, reason: "event_option_required" };
   }
 
   // Upsert response + replace its answers atomically so two concurrent

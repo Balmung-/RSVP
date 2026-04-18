@@ -77,12 +77,12 @@ export default async function RsvpPage({
   // they pick yes/no.
   const priorAttending = inv.response?.attending ?? null;
 
-  // Pre-render the admission QR when the invitee has already said yes —
-  // shown in the form's "Thank you" state. Cached per token in checkin.ts.
-  const admissionQr =
-    inv.response?.attending
-      ? await renderCheckInQrDataUrl(checkInUrl(APP_URL, inv.rsvpToken))
-      : null;
+  // Pre-render the admission QR for every visitor so the Thank-You
+  // state can show it immediately after a first-time "attending" submit
+  // — useFormState transitions client-side and doesn't re-render the
+  // server component, so the QR has to already be on the page. Cost is
+  // one cached QR generation per token.
+  const admissionQr = await renderCheckInQrDataUrl(checkInUrl(APP_URL, inv.rsvpToken));
 
   const brandColor = inv.campaign.brandColor && /^#[0-9A-Fa-f]{3,8}$/.test(inv.campaign.brandColor)
     ? inv.campaign.brandColor
@@ -171,6 +171,7 @@ export default async function RsvpPage({
             <RsvpForm
               token={params.token}
               locale={locale}
+              brand={process.env.APP_BRAND ?? "Einai"}
               guestsAllowed={inv.guestsAllowed}
               action={submit}
               eventOptions={inv.campaign.eventOptions.map((o) => ({

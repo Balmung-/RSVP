@@ -25,6 +25,7 @@ type EventOptionView = {
 type Props = {
   token: string;
   locale: Locale;
+  brand: string;
   guestsAllowed: number;
   action: (prev: SubmitResult | null, fd: FormData) => Promise<SubmitResult>;
   eventOptions: EventOptionView[];
@@ -43,7 +44,7 @@ type Props = {
 
 const ERROR_KEY: Record<
   Exclude<SubmitResult, { ok: true }>["reason"],
-  "closed" | "deadline" | "rate_limited" | "invalid" | "answers_invalid"
+  "closed" | "deadline" | "rate_limited" | "invalid" | "answers_invalid" | "event_option_required"
 > = {
   not_found: "invalid",
   closed: "closed",
@@ -51,11 +52,13 @@ const ERROR_KEY: Record<
   rate_limited: "rate_limited",
   invalid: "invalid",
   answers_invalid: "answers_invalid",
+  event_option_required: "event_option_required",
 };
 
 export default function RsvpForm({
   token,
   locale,
+  brand,
   guestsAllowed,
   action,
   eventOptions,
@@ -140,11 +143,14 @@ export default function RsvpForm({
             ? "رابط غير صالح."
             : "This invitation link is not valid."
           : errorReason === "answers_invalid"
-            ? locale === "ar"
-              ? "يرجى مراجعة الإجابات المطلوبة."
-              : "Please review the required answers below."
-            : null;
+            ? L.rsvp.reviewErrors
+            : errorReason === "event_option_required"
+              ? L.rsvp.pickDate
+              : null;
   const fieldErrors = state && !state.ok && state.reason === "answers_invalid" ? state.errors ?? {} : {};
+  // Guard client-side so users don't round-trip to the server just to
+  // learn they forgot the date. Server still enforces authoritatively.
+  const needsEventOption = attending === true && eventOptions.length > 0 && !eventOptionId;
 
   const applicableQuestions = questions.filter((q) => {
     // Mirrors filterForState in @/lib/questions — inlined to keep this a
@@ -156,6 +162,14 @@ export default function RsvpForm({
 
   return (
     <form className="mt-10 flex flex-col gap-6" action={formAction}>
+      {errorText ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-signal-fail/30 bg-signal-fail/5 px-4 py-3 text-sm text-signal-fail"
+        >
+          {errorText}
+        </div>
+      ) : null}
       <input type="hidden" name="token" value={token} />
       <input type="hidden" name="attending" value={attending === null ? "" : attending ? "yes" : "no"} />
       <input type="hidden" name="guestsCount" value={guests} />
@@ -180,6 +194,7 @@ export default function RsvpForm({
         <div className="border-t border-ink-100 pt-6">
           <div className="text-[11px] uppercase tracking-wider text-ink-400 mb-3">
             {locale === "ar" ? "اختر التاريخ" : "Pick a date"}
+            <span className="text-signal-fail ms-1" aria-hidden>*</span>
           </div>
           <div className="grid grid-cols-1 gap-2">
             {eventOptions.map((o) => {
@@ -288,13 +303,11 @@ export default function RsvpForm({
         />
       </label>
 
-      {errorText ? (
-        <p role="alert" className="text-sm text-signal-fail text-center">
-          {errorText}
-        </p>
-      ) : null}
+      <SubmitButton disabled={attending === null || needsEventOption} label={L.rsvp.submit} />
 
-      <SubmitButton disabled={attending === null} label={L.rsvp.submit} />
+      <p className="text-xs text-ink-400 text-center leading-relaxed">
+        {L.rsvp.privacy.replace("{{brand}}", brand)}
+      </p>
     </form>
   );
 }
