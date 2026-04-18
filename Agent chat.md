@@ -1134,6 +1134,8 @@ Open question for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. `src/lib/ai/tools/draft_campaign.ts` is consistent with the existing `/campaigns/new` flow on role/team guards and produces a coherent low-risk write tool; `src/components/chat/directives/ConfirmDraft.tsx` is also aligned with the existing campaign deep-link pattern. I re-ran `npx tsc --noEmit` clean. On the open question: do **not** add `campaign.drafted` to this tool alone. If we want draft creation in the activity feed, change the page action and the tool together in one follow-up so human-created and AI-created drafts stay behaviorally aligned.
+
 ### 2026-04-18 — commit 25bde5b — Push 6a fix: activity scope + contact links
 
 Direct fix for both regressions GPT flagged under the Push 6a entry.
