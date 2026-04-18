@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { submitResponse } from "./rsvp";
 import { logAction } from "./audit";
+import { sendInboundAck } from "./inbound-ack";
 
 // Intent parser + inbound router. Keeps the state machine simple:
 //   captured  → extract token (email subaddress OR SMS body)
@@ -137,10 +138,19 @@ export async function ingest(params: {
   });
 
   // Unsubscribe is applied even if we can't match an invitee (we log the
-  // sender so future sends skip them).
+  // sender so future sends skip them). We only ack if we have an invitee
+  // to address — acking an unknown sender risks spamming a spoofed From.
   if (parsed.intent === "stop" && parsed.confidence === "high") {
     await applyUnsubscribe(params.channel, params.fromAddress);
     await finalize(msg.id, "processed", "Unsubscribe recorded.");
+    if (invitee) {
+      await sendInboundAck({
+        channel: params.channel,
+        intent: "stop",
+        invitee,
+        inboundMessageId: msg.id,
+      });
+    }
     return { id: msg.id, outcome: "unsubscribed" as const };
   }
   if (parsed.intent === "autoreply") {
@@ -164,6 +174,12 @@ export async function ingest(params: {
         refType: "invitee",
         refId: invitee.id,
         data: { channel: params.channel, intent: parsed.intent },
+      });
+      await sendInboundAck({
+        channel: params.channel,
+        intent: parsed.intent,
+        invitee,
+        inboundMessageId: msg.id,
       });
       return { id: msg.id, outcome: "applied" as const, intent: parsed.intent };
     }
@@ -230,6 +246,14 @@ export async function applyReviewerDecision(
   if (decision === "unsubscribe") {
     await applyUnsubscribe(msg.channel as "email" | "sms", msg.fromAddress);
     await finalize(messageId, "processed", "Unsubscribe recorded by reviewer.");
+    if (msg.invitee) {
+      await sendInboundAck({
+        channel: msg.channel as "email" | "sms",
+        intent: "stop",
+        invitee: msg.invitee,
+        inboundMessageId: messageId,
+      });
+    }
     return { ok: true as const };
   }
   if (!msg.invitee) {
@@ -252,6 +276,12 @@ export async function applyReviewerDecision(
     refType: "invitee",
     refId: msg.invitee.id,
     data: { decision, channel: msg.channel },
+  });
+  await sendInboundAck({
+    channel: msg.channel as "email" | "sms",
+    intent: attending ? "attending" : "declined",
+    invitee: msg.invitee,
+    inboundMessageId: messageId,
   });
   return { ok: true as const };
 }
