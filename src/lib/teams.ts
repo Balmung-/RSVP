@@ -120,3 +120,17 @@ export async function userTeams(userId: string) {
     include: { team: true },
   });
 }
+
+// Returns just the team IDs the user belongs to (active memberships,
+// any role). Used by tenant-scoped list pages to build a
+// `Campaign.teamId IN (...)` filter without dragging the team rows
+// along. Returns an empty array for users with no memberships —
+// callers decide whether to interpret that as "no results" or
+// "office-wide" (e.g. admins see everything; scoped views see nothing).
+export async function teamIdsForUser(userId: string): Promise<string[]> {
+  const rows = await prisma.teamMembership.findMany({
+    where: { userId },
+    select: { teamId: true },
+  });
+  return rows.map((r) => r.teamId);
+}

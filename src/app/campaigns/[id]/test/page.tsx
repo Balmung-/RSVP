@@ -19,12 +19,18 @@ async function run(campaignId: string, formData: FormData) {
     channel === "sms"
       ? await testSendSms(campaign!, to, name)
       : await testSendEmail(campaign!, to, name);
+  // Truncate the detail before putting it in the query string — a
+  // verbose provider error can exceed URL safe limits and, worse, some
+  // providers echo partial API keys in their stack traces. 120 chars
+  // is plenty to diagnose the common failure shapes.
+  const detailRaw = res.ok ? res.providerId : res.error;
+  const detail = String(detailRaw ?? "").slice(0, 120);
   const qs = new URLSearchParams({
     to,
     name: name ?? "",
     channel,
     status: res.ok ? "sent" : "failed",
-    detail: res.ok ? res.providerId : res.error,
+    detail,
   });
   redirect(`/campaigns/${campaignId}/test?${qs.toString()}`);
 }

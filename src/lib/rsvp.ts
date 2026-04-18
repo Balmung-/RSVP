@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { filterForState, validateAnswers } from "./questions";
 import { notifyAdmins } from "./notify";
@@ -43,7 +44,12 @@ export async function submitResponse(params: {
   if (c.status === "closed" || c.status === "archived") return { ok: false, reason: "closed" };
   if (c.rsvpDeadline && c.rsvpDeadline < new Date()) return { ok: false, reason: "deadline" };
 
-  const guests = Math.max(0, Math.min(params.guestsCount ?? 0, inv.guestsAllowed));
+  // Reject non-finite input up front — the public form posts strings and
+  // `Number("")` is 0 but `Number("abc")` is NaN, which would slip through
+  // Math.min untouched and poison guestsCount downstream.
+  const rawGuests = params.guestsCount ?? 0;
+  const safeGuests = Number.isFinite(rawGuests) ? rawGuests : 0;
+  const guests = Math.max(0, Math.min(safeGuests, inv.guestsAllowed));
   const guestNames = params.attending
     ? (params.guestNames ?? [])
         .map((n) => n.trim().slice(0, 120))
@@ -64,42 +70,68 @@ export async function submitResponse(params: {
     if (belongs) eventOptionId = params.eventOptionId;
   }
 
-  // Upsert response + replace its answers atomically — so two concurrent
-  // submits for the same token can't interleave into a half-written state.
-  await prisma.$transaction(async (tx) => {
-    const response = await tx.response.upsert({
-      where: { inviteeId: inv.id },
-      create: {
-        campaignId: c.id,
-        inviteeId: inv.id,
-        attending: params.attending,
-        guestsCount: params.attending ? guests : 0,
-        guestNames,
-        message: params.message?.slice(0, 2000) || null,
-        ip: params.ip,
-        userAgent: params.userAgent?.slice(0, 300),
-        eventOptionId,
-      },
-      update: {
-        attending: params.attending,
-        guestsCount: params.attending ? guests : 0,
-        guestNames,
-        message: params.message?.slice(0, 2000) || null,
-        respondedAt: new Date(),
-        eventOptionId,
-      },
-    });
-    await tx.answer.deleteMany({ where: { responseId: response.id } });
-    if (validation.answers.length > 0) {
-      await tx.answer.createMany({
-        data: validation.answers.map((a) => ({
-          responseId: response.id,
-          questionId: a.questionId,
-          value: a.value,
-        })),
+  // Upsert response + replace its answers atomically so two concurrent
+  // submits for the same token can't interleave into a half-written
+  // state. Prisma's `upsert` under the unique (inviteeId) can still
+  // race: two parallel transactions both see "no row" and both try to
+  // create — one wins with P2002, the other throws. We catch P2002 and
+  // retry as a pure update, which is idempotent with the payload in
+  // scope.
+  const write = async (): Promise<void> => {
+    await prisma.$transaction(async (tx) => {
+      const response = await tx.response.upsert({
+        where: { inviteeId: inv.id },
+        create: {
+          campaignId: c.id,
+          inviteeId: inv.id,
+          attending: params.attending,
+          guestsCount: params.attending ? guests : 0,
+          guestNames,
+          message: params.message?.slice(0, 2000) || null,
+          ip: params.ip,
+          userAgent: params.userAgent?.slice(0, 300),
+          eventOptionId,
+        },
+        update: {
+          attending: params.attending,
+          guestsCount: params.attending ? guests : 0,
+          guestNames,
+          message: params.message?.slice(0, 2000) || null,
+          respondedAt: new Date(),
+          eventOptionId,
+        },
       });
+      await tx.answer.deleteMany({ where: { responseId: response.id } });
+      if (validation.answers.length > 0) {
+        await tx.answer.createMany({
+          data: validation.answers.map((a) => ({
+            responseId: response.id,
+            questionId: a.questionId,
+            value: a.value,
+          })),
+        });
+      }
+    });
+  };
+  // Prior-response lookup drives notification dedupe later; we compute
+  // here so "was this the first submission?" stays accurate even if the
+  // write succeeds on a second attempt.
+  const isFirstSubmit = !(await prisma.response.findUnique({
+    where: { inviteeId: inv.id },
+    select: { id: true },
+  }));
+  try {
+    await write();
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      // Another concurrent submit beat us to create. Our payload is the
+      // caller's latest intent, so re-run — the second pass will take
+      // the update branch.
+      await write();
+    } else {
+      throw e;
     }
-  });
+  }
 
   await prisma.eventLog.create({
     data: {
@@ -116,7 +148,9 @@ export async function submitResponse(params: {
   });
 
   // High-value signal: long message, OR contact is VIP. Notify admins so
-  // someone can follow up before the event.
+  // someone can follow up before the event. Only on the first submission
+  // per invitee — re-submits (edits) shouldn't re-spam admins; they can
+  // watch the activity feed if they want the granular trail.
   const message = (params.message ?? "").trim();
   const isLongMessage = message.length >= 20;
   const contact = inv.contactId
@@ -126,7 +160,7 @@ export async function submitResponse(params: {
       })
     : null;
   const isVip = contact && contact.vipTier !== "standard";
-  if (isLongMessage || isVip) {
+  if (isFirstSubmit && (isLongMessage || isVip)) {
     await notifyAdmins(
       "rsvp.high_value",
       `RSVP · ${inv.fullName}`,
