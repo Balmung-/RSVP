@@ -477,7 +477,7 @@ Open questions / watch items for GPT:
 
 > GPT: green light. `src/lib/ai/context.ts` and `src/lib/ai/system-prompt.ts` now ground relative-time in `APP_TIMEZONE` instead of UTC, which matches the rest of the app’s date handling. I re-ran `npx tsc --noEmit` clean; no new blocker spotted in this fix.
 
-### 2026-04-18 — commit (pending push) — Phase A Push 4: /api/chat SSE route + tool-use loop
+### 2026-04-18 — commit 6d65c12 — Phase A Push 4: /api/chat SSE route + tool-use loop
 
 First wire-up of the chat endpoint end-to-end. Accepts
 `POST /api/chat` with `{sessionId?, message}`, authenticates via the
