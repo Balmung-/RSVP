@@ -7,18 +7,19 @@ import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import { campaignStats } from "@/lib/campaigns";
+import {
+  readAdminLocale,
+  readAdminCalendar,
+  adminDict,
+  formatAdminDate,
+  type AdminLocale,
+  type AdminCalendar,
+} from "@/lib/adminLocale";
 
 type Stats = Awaited<ReturnType<typeof campaignStats>>;
 type ListRow = { c: Campaign; stats: Stats };
 
 export const dynamic = "force-dynamic";
-
-const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
-const dateFmt = new Intl.DateTimeFormat("en-GB", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: TZ,
-});
 
 const statusColor: Record<string, string> = {
   draft: "bg-ink-300",
@@ -30,6 +31,9 @@ const statusColor: Record<string, string> = {
 
 export default async function CampaignsPage() {
   if (!(await isAuthed())) redirect("/login");
+  const locale = readAdminLocale();
+  const calendar = readAdminCalendar();
+  const T = adminDict(locale);
 
   const campaigns = await prisma.campaign.findMany({
     orderBy: [{ status: "asc" }, { eventAt: "asc" }, { createdAt: "desc" }],
@@ -44,29 +48,48 @@ export default async function CampaignsPage() {
 
   return (
     <Shell
-      title="Campaigns"
+      title={T.campaigns}
       actions={
         <Link href="/campaigns/new" className="btn btn-primary">
           <Icon name="plus" size={14} />
-          New campaign
+          {T.newCampaign}
         </Link>
       }
     >
       {rows.length === 0 ? (
         <EmptyState
           icon="calendar-check"
-          title="No campaigns yet"
-          action={{ label: "Create the first campaign", href: "/campaigns/new" }}
+          title={T.noCampaignsYet}
+          action={{
+            label: locale === "ar" ? "أنشئ أول حملة" : "Create the first campaign",
+            href: "/campaigns/new",
+          }}
         >
-          A campaign is one event, one guest list, one window to collect responses.
-          Everything else — imports, scheduling, questions, arrivals — lives inside it.
+          {locale === "ar"
+            ? "الحملة هي فعالية واحدة بقائمة ضيوف واحدة ونافذة واحدة لاستقبال الردود. كل شيء آخر — الاستيراد والجدولة والأسئلة والحضور — يعيش داخلها."
+            : "A campaign is one event, one guest list, one window to collect responses. Everything else — imports, scheduling, questions, arrivals — lives inside it."}
         </EmptyState>
       ) : (
         <div className="max-w-5xl">
-          {upcoming.length > 0 ? <CampaignList label="Active" rows={upcoming} /> : null}
+          {upcoming.length > 0 ? (
+            <CampaignList
+              label={T.active}
+              rows={upcoming}
+              T={T}
+              locale={locale}
+              calendar={calendar}
+            />
+          ) : null}
           {past.length > 0 ? (
             <div className={upcoming.length > 0 ? "mt-16" : ""}>
-              <CampaignList label="Past" rows={past} muted />
+              <CampaignList
+                label={locale === "ar" ? "سابقة" : "Past"}
+                rows={past}
+                T={T}
+                locale={locale}
+                calendar={calendar}
+                muted
+              />
             </div>
           ) : null}
         </div>
@@ -75,7 +98,21 @@ export default async function CampaignsPage() {
   );
 }
 
-function CampaignList({ label, rows, muted }: { label: string; rows: ListRow[]; muted?: boolean }) {
+function CampaignList({
+  label,
+  rows,
+  T,
+  locale,
+  calendar,
+  muted,
+}: {
+  label: string;
+  rows: ListRow[];
+  T: ReturnType<typeof adminDict>;
+  locale: AdminLocale;
+  calendar: AdminCalendar;
+  muted?: boolean;
+}) {
   return (
     <section>
       <h2 className="text-micro uppercase text-ink-400 mb-4">{label}</h2>
@@ -97,17 +134,17 @@ function CampaignList({ label, rows, muted }: { label: string; rows: ListRow[]; 
                 <div className="text-mini text-ink-400 mt-0.5 tabular-nums">
                   {c.venue ? <>{c.venue}</> : null}
                   {c.venue && c.eventAt ? <span className="mx-1.5 text-ink-300">·</span> : null}
-                  {c.eventAt ? <>{dateFmt.format(c.eventAt)}</> : null}
-                  {!c.venue && !c.eventAt ? <>No date set</> : null}
+                  {c.eventAt ? <>{formatAdminDate(c.eventAt, locale, calendar, { dateStyle: "medium", timeStyle: "short" })}</> : null}
+                  {!c.venue && !c.eventAt ? <>{locale === "ar" ? "لا تاريخ محدد" : "No date set"}</> : null}
                 </div>
               </div>
               <div className="hidden md:grid grid-cols-3 gap-10 tabular-nums shrink-0">
-                <Mini label="Invited" value={stats.total} />
+                <Mini label={T.invited} value={stats.total} />
                 <Mini
-                  label="Responded"
+                  label={T.responded}
                   value={stats.total ? `${stats.responded} / ${stats.total}` : "—"}
                 />
-                <Mini label="Headcount" value={stats.headcount} emphasize />
+                <Mini label={T.headcount} value={stats.headcount} emphasize />
               </div>
             </Link>
           </li>

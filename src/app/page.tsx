@@ -7,21 +7,22 @@ import { prisma } from "@/lib/db";
 import { isAuthed } from "@/lib/auth";
 import { phrase, type ActivityRecord } from "@/lib/activity";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
+import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 import { Badge } from "@/components/Badge";
 
 export const dynamic = "force-dynamic";
 
-const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
-const fullFmt = new Intl.DateTimeFormat("en-GB", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: TZ,
-});
-const shortFmt = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: TZ });
-const dayFmt = new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "short", timeZone: TZ });
-
 export default async function Dashboard() {
   if (!(await isAuthed())) redirect("/login");
+  const locale = readAdminLocale();
+  const calendar = readAdminCalendar();
+  const T = adminDict(locale);
+  const fmtFull = (d: Date | null | undefined) =>
+    formatAdminDate(d, locale, calendar, { dateStyle: "medium", timeStyle: "short" });
+  const fmtTime = (d: Date | null | undefined) =>
+    formatAdminDate(d, locale, calendar, { timeStyle: "short" });
+  const fmtDay = (d: Date | null | undefined) =>
+    formatAdminDate(d, locale, calendar, { weekday: "long", day: "numeric", month: "short" });
 
   const now = new Date();
   const weekAhead = new Date(now.getTime() + 7 * 86400_000);
@@ -72,42 +73,43 @@ export default async function Dashboard() {
 
   if (totalCampaigns === 0) {
     return (
-      <Shell title="Overview" crumb="This week">
+      <Shell title={T.overview} crumb={T.thisWeek}>
         <EmptyState
           icon="calendar-check"
-          title="Nothing scheduled yet"
-          action={{ label: "Create the first campaign", href: "/campaigns/new" }}
+          title={locale === "ar" ? "لا شيء مجدول بعد" : "Nothing scheduled yet"}
+          action={{ label: T.newCampaign, href: "/campaigns/new" }}
         >
-          This is your oversight page — upcoming events, activity across the office,
-          and anything that needs attention. It fills up as campaigns run.
+          {locale === "ar"
+            ? "هذه صفحة إشرافك — الفعاليات المقبلة والنشاط عبر المكتب وما يحتاج متابعة."
+            : "This is your oversight page — upcoming events, activity across the office, and anything that needs attention."}
         </EmptyState>
       </Shell>
     );
   }
 
-  const groupedByDay = groupByDay(upcomingCampaigns);
+  const groupedByDay = groupByDay(upcomingCampaigns, fmtDay);
 
   return (
     <Shell
-      title="Overview"
-      crumb="This week"
+      title={T.overview}
+      crumb={T.thisWeek}
       actions={
         <Link href="/campaigns/new" className="btn btn-primary">
           <Icon name="plus" size={14} />
-          New campaign
+          {T.newCampaign}
         </Link>
       }
     >
       <div className="grid grid-cols-4 gap-6 mb-12">
-        <Tile label="Active campaigns" value={activeCampaigns} />
+        <Tile label={T.activeCampaigns} value={activeCampaigns} />
         <Tile
-          label="Sending now"
+          label={T.sendingNow}
           value={sendingCampaigns}
           tone={sendingCampaigns > 0 ? "hold" : "default"}
         />
-        <Tile label="Responses this week" value={totalResponses} />
+        <Tile label={T.responsesThisWeek} value={totalResponses} />
         <Tile
-          label="Delivery failures (7d)"
+          label={T.deliveryFailures7d}
           value={failedInvitations}
           tone={failedInvitations > 0 ? "fail" : "default"}
         />
@@ -117,10 +119,10 @@ export default async function Dashboard() {
         <div className="flex flex-col gap-10">
           <section>
             <SectionHeader
-              title="This week"
-              hint="Events in the next 7 days across every active campaign."
+              title={T.thisWeek}
+              hint={locale === "ar" ? "الفعاليات خلال الأيام السبعة القادمة عبر جميع الحملات الفعّالة." : "Events in the next 7 days across every active campaign."}
               href="/campaigns"
-              linkLabel="All campaigns"
+              linkLabel={T.campaigns}
             />
             {upcomingCampaigns.length === 0 ? (
               <div className="panel-quiet p-8 text-center text-body text-ink-500">
@@ -145,7 +147,7 @@ export default async function Dashboard() {
                               ) : null}
                             </div>
                             <div className="shrink-0 text-mini tabular-nums text-ink-500">
-                              {c.eventAt ? fullFmt.format(c.eventAt).split(",").pop()?.trim() : ""}
+                              {c.eventAt ? fmtTime(c.eventAt) : ""}
                             </div>
                           </Link>
                         </li>
@@ -185,11 +187,15 @@ export default async function Dashboard() {
 
           <section>
             <SectionHeader
-              title="Response pulse"
-              hint={`${attendingResponses.toLocaleString()} of ${totalResponses.toLocaleString()} are attending (last 7 days).`}
+              title={T.responsePulse}
+              hint={
+                locale === "ar"
+                  ? `${attendingResponses.toLocaleString()} من ${totalResponses.toLocaleString()} سيحضرون (آخر ٧ أيام).`
+                  : `${attendingResponses.toLocaleString()} of ${totalResponses.toLocaleString()} are attending (last 7 days).`
+              }
             />
             <div className="panel-quiet p-6">
-              <ResponseBar attending={attendingResponses} total={totalResponses} />
+              <ResponseBar attending={attendingResponses} total={totalResponses} locale={locale} />
             </div>
           </section>
         </div>
@@ -198,10 +204,10 @@ export default async function Dashboard() {
           {vips.length > 0 ? (
             <section>
               <SectionHeader
-                title="VIP watch"
-                hint="Royal, ministerial, and VIP invitees across active campaigns."
+                title={T.vipWatch}
+                hint={locale === "ar" ? "كبار الشخصيات في الحملات الفعّالة." : "Royal, ministerial, and VIP invitees across active campaigns."}
                 href="/contacts?tier=royal"
-                linkLabel="All contacts"
+                linkLabel={T.contacts}
               />
               <ul className="panel-quiet divide-y divide-ink-100 overflow-hidden">
                 {vips.slice(0, 8).map((i) => {
@@ -236,15 +242,20 @@ export default async function Dashboard() {
           ) : null}
 
           <section>
-            <SectionHeader title="Activity" hint="Latest 25 events across the office." href="/events" linkLabel="Full log" />
+            <SectionHeader
+              title={T.activity}
+              hint={locale === "ar" ? "آخر ٢٥ حدث في المكتب." : "Latest 25 events across the office."}
+              href="/events"
+              linkLabel={T.events}
+            />
             {recentActivity.length === 0 ? (
               <div className="panel-quiet p-8 text-center text-body text-ink-500">
-                Nothing yet this week.
+                {locale === "ar" ? "لا يوجد نشاط هذا الأسبوع." : "Nothing yet this week."}
               </div>
             ) : (
               <ol className="flex flex-col">
                 {recentActivity.map((e) => (
-                  <ActivityRow key={e.id} event={e} />
+                  <ActivityRow key={e.id} event={e} fmt={fmtFull} />
                 ))}
               </ol>
             )}
@@ -310,13 +321,23 @@ function Tile({
   );
 }
 
-function ResponseBar({ attending, total }: { attending: number; total: number }) {
+function ResponseBar({
+  attending,
+  total,
+  locale,
+}: {
+  attending: number;
+  total: number;
+  locale: "en" | "ar";
+}) {
   const declined = Math.max(0, total - attending);
   const attendPct = total ? Math.round((attending / total) * 100) : 0;
   return (
     <div>
       <div className="flex items-baseline justify-between mb-3">
-        <span className="text-body text-ink-700">{attending.toLocaleString()} attending</span>
+        <span className="text-body text-ink-700">
+          {attending.toLocaleString()} {locale === "ar" ? "سيحضرون" : "attending"}
+        </span>
         <span className="text-mini text-ink-400 tabular-nums">{attendPct}%</span>
       </div>
       <div className="h-2 rounded-full bg-ink-100 overflow-hidden">
@@ -326,13 +347,21 @@ function ResponseBar({ attending, total }: { attending: number; total: number })
         />
       </div>
       <div className="flex items-baseline justify-between mt-3 text-mini text-ink-500">
-        <span>{declined.toLocaleString()} declined</span>
+        <span>
+          {declined.toLocaleString()} {locale === "ar" ? "معتذرون" : "declined"}
+        </span>
       </div>
     </div>
   );
 }
 
-function ActivityRow({ event }: { event: ActivityRecord }) {
+function ActivityRow({
+  event,
+  fmt,
+}: {
+  event: ActivityRecord;
+  fmt: (d: Date) => string;
+}) {
   const { line, tone } = phrase(event);
   const toneClass =
     tone === "success" ? "bg-signal-live"
@@ -344,18 +373,18 @@ function ActivityRow({ event }: { event: ActivityRecord }) {
       <span className={`dot mt-2 shrink-0 ${toneClass}`} />
       <div className="flex-1 min-w-0">
         <div className="text-body text-ink-800">{line}</div>
-        <div className="text-mini text-ink-400 mt-0.5 tabular-nums">{shortFmt.format(event.createdAt)}</div>
+        <div className="text-mini text-ink-400 mt-0.5 tabular-nums">{fmt(event.createdAt)}</div>
       </div>
     </li>
   );
 }
 
 type UC = { id: string; name: string; venue: string | null; eventAt: Date | null };
-function groupByDay(rows: UC[]): Map<string, UC[]> {
+function groupByDay(rows: UC[], fmtDay: (d: Date) => string): Map<string, UC[]> {
   const out = new Map<string, UC[]>();
   for (const r of rows) {
     if (!r.eventAt) continue;
-    const key = dayFmt.format(r.eventAt);
+    const key = fmtDay(r.eventAt);
     const arr = out.get(key) ?? [];
     arr.push(r);
     out.set(key, arr);

@@ -20,6 +20,7 @@ import {
 import { listStages, runStageNow } from "@/lib/stages";
 import { duplicateCampaign } from "@/lib/campaign-duplicate";
 import { setFlash } from "@/lib/flash";
+import { readAdminLocale } from "@/lib/adminLocale";
 import {
   createQuestion,
   deleteQuestion,
@@ -296,13 +297,14 @@ export default async function CampaignWorkspace({
     const qs = new URLSearchParams({ tab: t, ...(extra ?? {}) });
     return `/campaigns/${campaign.id}?${qs.toString()}`;
   };
+  const adminLocale = readAdminLocale();
   const tabsItems: TabItem[] = [
-    { id: "invitees", label: "Invitees", href: href("invitees"), count: stats.total },
-    { id: "schedule", label: "Schedule", href: href("schedule"), count: tabData.scheduleCount },
-    { id: "content", label: "Content", href: href("content"), count: tabData.contentCount },
+    { id: "invitees", label: adminLocale === "ar" ? "المدعوون" : "Invitees", href: href("invitees"), count: stats.total },
+    { id: "schedule", label: adminLocale === "ar" ? "الجدول" : "Schedule", href: href("schedule"), count: tabData.scheduleCount },
+    { id: "content", label: adminLocale === "ar" ? "المحتوى" : "Content", href: href("content"), count: tabData.contentCount },
     {
       id: "arrivals",
-      label: "Arrivals",
+      label: adminLocale === "ar" ? "الحضور" : "Arrivals",
       href: href("arrivals"),
       count: stats.attending,
       hidden: stats.attending === 0,

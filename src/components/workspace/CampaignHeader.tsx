@@ -3,16 +3,10 @@ import type { Campaign } from "@prisma/client";
 import { Menu, MenuItem, MenuSeparator } from "@/components/Menu";
 import { SendDialog } from "@/components/SendDialog";
 import { Icon, type IconName } from "@/components/Icon";
+import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 
 // Workspace header: one dominant title, quiet metadata, one primary action
 // (Send invitations → opens the SendDialog) and one kebab for everything else.
-
-const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
-const dateFmt = new Intl.DateTimeFormat("en-GB", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: TZ,
-});
 
 const statusColor: Record<string, string> = {
   draft: "bg-ink-300",
@@ -22,7 +16,7 @@ const statusColor: Record<string, string> = {
   archived: "bg-ink-300",
 };
 
-export function CampaignHeader({
+export async function CampaignHeader({
   campaign,
   sendAction,
   sendSummary,
@@ -49,9 +43,14 @@ export function CampaignHeader({
   invited: number;
   responded: number;
 }) {
+  const locale = readAdminLocale();
+  const calendar = readAdminCalendar();
+  const T = adminDict(locale);
   const bits = [
     campaign.venue,
-    campaign.eventAt ? dateFmt.format(campaign.eventAt) : null,
+    campaign.eventAt
+      ? formatAdminDate(campaign.eventAt, locale, calendar, { dateStyle: "medium", timeStyle: "short" })
+      : null,
   ].filter(Boolean);
 
   return (
@@ -63,7 +62,9 @@ export function CampaignHeader({
               className={`h-1.5 w-1.5 rounded-full ${statusColor[campaign.status] ?? "bg-ink-300"} ${campaign.status === "sending" ? "animate-pulse" : ""}`}
               aria-hidden
             />
-            <span className="text-micro text-ink-500">{campaign.status.toUpperCase()}</span>
+            <span className="text-micro text-ink-500">
+              {(T[campaign.status as keyof typeof T] as string | undefined) ?? campaign.status.toUpperCase()}
+            </span>
           </div>
           <h1
             className="text-ink-900 truncate"
@@ -75,11 +76,11 @@ export function CampaignHeader({
             <p className="text-body text-ink-500 mt-1.5 tabular-nums">{bits.join(" · ")}</p>
           ) : null}
           <div className="flex items-center gap-5 mt-4 text-body text-ink-600 tabular-nums">
-            <InlineStat label="Invited" value={invited} />
+            <InlineStat label={T.invited} value={invited} />
             <Divider />
-            <InlineStat label="Responded" value={responded} />
+            <InlineStat label={T.responded} value={responded} />
             <Divider />
-            <InlineStat label="Expected headcount" value={headcount} emphasize />
+            <InlineStat label={T.headcount} value={headcount} emphasize />
           </div>
         </div>
 

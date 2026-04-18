@@ -3,7 +3,15 @@ import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
 import { getCurrentUser, hasRole, endSession, isAuthed } from "@/lib/auth";
-import { readAdminLocale, writeAdminLocale, adminDict, type AdminLocale } from "@/lib/adminLocale";
+import {
+  readAdminLocale,
+  writeAdminLocale,
+  readAdminCalendar,
+  writeAdminCalendar,
+  adminDict,
+  type AdminLocale,
+  type AdminCalendar,
+} from "@/lib/adminLocale";
 
 export const dynamic = "force-dynamic";
 
@@ -13,11 +21,12 @@ async function signOut() {
   redirect("/login");
 }
 
-async function setLocale(formData: FormData) {
+async function savePrefs(formData: FormData) {
   "use server";
   const loc = String(formData.get("locale") ?? "en");
-  const next: AdminLocale = loc === "ar" ? "ar" : "en";
-  writeAdminLocale(next);
+  const cal = String(formData.get("calendar") ?? "gregorian");
+  writeAdminLocale((loc === "ar" ? "ar" : "en") as AdminLocale);
+  writeAdminCalendar((cal === "hijri" ? "hijri" : "gregorian") as AdminCalendar);
   redirect("/settings");
 }
 
@@ -25,6 +34,7 @@ export default async function Settings() {
   if (!(await isAuthed())) redirect("/login");
   const user = await getCurrentUser();
   const locale = readAdminLocale();
+  const calendar = readAdminCalendar();
   const T = adminDict(locale);
 
   const emailProvider = process.env.EMAIL_PROVIDER ?? "stub";
@@ -42,24 +52,34 @@ export default async function Settings() {
   return (
     <Shell title={T.settings}>
       <div className="panel p-10 max-w-3xl">
-        <h2 className="text-sub text-ink-900 mb-6">{T.signedInAs === "Signed in as" ? "Account" : "الحساب"}</h2>
+        <h2 className="text-sub text-ink-900 mb-6">{T.account}</h2>
         <div className="grid grid-cols-2 gap-6 text-body mb-8">
           <Row label={T.signedInAs} value={user?.email ?? "—"} />
-          <Row label="Role" value={user?.role ?? "—"} />
+          <Row label={T.role} value={user?.role ?? "—"} />
         </div>
 
-        <form action={setLocale} className="flex items-end gap-3 mb-10">
-          <label className="flex flex-col gap-1.5 flex-1 max-w-xs">
+        <form action={savePrefs} className="grid grid-cols-[1fr_1fr_auto] gap-3 items-end mb-10 max-w-xl">
+          <label className="flex flex-col gap-1.5">
             <span className="text-micro uppercase text-ink-400">{T.language}</span>
             <select name="locale" className="field" defaultValue={locale}>
               <option value="en">English</option>
               <option value="ar">العربية</option>
             </select>
           </label>
-          <button className="btn btn-soft"><Icon name="check" size={14} />Save</button>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-micro uppercase text-ink-400">{T.calendar}</span>
+            <select name="calendar" className="field" defaultValue={calendar}>
+              <option value="gregorian">{T.gregorian}</option>
+              <option value="hijri">{T.hijri}</option>
+            </select>
+          </label>
+          <button className="btn btn-soft">
+            <Icon name="check" size={14} />
+            {T.save}
+          </button>
         </form>
 
-        <h2 className="text-sub text-ink-900 mb-6">Integrations</h2>
+        <h2 className="text-sub text-ink-900 mb-6">{T.integrations}</h2>
         <div className="grid grid-cols-2 gap-6 text-body">
           <Row label="Email provider" value={emailProvider} live={emailProvider !== "stub"} />
           <Row label="SMS provider" value={smsProvider} live={smsProvider !== "stub"} />
@@ -76,22 +96,22 @@ export default async function Settings() {
         <p className="text-mini text-ink-400 mt-8 leading-relaxed">
           Providers + feature flags are set via environment variables — see{" "}
           <code className="text-ink-700">.env.example</code>. Stub mode logs outgoing messages
-          to the server console, so you can exercise the flow before real keys are provisioned.
+          to the server console.
         </p>
       </div>
 
       <div className="mt-6 flex items-center gap-3 flex-wrap">
         <Link href="/account/password" className="btn btn-ghost">
           <Icon name="settings" size={14} />
-          Change password
+          {T.changePassword}
         </Link>
         <Link href="/account/2fa" className="btn btn-ghost">
           <Icon name="qr" size={14} />
-          Two-step sign-in
+          {T.twoStep}
           {user?.totpConfirmedAt ? <span className="text-signal-live ms-1">· on</span> : null}
         </Link>
         {hasRole(user, "admin") ? (
-          <Link href="/users" className="btn btn-ghost">Manage people</Link>
+          <Link href="/users" className="btn btn-ghost">{T.managePeople}</Link>
         ) : null}
       </div>
 
