@@ -25,6 +25,12 @@ import type { ToolDef, ToolResult } from "./types";
 type Input = { id: string };
 
 const ACTIVITY_LIMIT = 10;
+// Same cap the canonical activity page uses — keeps the IN clause
+// cheap on the largest campaigns. When tripped, the tool surfaces
+// `invitee_scan_capped: true` so the card can show the hint
+// without the operator having to wonder why an expected event
+// didn't turn up.
+const INVITEE_SCAN_CAP = 2000;
 
 export const campaignDetailTool: ToolDef<Input> = {
   name: "campaign_detail",
@@ -85,10 +91,60 @@ export const campaignDetailTool: ToolDef<Input> = {
       };
     }
 
+    // Activity scope mirrors the canonical campaign activity page
+    // (`src/app/campaigns/[id]/activity/page.tsx`): EventLog rows
+    // are campaign-scoped when their refType ∈ {campaign, stage,
+    // invitee} and their refId belongs to this campaign. A
+    // refType="campaign"-only filter would silently drop stage
+    // sends (`invite.sent`, `stage.*`) and invitee replies /
+    // check-ins, which is precisely what GPT flagged as the
+    // regression in Push 6a — so we replicate the activity page's
+    // pattern exactly, including the big-campaign invitee scan
+    // cap so a 10k-invitee event doesn't blow the IN clause.
+    const [stageIds, inviteeCount] = await Promise.all([
+      prisma.campaignStage.findMany({
+        where: { campaignId: campaign.id },
+        select: { id: true },
+      }),
+      prisma.invitee.count({ where: { campaignId: campaign.id } }),
+    ]);
+    const inviteeIds =
+      inviteeCount <= INVITEE_SCAN_CAP
+        ? (
+            await prisma.invitee.findMany({
+              where: { campaignId: campaign.id },
+              select: { id: true },
+            })
+          ).map((i) => i.id)
+        : null;
+    const inviteeScanCapped = inviteeIds === null;
+
+    const scopedOr: Prisma.EventLogWhereInput[] = [
+      { refType: "campaign", refId: campaign.id },
+      ...(stageIds.length > 0
+        ? [
+            {
+              refType: "stage",
+              refId: { in: stageIds.map((s) => s.id) },
+            } as Prisma.EventLogWhereInput,
+          ]
+        : []),
+      ...(inviteeIds && inviteeIds.length > 0
+        ? [
+            {
+              refType: "invitee",
+              refId: { in: inviteeIds },
+            } as Prisma.EventLogWhereInput,
+          ]
+        : []),
+    ];
+    const activityWhere: Prisma.EventLogWhereInput =
+      scopedOr.length === 1 ? scopedOr[0] : { OR: scopedOr };
+
     const [stats, activityRows] = await Promise.all([
       campaignStats(campaign.id),
       prisma.eventLog.findMany({
-        where: { refType: "campaign", refId: campaign.id },
+        where: activityWhere,
         include: { actor: { select: { email: true, fullName: true } } },
         orderBy: { createdAt: "desc" },
         take: ACTIVITY_LIMIT,
@@ -123,6 +179,7 @@ export const campaignDetailTool: ToolDef<Input> = {
       updated_at: campaign.updatedAt.toISOString(),
       stats,
       activity,
+      invitee_scan_capped: inviteeScanCapped,
     };
 
     // Compact text summary for the model. Date ISO; client
@@ -137,6 +194,11 @@ export const campaignDetailTool: ToolDef<Input> = {
     );
     if (activity.length > 0) {
       lines.push(`${activity.length} recent activity rows attached.`);
+    }
+    if (inviteeScanCapped) {
+      lines.push(
+        `Note: campaign has >${INVITEE_SCAN_CAP} invitees; per-invitee events hidden from this summary.`,
+      );
     }
 
     return {

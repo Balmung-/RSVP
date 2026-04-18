@@ -4,10 +4,13 @@ import Link from "next/link";
 import clsx from "clsx";
 
 // Renders the `contact_table` directive emitted by `search_contacts`.
-// Each row is a link to `/contacts/<id>` so the operator can open
-// for edit/invite in a single click. Tier chips follow the
-// `VIP_LABEL` convention — royal/minister/vip get distinct muted
-// tones; standard gets no chip to keep the table quiet.
+// Each row is a link to `/contacts/<id>/edit` — that is the canonical
+// contact surface (there is no `/contacts/<id>` detail page; see
+// `src/app/contacts/page.tsx` where the list links the same way).
+// Keeping both surfaces on the same URL means the operator lands on
+// a screen they already know. Tier chips follow the `VIP_LABEL`
+// convention — royal/minister/vip get distinct muted tones;
+// standard gets no chip to keep the table quiet.
 
 export type ContactTableProps = {
   items: Array<{
@@ -58,7 +61,7 @@ export function ContactTable({ props }: { props: ContactTableProps }) {
         {items.map((c) => (
           <li key={c.id} className="px-3 py-2">
             <Link
-              href={`/contacts/${c.id}`}
+              href={`/contacts/${c.id}/edit`}
               className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm hover:bg-slate-50 -mx-3 px-3 py-1 rounded"
             >
               <span className="font-medium text-slate-900">{c.full_name}</span>

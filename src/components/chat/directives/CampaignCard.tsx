@@ -45,6 +45,10 @@ export type CampaignCardProps = {
     tone: "default" | "success" | "warn" | "fail";
     line: string;
   }>;
+  // Set when the campaign has >INVITEE_SCAN_CAP invitees and we
+  // skipped the per-invitee event scan — matches the canonical
+  // activity page's behavior so the operator gets the same hint.
+  invitee_scan_capped?: boolean;
 };
 
 function formatEventAt(iso: string | null, fmt: FormatContext): string {
@@ -161,6 +165,18 @@ export function CampaignCard({
             </li>
           ))}
         </ul>
+      )}
+      {props.invitee_scan_capped && (
+        // Mirror the canonical activity page's hint
+        // (`src/app/campaigns/[id]/activity/page.tsx`): on very
+        // large campaigns we skip the per-invitee event scan, so
+        // replies and check-ins won't show up here. The operator
+        // needs to know that an absent row may be hidden rather
+        // than truly missing — otherwise they second-guess the tool.
+        <div className="px-3 py-2 text-[11px] text-slate-500 border-t border-slate-100 bg-slate-50">
+          Large invitee list — per-invitee events hidden. Open the
+          campaign&apos;s activity page for the full feed.
+        </div>
       )}
     </div>
   );
