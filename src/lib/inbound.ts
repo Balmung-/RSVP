@@ -204,18 +204,24 @@ async function findInviteeByContact(channel: "email" | "sms", from: string) {
   return prisma.invitee.findFirst({ where: { phoneE164: from } });
 }
 
-export async function applyUnsubscribe(channel: "email" | "sms", address: string) {
+export type UnsubscribeReason = "inbound_stop" | "public_page" | "one_click" | "admin";
+
+export async function applyUnsubscribe(
+  channel: "email" | "sms",
+  address: string,
+  reason: UnsubscribeReason = "inbound_stop",
+) {
   if (channel === "email") {
     const email = address.toLowerCase();
     await prisma.unsubscribe.upsert({
       where: { email },
-      create: { email, reason: "inbound_stop" },
+      create: { email, reason },
       update: {},
     });
   } else {
     await prisma.unsubscribe.upsert({
       where: { phoneE164: address },
-      create: { phoneE164: address, reason: "inbound_stop" },
+      create: { phoneE164: address, reason },
       update: {},
     });
   }

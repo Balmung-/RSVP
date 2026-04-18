@@ -17,8 +17,8 @@ async function confirm(formData: FormData) {
     select: { email: true, phoneE164: true },
   });
   if (!inv) return;
-  if (inv.email) await applyUnsubscribe("email", inv.email);
-  if (inv.phoneE164) await applyUnsubscribe("sms", inv.phoneE164);
+  if (inv.email) await applyUnsubscribe("email", inv.email, "public_page");
+  if (inv.phoneE164) await applyUnsubscribe("sms", inv.phoneE164, "public_page");
 }
 
 export default async function Unsubscribe({

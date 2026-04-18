@@ -68,6 +68,11 @@ export async function Shell({
               {T.deliverability}
             </NavLink>
           ) : null}
+          {isAdmin ? (
+            <NavLink href="/unsubscribes" icon="eye-off">
+              {locale === "ar" ? "المنسحبون" : "Unsubscribes"}
+            </NavLink>
+          ) : null}
           {showTeams ? <NavLink href="/teams" icon="tag">{T.teams}</NavLink> : null}
           {isAdmin ? <NavLink href="/users" icon="user-plus">{T.people}</NavLink> : null}
           {isAdmin ? <NavLink href="/events" icon="list">{T.events}</NavLink> : null}
