@@ -232,7 +232,17 @@ export const proposeSendTool: ToolDef<Input> = {
       }
     }
 
-    const readyTotal = emailBucket.ready + smsBucket.ready;
+    // `ready_messages` is a JOB count — one `(invitee, channel)`
+    // pair is one job, matching `sendCampaign`'s planner
+    // (`src/lib/campaigns.ts:218-229`) which enqueues one message
+    // per pair. An invitee on channel=both with both email and SMS
+    // contributes 2 to this count, not 1. Naming reflects the
+    // semantics: operators see `Messages ready: 2` next to
+    // `Invitees: 1` and know the card is describing sends, not
+    // heads. Documented here because the previous name
+    // `ready_total` was ambiguous and the ConfirmSend copy framed
+    // the same number as a recipient count (GPT, Push 6c review).
+    const readyMessages = emailBucket.ready + smsBucket.ready;
 
     // Up-front blockers. Keep them as a string array so the
     // directive can render a list and the model has something
@@ -246,8 +256,8 @@ export const proposeSendTool: ToolDef<Input> = {
     }
     if (invitees.length === 0) {
       blockers.push("no_invitees");
-    } else if (readyTotal === 0) {
-      blockers.push("no_ready_recipients");
+    } else if (readyMessages === 0) {
+      blockers.push("no_ready_messages");
     }
     const wantsEmail = channel === "email" || channel === "both";
     const wantsSms = channel === "sms" || channel === "both";
@@ -269,7 +279,7 @@ export const proposeSendTool: ToolDef<Input> = {
       `Propose send for "${campaign.name}" [${campaign.status}]: channel=${channel}, only_unsent=${onlyUnsent}.`,
     );
     summaryLines.push(
-      `${invitees.length} invitee${invitees.length === 1 ? "" : "s"}; ${readyTotal} ready (email ${emailBucket.ready}, sms ${smsBucket.ready}).`,
+      `${invitees.length} invitee${invitees.length === 1 ? "" : "s"}; ${readyMessages} message${readyMessages === 1 ? "" : "s"} ready to send (email ${emailBucket.ready}, sms ${smsBucket.ready}).`,
     );
     if (
       emailBucket.skipped_already_sent +
@@ -295,7 +305,7 @@ export const proposeSendTool: ToolDef<Input> = {
         name: campaign.name,
         channel,
         only_unsent: onlyUnsent,
-        ready_total: readyTotal,
+        ready_messages: readyMessages,
         invitee_total: invitees.length,
         blockers,
         summary: summaryLines.join("\n"),
@@ -312,7 +322,7 @@ export const proposeSendTool: ToolDef<Input> = {
           channel,
           only_unsent: onlyUnsent,
           invitee_total: invitees.length,
-          ready_total: readyTotal,
+          ready_messages: readyMessages,
           by_channel: {
             email: emailBucket,
             sms: smsBucket,

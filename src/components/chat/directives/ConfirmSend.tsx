@@ -42,7 +42,12 @@ export type ConfirmSendProps = {
   channel: "email" | "sms" | "both";
   only_unsent: boolean;
   invitee_total: number;
-  ready_total: number;
+  // Job count (one `(invitee, channel)` pair = one message), NOT a
+  // recipient count. An invitee with both email and SMS on
+  // channel=both contributes 2 here, not 1. The copy below reflects
+  // that — "Messages ready", not "Recipients ready" — so the
+  // operator confirms the number of sends they're authorizing.
+  ready_messages: number;
   by_channel: {
     email: {
       ready: number;
@@ -67,8 +72,8 @@ export type ConfirmSendProps = {
 
 const BLOCKER_LABEL: Record<string, string> = {
   no_invitees: "No invitees on this campaign",
-  no_ready_recipients:
-    "No recipients are ready to send (all skipped or unsubscribed)",
+  no_ready_messages:
+    "No messages are ready to send (every contact is already sent, unsubscribed, or missing on the chosen channel)",
   no_email_template: "Email template is empty",
   no_sms_template: "SMS template is empty",
 };
@@ -111,7 +116,7 @@ export function ConfirmSend({
 }) {
   const when = formatEventAt(props.event_at, fmt);
   const hasBlockers = props.blockers.length > 0;
-  const canConfirm = !hasBlockers && props.ready_total > 0;
+  const canConfirm = !hasBlockers && props.ready_messages > 0;
   const channelLabel =
     props.channel === "both" ? "email + SMS" : props.channel;
   const skippedTotal =
@@ -159,9 +164,9 @@ export function ConfirmSend({
           </div>
         </div>
         <div>
-          <div className="text-slate-500">Ready to send</div>
+          <div className="text-slate-500">Messages ready</div>
           <div className="tabular-nums text-slate-900 font-medium">
-            {props.ready_total}
+            {props.ready_messages}
             {props.channel === "both" && (
               <span className="text-slate-400 font-normal">
                 {" "}
@@ -251,7 +256,7 @@ export function ConfirmSend({
               : "bg-slate-100 text-slate-400 cursor-not-allowed",
           )}
         >
-          Confirm send ({props.ready_total})
+          Send {props.ready_messages} message{props.ready_messages === 1 ? "" : "s"}
         </button>
       </div>
     </div>

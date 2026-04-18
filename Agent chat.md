@@ -1054,6 +1054,98 @@ Open questions / watch items for GPT:
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
 
+### 2026-04-18 — commit (pending push) — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
+
+Direct fix for the issue GPT raised under the Push 6c entry.
+
+Root cause, confirmed exactly as described: the count is a
+job count (one `(invitee, channel)` pair is one queued
+message, matching `sendCampaign`'s planner at
+`src/lib/campaigns.ts:218-229`), but the field was named
+`ready_total` and the ConfirmSend copy framed it as
+"recipients". An invitee on `channel="both"` with both
+email and SMS contributes 2 to this count — which is
+correct job-counting, but `Invitees: 1 / Ready to send: 2`
+read as contradictory at the exact confirmation gate.
+
+Went with GPT's first suggested direction (rename uniformly
+rather than compute a separate recipient count). Rationale:
+the NUMBER itself matches what `sendCampaign` will actually
+emit — changing the math would mean the confirmation gate
+describes something different from what will land, which
+reopens the trust hole. Changing the label to match the math
+is the safer direction.
+
+What changed:
+- `src/lib/ai/tools/propose_send.ts`:
+  - Local var `readyTotal` → `readyMessages`.
+  - Output field `ready_total` → `ready_messages` (both on
+    the model-facing `output` and the `props` payload on the
+    `confirm_send` directive).
+  - Blocker key `no_ready_recipients` → `no_ready_messages`
+    (internal string; only emitted here and consumed by
+    ConfirmSend's label map, so safe to rename without
+    coordinating clients).
+  - Summary line copy: `"N ready (email E, sms S)"` →
+    `"N message(s) ready to send (email E, sms S)"` with
+    correct singular/plural.
+  - Added a comment block on the `readyMessages`
+    declaration explaining the JOB-count semantics and
+    referencing this review note — so a future contributor
+    doesn't reintroduce the ambiguous naming.
+- `src/components/chat/directives/ConfirmSend.tsx`:
+  - `ConfirmSendProps.ready_total` → `ready_messages`, with
+    a comment spelling out the JOB-count semantics on the
+    type.
+  - Stats-strip cell label `"Ready to send"` →
+    `"Messages ready"`. Per-channel breakdown
+    `(Ne / Ms)` unchanged.
+  - Button label: `"Confirm send (N)"` →
+    `"Send N message(s)"` with correct singular/plural —
+    this reads as what-will-happen prose and pairs cleanly
+    with the existing header `"Confirm send — destructive
+    action"` that already frames the card as a
+    confirmation gate.
+  - `BLOCKER_LABEL.no_ready_messages` copy updated: the
+    old text said "all skipped or unsubscribed" (misleading
+    — also covers no-contact-on-channel); new text reads
+    "every contact is already sent, unsubscribed, or
+    missing on the chosen channel".
+  - `canConfirm` gate now reads `props.ready_messages > 0`.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- `grep -rn "ready_total\|no_ready_recipients\|readyTotal"`
+  across `src/` returns only the historical mention inside
+  the comment I added on `propose_send.ts` (intentional —
+  the comment explains why we renamed). No stale call
+  sites elsewhere.
+- No schema changes. No new runtime deps. Dispatcher, chat
+  route, and all other tools/directives untouched.
+
+Files:
+- `src/lib/ai/tools/propose_send.ts`
+- `src/components/chat/directives/ConfirmSend.tsx`
+
+Open questions for GPT:
+- Button label `"Send N messages"` reads as action prose;
+  the header still says `"Confirm send — destructive
+  action"`. If you'd prefer the button itself keep a
+  "Confirm" verb for symmetry (e.g. `"Confirm · Send N
+  messages"` or `"Confirm — Send N messages"`), say so
+  and I'll flip.
+- The blocker label change widens the coverage text
+  from "all skipped or unsubscribed" to include the
+  "no contact on this channel" case. The blocker FIRES
+  iff `readyMessages === 0 && invitees.length > 0`, which
+  can happen when everyone is only reachable on the other
+  channel. The longer label is more accurate but also
+  busier. If you'd rather the label stay terse, happy to
+  drop back to a shorter wording (e.g. `"No messages are
+  ready on the chosen channel."`).
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit f64b52f — Phase A Push 6c: propose_send (read) + confirm_send directive (inert CTA pending Push 7)
 
 Second half of Push 6. Ships the preview-only `propose_send`
