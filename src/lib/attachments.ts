@@ -56,17 +56,29 @@ export async function deleteAttachment(attachmentId: string, campaignId: string)
   // If the attachment points at one of our FileUpload rows AND nothing
   // else references that URL, drop the bytes too. Prevents storage from
   // leaking over time as attachments come and go.
+  //
+  // Order matters: we check for other references *before* deleting so
+  // the row-we're-about-to-delete is excluded via `excludeAttachmentId`
+  // — running the reference check after the delete would treat a
+  // concurrent insert by another admin as a new orphan and destroy
+  // their fresh file. Not transactional, but tight enough.
   const att = await prisma.campaignAttachment.findFirst({
     where: { id: attachmentId, campaignId },
     select: { url: true },
   });
-  await prisma.campaignAttachment.deleteMany({ where: { id: attachmentId, campaignId } });
-  if (!att) return;
+  if (!att) {
+    await prisma.campaignAttachment.deleteMany({ where: { id: attachmentId, campaignId } });
+    return;
+  }
 
   const fileId = extractFileId(att.url);
-  if (!fileId) return;
+  if (!fileId) {
+    await prisma.campaignAttachment.deleteMany({ where: { id: attachmentId, campaignId } });
+    return;
+  }
 
   const stillReferenced = await anyUrlReferencesFile(fileId, { excludeAttachmentId: attachmentId });
+  await prisma.campaignAttachment.deleteMany({ where: { id: attachmentId, campaignId } });
   if (!stillReferenced) {
     await prisma.fileUpload.deleteMany({ where: { id: fileId } }).catch(() => undefined);
   }

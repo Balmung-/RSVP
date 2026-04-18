@@ -133,6 +133,7 @@ export default async function TwoFactorPage({
               <span className="text-micro uppercase text-ink-400">Current 6-digit code</span>
               <input
                 name="token"
+                required
                 inputMode="numeric"
                 pattern="[0-9]{6}"
                 maxLength={6}

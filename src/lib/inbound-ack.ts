@@ -117,6 +117,10 @@ export async function sendInboundAck(params: {
         subject,
         text,
         html: text.replace(/\n/g, "<br>"),
+        // Tell the receiving MTA this is an automated reply so their
+        // own vacation responder / autoresponder skips it — guards
+        // against ack ↔ OOO ping-pong even if our own parser missed it.
+        headers: { "Auto-Submitted": "auto-replied" },
       });
       await logAction({
         kind: res.ok ? "inbound.ack.sent" : "inbound.ack.failed",

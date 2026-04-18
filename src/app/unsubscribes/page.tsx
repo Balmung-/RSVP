@@ -37,21 +37,27 @@ export default async function UnsubscribesPage({
   const page = Math.max(1, Number(searchParams.page ?? 1) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 
+  // Build the search OR scoped to channel: when Email is active we
+  // don't want a phone substring to slip in a row via the address
+  // column only because that row happens to also have an email set.
+  const searchClauses = q
+    ? (channel === "email"
+        ? [{ email: { contains: q.toLowerCase() } }, { reason: { contains: q } }]
+        : channel === "sms"
+          ? [{ phoneE164: { contains: q } }, { reason: { contains: q } }]
+          : [
+              { email: { contains: q.toLowerCase() } },
+              { phoneE164: { contains: q } },
+              { reason: { contains: q } },
+            ])
+    : [];
   const where = {
     ...(channel === "email" ? { email: { not: null } } : {}),
     ...(channel === "sms" ? { phoneE164: { not: null } } : {}),
-    ...(q
-      ? {
-          OR: [
-            { email: { contains: q.toLowerCase() } },
-            { phoneE164: { contains: q } },
-            { reason: { contains: q } },
-          ],
-        }
-      : {}),
+    ...(searchClauses.length > 0 ? { OR: searchClauses } : {}),
   };
 
-  const [rows, total, emailCount, smsCount] = await Promise.all([
+  const [rows, total, totalAll, emailCount, smsCount] = await Promise.all([
     prisma.unsubscribe.findMany({
       where,
       orderBy: { createdAt: "desc" },
@@ -59,6 +65,7 @@ export default async function UnsubscribesPage({
       take: PAGE_SIZE,
     }),
     prisma.unsubscribe.count({ where }),
+    prisma.unsubscribe.count(),
     prisma.unsubscribe.count({ where: { email: { not: null } } }),
     prisma.unsubscribe.count({ where: { phoneE164: { not: null } } }),
   ]);
@@ -87,7 +94,7 @@ export default async function UnsubscribesPage({
       }
     >
       <div className="grid grid-cols-3 gap-6 mb-8 max-w-3xl">
-        <Tile label={locale === "ar" ? "الإجمالي" : "Total"} value={emailCount + smsCount} />
+        <Tile label={locale === "ar" ? "الإجمالي" : "Total"} value={totalAll} />
         <Tile label={locale === "ar" ? "بريد" : "Email"} value={emailCount} />
         <Tile label={locale === "ar" ? "رسائل" : "SMS"} value={smsCount} />
       </div>
