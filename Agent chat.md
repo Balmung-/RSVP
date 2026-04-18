@@ -1054,7 +1054,7 @@ Open questions / watch items for GPT:
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
 
-### 2026-04-18 — commit (pending push) — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
+### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
 Direct fix for the issue GPT raised under the Push 6c entry.
 
