@@ -105,78 +105,112 @@ confirm → server executes + `logAction`):**
 
 ## Phase A — Chat panel + 6 core tools (1–2 days)
 
+> **Reconciliation note (2026-04-18, after GPT audit at end of file):**
+> The implementation has outrun this checklist. A1–A7 are materially
+> done; several bullets diverged from the original spec as the code
+> landed (stringified JSON vs `Json`, JSON Schema + `validate()` vs
+> zod, audit prefix `ai.tool.*` vs `chat.tool.*`, actual rate-limit
+> numbers, prompt caching still not wired). Each item below is
+> annotated with the divergence so we stop ticking stale boxes. See
+> the single explicit "Still open" block at the end of this phase for
+> what actually gates Phase A exit.
+>
+> Legend: `[x]` done, `[~]` partially done (deltas inline), `[ ]` open.
+
 ### A1. Schema additions (additive — db push safe)
-- [ ] `ChatSession`: `id`, `userId`, `title?`, `createdAt`, `updatedAt`, `archivedAt?`
-- [ ] `ChatMessage`: `id`, `sessionId`, `role` enum(`user|assistant|tool`), `content` (text), `toolName?`, `toolInput?` (Json), `toolOutput?` (Json), `renderDirective?` (Json), `createdAt`
-- [ ] Index: `ChatMessage [sessionId, createdAt]`
-- [ ] Env var `ANTHROPIC_API_KEY` through existing env module
+- [x] `ChatSession`: `id`, `userId`, `title?`, `createdAt`, `updatedAt`, `archivedAt?` — landed in Push 1 (`prisma/schema.prisma`).
+- [x] `ChatMessage`: `id`, `sessionId`, `role`, `content`, `toolName?`, `toolInput?`, `toolOutput?`, `renderDirective?`, `createdAt`, plus `isError Boolean @default(false)` from Push 4 fix.
+  - _delta:_ `toolInput/toolOutput/renderDirective` ship as `String?` holding stringified JSON (not native `Json`) for SQLite-fallback compatibility; matches the existing `EventLog.data` convention. See scaffold audit reply at line 1278.
+- [x] Index: `ChatMessage [sessionId, createdAt]` — landed in Push 1.
+- [~] Env var `ANTHROPIC_API_KEY` — present and read at request time.
+  - _delta:_ read inline via `process.env.ANTHROPIC_API_KEY` in `src/app/api/chat/route.ts:108`. There is no dedicated env module in the repo; the existing pattern is inline reads with a service-unavailable fallback, so this matches codebase convention.
 
 ### A2. Tool registry scaffolding
-- [ ] `src/lib/ai/tools/index.ts` — `export const tools: ToolDef[]` + `dispatch(name, input, ctx)` validates via zod, checks scope, runs handler, returns `{ output, directive? }`
-- [ ] `src/lib/ai/tools/types.ts` — `ToolDef` interface: `{ name, description, input (zod), scope: "read"|"write"|"destructive", handler(input, ctx), renderHint? }`
-- [ ] `ctx` type: `{ user: User, isAdmin: boolean, locale: "en"|"ar", campaignScope }` — built once per request
+- [x] `src/lib/ai/tools/index.ts` — registry + `dispatch(name, input, ctx, opts)`.
+  - _delta:_ validates via a per-tool hand-written `validate(raw) => Input` (not zod). Keeps the dependency footprint small and lets each tool phrase its error messages in the shape the `/api/chat` route expects. See types.ts comment for rationale.
+- [x] `src/lib/ai/tools/types.ts` — `ToolDef<Input>` with `inputSchema` (hand-written JSON Schema, forwarded to Anthropic as `input_schema`), `validate?`, `handler`, `scope`, `description`.
+  - _delta:_ no `renderHint?`; rendering is keyed off `directive.kind` only, matching the closed-registry rule in `DirectiveRenderer`.
+- [x] `ctx` type (`ToolCtx`) with `user`, `isAdmin`, `locale`, `campaignScope` — built once per request in `src/lib/ai/ctx.ts` via `React.cache()`.
 
 ### A3. First six tools
-1. [ ] `list_campaigns` (read) — scope-aware, wraps `prisma.campaign.findMany` + `bulkCampaignStats`. Directive → `<CampaignList/>`.
-2. [ ] `campaign_detail` (read) — campaign + invitee counts + recent activity via `phrase()`. Directive → `<CampaignCard/>`.
-3. [ ] `search_contacts` (read) — text search + tier filter, cap 50 rows. Directive → `<ContactTable/>`.
-4. [ ] `recent_activity` (read) — last 7 days EventLog through same scope cap as dashboard. Directive → `<ActivityStream/>`.
-5. [ ] `draft_campaign` (write, low-risk) — creates draft from name + venue + eventAt. Returns new id + confirmation directive.
-6. [ ] `propose_send` (destructive, **requires confirmation**) — does NOT send. Resolves audience + template + count, returns `<ConfirmSend/>` directive. Actual send goes through separate endpoint on user click.
+1. [x] `list_campaigns` (read) — Push 2 + Push 2-fix (AND-compose scope). Directive → `CampaignList`.
+2. [x] `campaign_detail` (read) — Push 6a + Push 6a fix (activity scope matches canonical page). Directive → `CampaignCard`.
+3. [x] `search_contacts` (read) — Push 6a. Directive → `ContactTable` (link fixed in Push 6a fix).
+4. [x] `recent_activity` (read) — Push 6a. Directive → `ActivityStream`.
+5. [x] `draft_campaign` (write) — Push 6b. Directive → `ConfirmDraft`.
+6. [ ] `propose_send` (destructive, **requires confirmation**) — deferred to Push 6c/7 because the ConfirmSend directive is tightly coupled to the `/api/chat/confirm/[messageId]` route; shipping one without the other would mean a button that 404s.
 
 ### A4. `/api/chat` route
-- [ ] `runtime = "nodejs"`, streaming SSE
-- [ ] Auth: `getCurrentUser` + 401 (mirror `api/unsubscribes/export`)
-- [ ] Rate limit: 10 msg/min/user
-- [ ] Loads `ChatSession`, appends user message, calls Anthropic with prompt caching on system prompt + tool defs + context
-- [ ] Tool loop: up to 8 iterations, each call logged via `logAction({kind: "chat.tool", refType: "chat_session", refId: sessionId, data: {tool, input, scope}})`
-- [ ] Confirmation interception: `scope: "destructive"` refuses to execute, returns `<Confirm/>` directive; client calls `/api/chat/confirm/[messageId]` on click
-- [ ] Persists assistant message + render directives
+- [x] `runtime = "nodejs"`, streaming SSE with event-framed text/tool/directive/session/error/done frames.
+- [x] Auth: `getCurrentUser` + 401 (`src/app/api/chat/route.ts:74-77`).
+- [~] Rate limit: present.
+  - _delta:_ implemented as burst 8 + refill 0.3/s (≈1 message per 3–4s sustained, ~18/min ceiling), not a flat "10 msg/min/user". Matches the existing `rateLimit` helper's shape and is quieter-than-command-palette by design; plan number was illustrative.
+- [~] Loads `ChatSession`, appends user message, calls Anthropic.
+  - _delta:_ **prompt caching is NOT yet wired.** Route still passes a plain `system: string`. The prompt builder already returns the split `{static, dynamic}` shape so the migration to `TextBlockParam[]` + `cache_control` is mechanical; deferred to its own push. Explicit TODO in the route comment at lines 49-54.
+- [~] Tool loop up to 8 iterations, each call logged.
+  - _delta:_ audit `kind` is `ai.tool.<name>` (not `chat.tool.<name>`). `ai.*` reads better as the origin prefix across the audit log and aligns with `data.via = "chat"`. Keep as-is; update plan body rather than rename shipped kinds. See A9 below.
+- [~] Confirmation interception.
+  - _delta:_ dispatcher short-circuits `scope: "destructive"` with a `needs_confirmation` error (`src/lib/ai/tools/index.ts:66-72`). That error flows back to the model as a structured `tool_result`, so the model can explain. But the client-side `ConfirmSend` directive and the `/api/chat/confirm/[messageId]` route that actually re-dispatches with `allowDestructive: true` are **still open** — Push 6c/7.
+- [x] Persists assistant message (text) and tool rows (with `renderDirective` stringified JSON + `isError` flag).
 
 ### A5. Chat panel UI
-- [ ] `src/components/chat/ChatPanel.tsx` — client component, fixed right drawer, `glide` slide-in
-- [ ] New `/chat` route + `⌘J` keyboard trigger via `CommandPalette`
-- [ ] Message list styling: user bubble right (ink-900), assistant plain left, tool calls as one-line pills
-- [ ] `<DirectiveRenderer directive={d}/>` maps directive names → fixed registry (8 components for phase A: CampaignList, CampaignCard, ContactTable, ActivityStream, ConfirmSend, ConfirmDraft, Stat, Empty)
-- [ ] Streaming: incremental text, directives as typed events
-- [ ] UI recedes: after directive acted on, collapses to one-line summary
+- [~] `src/components/chat/ChatPanel.tsx` — client, inline SSE parser, append-only turn log.
+  - _delta:_ **NOT a right-side drawer with `glide` slide-in.** Ships as a standalone `/chat` page (`src/app/chat/page.tsx`) inside the existing `<Shell>`. Drawer/shell integration is Phase A8.
+- [~] New `/chat` route — **done**. `⌘J` keyboard trigger via `CommandPalette` — **not done**, lives in A8.
+- [x] Message list styling: user bubble (bg-ink-900 right), assistant plain (left), tool calls as one-line pills.
+- [~] `<DirectiveRenderer/>` closed registry.
+  - _delta:_ **5 of the 8 planned components registered**: `CampaignList`, `CampaignCard`, `ContactTable`, `ActivityStream`, `ConfirmDraft`. Still open: `ConfirmSend` (Push 6c/7), `Stat`, `Empty` (open question whether still needed — see "Still open" below).
+- [x] Streaming: incremental text deltas, directives as typed events, tool lifecycle frames.
+- [ ] UI recedes: "after directive acted on, collapses to one-line summary" — not implemented; directives persist in the turn log as-is. Open question whether this is still desired or was an early-design aesthetic we can drop.
 
 ### A6. Context block (awareness layer)
-- [ ] `src/lib/ai/context.ts` — `buildContext(userId, isAdmin)` returns structured text block:
-  - Tenant name, today's date, locale
-  - 5 upcoming campaigns in next 7 days (scoped)
-  - Pending approvals the user can act on
-  - VIP watch top 5
-  - Live-failure count
-  - Notification feed top 5
-- [ ] Pulled through existing helpers (`vipWatch`, `getNotifications`, `scopedCampaignWhere`)
-- [ ] `React.cache` per request; in API route memoize per `ChatSession.id` with 60s TTL
+- [x] `src/lib/ai/context.ts` — `buildContext(user)` returns `{ text, grounding: { nowLocal, tz, todayKey } }`.
+- [x] Structured block covers tenant name, today's date (via APP_TIMEZONE), locale, upcoming campaigns, pending approvals, VIP watch, live-failure count, notifications.
+- [x] Pulls through existing helpers (`vipWatch`, notifications, `scopedCampaignWhere`).
+- [~] `React.cache` per request — **done**. Session-scoped 60s TTL memoization — **not done**.
+  - _delta:_ request-scope `React.cache()` is the only memoization layer. For a chat turn that calls the same helpers twice in one request this is already free; cross-request session TTL deferred until we have evidence the context build is a hot spot.
 
 ### A7. System prompt
-- [ ] Terse paragraph: role, locale respect, Saudi protocol office context, confirmation-before-destruction rule, bilingual rendering through `readAdminLocale`
-- [ ] Prompt-cached with `anthropic-beta: prompt-caching-2024-07-31`
-- [ ] Tool definitions appended inside cached block
+- [x] `src/lib/ai/system-prompt.ts` — `buildSystemPrompt({locale, tenantContext, nowLocal, tz, todayKey})` returns `{ static, dynamic }`. Static block covers role, bilingual rendering, confirmation-before-destruction rule, Saudi protocol office framing, tool-use conventions. Dynamic block carries `nowLocal`, `tz`, `todayKey`, and the tenant text.
+- [ ] **Prompt caching with `anthropic-beta: prompt-caching-2024-07-31` is NOT wired.** Route still sends `system` as a plain string. See A4 delta for the deferred migration.
+- [~] Tool definitions passed to Anthropic each turn.
+  - _delta:_ they are sent via `tools: AnthropicTool[]` on every request; once caching lands they'll move inside the cached `TextBlockParam[]`.
 
 ### A8. Shell integration
-- [ ] Add "Chat" entry to `AvatarMenu` items in `src/components/Shell.tsx`
-- [ ] Add `⌘J` shortcut to `CommandPalette`
-- [ ] Primary nav untouched — Phase A is additive
+- [ ] "Chat" entry in `AvatarMenu` (`src/components/Shell.tsx`) — not done.
+- [ ] `⌘J` shortcut in `CommandPalette` — not done.
+- [x] Primary nav untouched — true by definition; Phase A is additive. (Kept ticked so the intent is recorded.)
 
 ### A9. Audit + logging
-- [ ] Every tool invocation → `logAction({kind: "chat.tool.<name>", actorId, data: {input, scope, sessionId}})`
-- [ ] Every destructive confirm → `logAction({kind: "chat.confirm.<tool>", data: {input, confirmedAt}})`
-- [ ] Every denied scope violation → `logAction({kind: "chat.denied", data: {reason, tool}})`
+- [~] Every tool invocation audited.
+  - _delta:_ `kind: "ai.tool.<name>"` (not `chat.tool.<name>`), `refType: "ChatSession"`, `data: { via: "chat", ok, error, sessionId }`. See `src/app/api/chat/route.ts:406-417`. Plan body updated to reflect shipped kind rather than renaming the audit stream. If `chat.tool.*` is strictly required for consistency with BI dashboards, say so and it's a one-line rename.
+- [ ] Destructive confirm audit (`ai.confirm.<tool>` / `ai.chat.confirm.<tool>` — naming open) — not done, gated on Push 7.
+- [ ] Denied scope violation audit — not done. Open: fold into dispatcher, or only log in the `/api/chat/confirm` route when the resolved tool's scope check fails.
 
 ### A10. Tests & verification
-- [ ] Unit: dispatcher scope enforcement (non-admin cross-team campaign)
-- [ ] Unit: confirmation gate (destructive returns directive, not execution)
-- [ ] Manual E2E: "what's shipping this week" → CampaignList directive
-- [ ] Manual E2E: "send the X invitations" → ConfirmSend, not execution
-- [ ] Rate limit verified (10 msg/min/user)
+- [ ] Unit: dispatcher scope enforcement (non-admin cross-team campaign) — not written. No `*.test.ts` files in the repo outside `node_modules` (GPT audit, 2026-04-18).
+- [ ] Unit: confirmation gate (destructive short-circuits without running handler) — not written.
+- [ ] Manual E2E: "what's shipping this week" → CampaignList directive — not formalized, covered informally by scaffold check.
+- [ ] Manual E2E: "send the X invitations" → ConfirmSend, not execution — gated on Push 6c/7.
+- [ ] Rate limit verification — not formalized.
 
 **Exit criteria Phase A:** chat panel opens, 6 tools run, 8 components
 render, confirmation gate prevents autonomous sends, every action
 auditable. Human clicks required for every send.
+
+### Still open for Phase A exit (single source of truth)
+
+Distilled from the annotations above so Claude can drive a linear
+close-out and GPT can review against one list:
+
+1. **`propose_send` tool** + **`ConfirmSend` directive** + `/api/chat/confirm/[messageId]` route + route-side re-dispatch with `allowDestructive: true` (Push 6c/7).
+2. **Destructive-confirm and denied audit events** — names pending GPT sign-off (`ai.confirm.<tool>` / `ai.denied`?).
+3. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8.)
+4. **Prompt caching (A4 + A7)** — migrate `system: string` → `system: TextBlockParam[]` with `cache_control` on the static block + tool defs; add `anthropic-beta: prompt-caching-2024-07-31`. Static/dynamic split already exists in the prompt builder.
+5. **Directive registry gaps** — decide whether `Stat` and `Empty` are still required (A5 still lists 8 components; we've shipped 5 + 1 ConfirmDraft). Open for GPT input.
+6. **UI-recedes behavior** — decide whether to implement or drop.
+7. **Tests** — at minimum the two unit tests called out in A10. Manual E2E written as a short checklist in this file is sufficient for the first pass.
+8. **Optional: `campaign.drafted` EventLog row** from `draft_campaign` — open question posed under the Push 6b entry (line 1091).
 
 ---
 
