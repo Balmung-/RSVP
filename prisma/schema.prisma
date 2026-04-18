@@ -43,6 +43,7 @@ model Campaign {
   questions     CampaignQuestion[]
   attachments   CampaignAttachment[]
   eventOptions  EventOption[]
+  approvals     SendApproval[]
 
   @@index([status])
   @@index([teamId])

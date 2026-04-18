@@ -190,10 +190,16 @@ export const adminT = {
   },
 } as const;
 
+// AdminT is keyed from the English dict (the source of truth for keys
+// and shape). We cast on lookup because the Arabic dict has different
+// literal-type values for every field — `typeof adminT.en` would
+// reject `adminT.ar` even though both have the identical key set. The
+// runtime shape match is guaranteed by this file being the only
+// source of truth for both locales.
 export type AdminT = typeof adminT.en;
 
 export function adminDict(locale: AdminLocale): AdminT {
-  return adminT[locale];
+  return adminT[locale] as unknown as AdminT;
 }
 
 // Date formatting that respects the user's locale + calendar preference.

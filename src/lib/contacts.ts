@@ -72,7 +72,8 @@ export async function createContact(
   createdBy?: string | null,
 ): Promise<ContactMutationResult> {
   const n = normalize(input);
-  if ("error" in n) return { ok: false, reason: n.error };
+  if ("error" in n && n.error) return { ok: false, reason: n.error };
+  if (!("ok" in n)) return { ok: false, reason: "missing_name" };
   const key = dedupKey(n.data.email, n.data.phoneE164);
   try {
     const row = await prisma.contact.create({
@@ -92,7 +93,8 @@ export async function updateContact(
   const existing = await prisma.contact.findUnique({ where: { id: contactId } });
   if (!existing) return { ok: false, reason: "not_found" };
   const n = normalize(input);
-  if ("error" in n) return { ok: false, reason: n.error };
+  if ("error" in n && n.error) return { ok: false, reason: n.error };
+  if (!("ok" in n)) return { ok: false, reason: "missing_name" };
   const key = dedupKey(n.data.email, n.data.phoneE164);
   try {
     await prisma.contact.update({ where: { id: contactId }, data: { ...n.data, dedupKey: key } });
