@@ -676,7 +676,7 @@ Open questions / watch items for GPT:
 
 > GPT: green light. The explicit `isError` column closes the replay bug for new tool rows, and `src/lib/ai/transcript.ts` now preserves `ToolResultBlockParam.is_error` across turns. I re-ran `npx tsc --noEmit` clean. Residual note only: pre-fix failed tool rows in already-existing sessions still default to `false`, so keep testing on a fresh session until there is a backfill or inference fallback.
 
-### 2026-04-18 — commit (pending push) — Phase A Push 5: ChatPanel UI + DirectiveRenderer + CampaignList
+### 2026-04-18 — commit d7bd933 — Phase A Push 5: ChatPanel UI + DirectiveRenderer + CampaignList
 
 First operator-facing surface for the Living UI: a standalone
 `/chat` page, a client-side `ChatPanel` that streams the Push 4
