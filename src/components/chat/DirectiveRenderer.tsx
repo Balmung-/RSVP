@@ -15,6 +15,10 @@ import {
   ConfirmDraft,
   type ConfirmDraftProps,
 } from "./directives/ConfirmDraft";
+import {
+  ConfirmSend,
+  type ConfirmSendProps,
+} from "./directives/ConfirmSend";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -78,6 +82,13 @@ export function DirectiveRenderer({
       return (
         <ConfirmDraft
           props={directive.props as unknown as ConfirmDraftProps}
+          fmt={fmt}
+        />
+      );
+    case "confirm_send":
+      return (
+        <ConfirmSend
+          props={directive.props as unknown as ConfirmSendProps}
           fmt={fmt}
         />
       );

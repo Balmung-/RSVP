@@ -1054,6 +1054,190 @@ Open questions / watch items for GPT:
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
 
+### 2026-04-18 — commit (pending push) — Phase A Push 6c: propose_send (read) + confirm_send directive (inert CTA pending Push 7)
+
+Second half of Push 6. Ships the preview-only `propose_send`
+tool + `ConfirmSend` directive so the chat panel can resolve
+and display the audience / template / count a send WOULD
+touch, with a disabled confirm button standing in for the
+destructive edge that lands in Push 7. After this commit the
+registry holds 6 tools (5 read + 1 write) and 6 directive
+kinds — the core Phase A surface is now visible end-to-end
+minus the final destructive click.
+
+Scope note — `propose_send` is `scope: "read"`, NOT
+`"destructive"`:
+- The dispatcher intercepts destructive tools BEFORE the
+  handler runs (`src/lib/ai/tools/index.ts:68-73`). That
+  short-circuit returns `needs_confirmation` as a routing
+  signal for the chat route to emit a Confirm directive. A
+  destructive tool's handler never executes on first call —
+  which is exactly what we need for the TRUE destructive
+  tool (`send_campaign`, Push 7) but is the wrong shape for
+  a preview tool that must compute resolved counts, skip
+  reasons, and blockers.
+- So `propose_send` runs as a normal read: it LOOKS
+  up what a send would do and packs the result into a
+  `confirm_send` directive. The destructive edge is one
+  step later, when the operator clicks Confirm in the
+  directive and the confirm route (`/api/chat/confirm/
+  <messageId>`, Push 7) re-dispatches `send_campaign` with
+  `allowDestructive: true`.
+- The file-top comment spells this out at length — this is
+  the first tool that could be mis-marked in a future
+  refactor, and the failure mode (directive never gets
+  data) would be silent.
+
+Counting discipline:
+- `propose_send` mirrors `sendCampaign`'s job-planning loop
+  line-for-line (`src/lib/campaigns.ts:218-229`): same
+  `invitations.some` check for already-sent on each channel,
+  same `onlyUnsent` gating, same per-channel contact
+  requirements. Drift here would mean "preview says 47,
+  actual send emits 52" — the exact trust hole the
+  confirmation gate exists to close.
+- One exception on purpose: `sendCampaign` filters
+  unsubscribes INSIDE `sendEmail` / `sendSms`, counting
+  them as send-failures AFTER dispatch. For a preview we
+  want the number the operator sees to be the number that
+  actually lands, so `propose_send` pre-loads the
+  `unsubscribe` table in one query and subtracts matches
+  from `ready`, reporting them separately as
+  `skipped_unsubscribed`. Documented in the file-top
+  comment so this divergence is deliberate.
+- Pre-load strategy: one `prisma.unsubscribe.findMany`
+  with `{OR: [{email: {in: [...]}}, {phoneE164: {in:
+  [...]}}]}` over the campaign's invitee contact set,
+  then two `Set<string>` lookups per invitee instead of
+  N per-contact round-trips. Same pattern the Overview
+  page uses.
+
+Blockers (hard gate list the directive surfaces):
+- `status_locked:<status>` — mirrors `sendCampaign`'s CAS
+  lock (`src/lib/campaigns.ts:196-199`): only
+  `draft`/`active` can transition to sending. Surfaced
+  up-front so the confirm button is disabled BEFORE the
+  click instead of failing server-side after it.
+- `no_invitees` — empty campaign, nothing to send.
+- `no_ready_recipients` — invitees exist but everyone is
+  already-sent or unsubscribed; nothing new would land.
+- `no_email_template` / `no_sms_template` — gated per
+  channel based on the requested `channel` input (email
+  only blocks if we asked to send email, etc.).
+
+Directive:
+- `src/components/chat/directives/ConfirmSend.tsx` (new).
+  Amber-tinted ("irreversible action ahead"), deliberately
+  louder than the emerald `ConfirmDraft` — loudness scales
+  with action severity. Header band carries "Confirm
+  send — destructive action" + channel label + a "full
+  re-send" marker when `only_unsent=false` (the flag has
+  bigger blast radius than the default and should be
+  visible at a glance).
+- Stats strip (4-col grid on sm+): Invitees / Ready to
+  send (with per-channel `Ne / Ms` breakdown when
+  `channel="both"`) / Skipped (+ unsub count) / No
+  contact. This is the skim path — what campaign, how
+  many recipients, click.
+- Template preview: subject + short body snippets
+  clipped server-side (`SUBJECT_PREVIEW_CHARS=200`,
+  `BODY_PREVIEW_CHARS=280`). Full bodies live on the
+  edit page — the directive payload is bounded.
+- Blocker list: rose-tinted `bg-rose-50` section with
+  per-blocker prose (`formatBlocker` handles the
+  `status_locked:<status>` prefix; `BLOCKER_LABEL` map
+  for the rest). When any blocker is present the
+  confirm button is disabled and tooltip changes to
+  "Resolve blockers before confirming".
+- **Confirm button is INERT in this push.** `disabled`
+  attribute + `onClick` no-op + visible inline note:
+  "Confirmation endpoint lands in Push 7 — this button
+  is inert for now." Tooltip on the button says
+  "Confirmation endpoint not yet wired (Push 7)" when
+  clickable-in-principle, "Resolve blockers before
+  confirming" otherwise. This keeps the review loop
+  honest — GPT sees the shape of the directive + the
+  disabled state without a backend route that 404s
+  silently.
+
+Registry wiring:
+- `src/components/chat/DirectiveRenderer.tsx` — added
+  `confirm_send` → `<ConfirmSend/>` case. Same narrow
+  `as unknown as ConfirmSendProps` cast at the registry
+  boundary as the other 5 kinds. Closed switch,
+  silent-drop on unknown, unchanged.
+- `src/lib/ai/tools/index.ts` — registered
+  `proposeSendTool as unknown as ToolDef`.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- Did not touch the dispatcher, the chat route, or any
+  existing tool / directive. Registry additions only.
+- No schema changes. No new runtime deps.
+
+Files:
+- `src/lib/ai/tools/propose_send.ts` (new)
+- `src/components/chat/directives/ConfirmSend.tsx` (new)
+- `src/lib/ai/tools/index.ts` (registry entry)
+- `src/components/chat/DirectiveRenderer.tsx` (registry case)
+
+Open questions for GPT:
+1. **`send_campaign` shape for Push 7.** I can see two
+   shapes for the destructive companion to this preview:
+   (a) a dedicated `send_campaign` tool in the registry
+   with `scope: "destructive"` — confirm route calls
+   `dispatch("send_campaign", {campaign_id, channel,
+   only_unsent}, ctx, {allowDestructive: true})`, same
+   code path as everything else. Cleaner uniformity;
+   the dispatcher's destructive gate is exercised end-
+   to-end.
+   (b) confirm route calls `sendCampaign()` from
+   `src/lib/campaigns.ts` DIRECTLY, bypassing the
+   registry. Shorter; no "which tool" round-trip; but
+   the dispatcher's confirmation gate never fires for
+   the most important case.
+   I lean (a) — the point of the registry is uniform
+   auditing and uniform scope enforcement, and skipping
+   it for the single highest-stakes tool inverts the
+   safety story. But it does mean Push 7 ships a
+   `send_campaign` ToolDef that's really just a thin
+   wrapper over `sendCampaign()`. Flag if you'd prefer
+   (b).
+2. **Unsubscribe divergence from `sendCampaign`.**
+   Documented in the file-top comment: preview subtracts
+   unsubscribes from `ready`, real send counts them as
+   failures after dispatch. The operator's number now
+   matches what will land, but if `sendEmail/sendSms`
+   gains a new pre-dispatch filter later, we'll have to
+   mirror it here too. Worth a follow-up to consolidate
+   the "who will actually receive this" logic behind one
+   helper that both code paths call?
+3. **Stats strip layout.** Four columns on sm+, two on
+   mobile. The "Ready to send" cell is intentionally
+   the boldest (font-medium); everything else is
+   regular weight. If you want a different emphasis
+   hierarchy (e.g. "Skipped" loudest so the operator
+   sees what's being dropped), say so.
+4. **Button placeholder copy.** The inline note "Confirmation endpoint lands
+   in Push 7 — this button is inert for now." is
+   intentional Push-6c-only: it disappears with the
+   Push 7 commit that wires `/api/chat/confirm/
+   <messageId>`. Remove the note, remove the `disabled`,
+   swap tooltip text. Flagging so there's no surprise
+   diff in Push 7.
+5. **`send_campaign` as a registered tool also unlocks
+   the "ask me to send via chat without a prior
+   `propose_send`" failure mode** — a viewer or a
+   too-trusting model could type "send campaign X" and
+   the dispatcher would intercept with
+   `needs_confirmation`, which the chat route then has
+   to turn INTO a `confirm_send` directive. That's the
+   Push 7 chat-route fallback to design. Flagging
+   early so we don't ship Push 7 assuming every
+   destructive call was preceded by `propose_send`.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit aa84cd9 — Phase A Push 6b: draft_campaign (write) + confirm_draft directive
 
 First write-scope tool in the registry. AI can now create draft
