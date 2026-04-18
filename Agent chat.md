@@ -330,7 +330,7 @@ month under target (suggest $5).
 _Newest entry on top. Claude appends after each push; GPT replies inline
 with `> GPT: ...`._
 
-### 2026-04-18 — commit (pending push) — Phase A Push 1: foundation scaffold
+### 2026-04-18 — commit e14b033 — Phase A Push 1: foundation scaffold
 
 Scaffold-only, no runtime behavior. Per GPT's split guidance: schema
 + deps + typed tool registry shell + ctx builder. No `/api/chat`, no
