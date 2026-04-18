@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import clsx from "clsx";
 import type { FormatContext } from "./CampaignList";
@@ -26,11 +27,16 @@ import type { FormatContext } from "./CampaignList";
 //     edit page — a preview card shouldn't ship 5k-char bodies
 //     across the wire.
 //
-// Push 6c caveat: the confirm button is rendered but INERT. The
-// click handler is a no-op and the button tooltip spells out
-// that the wiring ships in Push 7. This keeps the review loop
-// honest — GPT sees the shape of the directive + the disabled
-// CTA without a backend route that 404s silently.
+// Wiring (Push 7): the Confirm button POSTs to
+// `/api/chat/confirm/<messageId>` with no body. The server reads
+// the stored propose_send input, re-dispatches `send_campaign`
+// with `allowDestructive: true`, persists a synthetic assistant
+// turn with the result summary, and returns JSON. On success we
+// morph the footer in-place to a success pill (button hidden) so
+// a second click can't re-send; on failure we surface an inline
+// error and keep the button live for retry. `messageId` absent is
+// treated as a hard disable — it's only missing on legacy/stale
+// re-hydrations where there's no coherent row to confirm against.
 
 export type ConfirmSendProps = {
   campaign_id: string;
@@ -107,18 +113,103 @@ function formatEventAt(iso: string | null, fmt: FormatContext): string {
   }
 }
 
+type SendState =
+  | { phase: "idle" }
+  | { phase: "sending" }
+  | {
+      phase: "sent";
+      summary: string;
+      email: number;
+      sms: number;
+      skipped: number;
+      failed: number;
+    }
+  | { phase: "error"; error: string };
+
 export function ConfirmSend({
   props,
   fmt,
+  messageId,
 }: {
   props: ConfirmSendProps;
   fmt: FormatContext;
+  messageId?: string;
 }) {
+  const [state, setState] = useState<SendState>({ phase: "idle" });
   const when = formatEventAt(props.event_at, fmt);
   const hasBlockers = props.blockers.length > 0;
-  const canConfirm = !hasBlockers && props.ready_messages > 0;
+  // `canConfirm` now also requires a messageId — without one the
+  // POST has no authorization anchor, so the button has nowhere to
+  // go. See the file-top wiring comment.
+  const hasAnchor = typeof messageId === "string" && messageId.length > 0;
+  const canConfirm =
+    !hasBlockers && props.ready_messages > 0 && hasAnchor && state.phase === "idle";
   const channelLabel =
     props.channel === "both" ? "email + SMS" : props.channel;
+
+  async function onConfirm() {
+    if (!hasAnchor) return;
+    setState({ phase: "sending" });
+    try {
+      const res = await fetch(`/api/chat/confirm/${messageId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      // Read body defensively — a proxy or route-level 500 may
+      // return non-JSON. We surface the HTTP code in that case so
+      // the operator has something actionable.
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      if (!res.ok) {
+        const err =
+          (body && typeof body === "object" && "error" in body
+            ? String((body as Record<string, unknown>).error)
+            : null) ?? `http_${res.status}`;
+        setState({ phase: "error", error: err });
+        return;
+      }
+      const b = (body ?? {}) as {
+        ok?: boolean;
+        summary?: string;
+        result?: {
+          email?: number;
+          sms?: number;
+          skipped?: number;
+          failed?: number;
+          error?: string;
+        };
+        error?: string;
+      };
+      if (b.ok === false) {
+        // Handler-level refusal — shape matches the tool's output:
+        // `{error, reason?, summary?}`. Prefer the summary if the
+        // handler supplied one.
+        const err =
+          (b.result && typeof b.result.error === "string"
+            ? b.result.error
+            : null) ??
+          (typeof b.error === "string" ? b.error : "send_failed");
+        setState({ phase: "error", error: err });
+        return;
+      }
+      const r = b.result ?? {};
+      setState({
+        phase: "sent",
+        summary: typeof b.summary === "string" ? b.summary : "Send complete.",
+        email: typeof r.email === "number" ? r.email : 0,
+        sms: typeof r.sms === "number" ? r.sms : 0,
+        skipped: typeof r.skipped === "number" ? r.skipped : 0,
+        failed: typeof r.failed === "number" ? r.failed : 0,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "network_error";
+      setState({ phase: "error", error: msg });
+    }
+  }
   const skippedTotal =
     props.by_channel.email.skipped_already_sent +
     props.by_channel.sms.skipped_already_sent;
@@ -232,33 +323,74 @@ export function ConfirmSend({
         </div>
       )}
 
-      <div className="px-3 py-2 border-t border-amber-200 bg-amber-50 flex items-center justify-between gap-3">
-        <div className="text-[11px] text-amber-800">
-          {/* Push 6c: the click handler is intentionally a no-op.
-              Wiring to /api/chat/confirm/<messageId> ships in
-              Push 7. Rendering the CTA now lets GPT review the
-              directive shape + disabled state without a 404. */}
-          Confirmation endpoint lands in Push 7 — this button is
-          inert for now.
+      {state.phase === "sent" ? (
+        // Success morph. Button is gone — a second click is a
+        // footgun (duplicates the send). The amber "destructive
+        // ahead" framing is replaced with an emerald "done" chip
+        // so the operator's eye registers the state change even
+        // on a quick glance back through the scrollback.
+        <div className="px-3 py-2 border-t border-emerald-200 bg-emerald-50 text-xs text-emerald-900 space-y-0.5">
+          <div className="font-medium">Sent.</div>
+          <div className="text-emerald-800">{state.summary}</div>
         </div>
-        <button
-          type="button"
-          disabled
-          title={
-            canConfirm
-              ? "Confirmation endpoint not yet wired (Push 7)"
-              : "Resolve blockers before confirming"
-          }
-          className={clsx(
-            "rounded px-3 py-1.5 text-sm font-medium",
-            canConfirm
-              ? "bg-amber-200 text-amber-900 opacity-60 cursor-not-allowed"
-              : "bg-slate-100 text-slate-400 cursor-not-allowed",
-          )}
-        >
-          Send {props.ready_messages} message{props.ready_messages === 1 ? "" : "s"}
-        </button>
-      </div>
+      ) : (
+        <div className="px-3 py-2 border-t border-amber-200 bg-amber-50 flex items-center justify-between gap-3">
+          <div className="text-[11px] text-amber-800 min-w-0 flex-1">
+            {state.phase === "error" ? (
+              // Inline error leaves the button live so the operator
+              // can retry. Show the raw error code — it maps to
+              // handler outputs the operator's probably seen
+              // elsewhere (status_not_sendable, send_in_flight,
+              // etc.) and is actionable on its face.
+              <span className="text-rose-700">
+                Error: {state.error}. Try again or refresh the card.
+              </span>
+            ) : !hasAnchor ? (
+              <span>
+                Missing confirmation anchor — refresh to reload the card.
+              </span>
+            ) : hasBlockers ? (
+              <span>Resolve blockers before confirming.</span>
+            ) : (
+              <span>
+                Click Confirm to send. This action cannot be undone.
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void onConfirm();
+            }}
+            disabled={!canConfirm && state.phase !== "error"}
+            title={
+              !hasAnchor
+                ? "Missing confirmation anchor"
+                : hasBlockers
+                  ? "Resolve blockers before confirming"
+                  : state.phase === "sending"
+                    ? "Sending…"
+                    : "Send now"
+            }
+            className={clsx(
+              "rounded px-3 py-1.5 text-sm font-medium whitespace-nowrap",
+              canConfirm
+                ? "bg-amber-600 text-white hover:bg-amber-700"
+                : state.phase === "error" && hasAnchor && !hasBlockers
+                  ? "bg-amber-600 text-white hover:bg-amber-700"
+                  : state.phase === "sending"
+                    ? "bg-amber-200 text-amber-900 opacity-80 cursor-wait"
+                    : "bg-slate-100 text-slate-400 cursor-not-allowed",
+            )}
+          >
+            {state.phase === "sending"
+              ? "Sending…"
+              : state.phase === "error"
+                ? "Retry"
+                : `Send ${props.ready_messages} message${props.ready_messages === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -360,9 +360,7 @@ export async function POST(req: Request) {
                   : JSON.stringify(r.output);
               if (r.directive) {
                 directiveForStorage = r.directive;
-                send("directive", r.directive);
               }
-              send("tool", { name: call.name, status: "ok" });
             } else {
               isError = true;
               // Surface a structured error to the model so it can
@@ -371,14 +369,17 @@ export async function POST(req: Request) {
               // short-circuit shows up here as "needs_confirmation".
               outputForModel = `error: ${result.error}`;
               outputForStorage = { error: result.error };
-              send("tool", {
-                name: call.name,
-                status: "error",
-                error: result.error,
-              });
             }
 
-            await prisma.chatMessage.create({
+            // Persist BEFORE emitting the directive — we need the
+            // row id to thread into the SSE envelope as `messageId`.
+            // That id is the authorization anchor the confirm route
+            // (`/api/chat/confirm/[messageId]`) uses to re-dispatch
+            // destructive actions on operator click. If we emitted
+            // the directive first, the client would render a
+            // ConfirmSend button with no id to POST to — the confirm
+            // round-trip relies on the persisted row existing.
+            const toolRow = await prisma.chatMessage.create({
               data: {
                 sessionId,
                 role: "tool",
@@ -398,7 +399,30 @@ export async function POST(req: Request) {
                 // replay as successful tool_results.
                 isError,
               },
+              select: { id: true },
             });
+
+            if (result.ok) {
+              if (directiveForStorage) {
+                // Envelope shape: `{kind, props, messageId}`. The
+                // client's DirectiveRenderer threads messageId into
+                // confirmation directives (ConfirmSend) so the
+                // button knows which row to POST against. Directives
+                // that don't need a confirm round-trip (CampaignList,
+                // ConfirmDraft) ignore the extra field.
+                send("directive", {
+                  ...(directiveForStorage as Record<string, unknown>),
+                  messageId: toolRow.id,
+                });
+              }
+              send("tool", { name: call.name, status: "ok" });
+            } else {
+              send("tool", {
+                name: call.name,
+                status: "error",
+                error: result.error,
+              });
+            }
 
             // Audit every tool invocation. `data.via = "chat"`
             // matches the convention used elsewhere for AI-origin

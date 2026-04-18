@@ -519,10 +519,23 @@ function handleEvent(
 
   if (ev.event === "directive") {
     if (!data || typeof data !== "object") return;
-    const d = data as { kind?: string; props?: Record<string, unknown> };
+    const d = data as {
+      kind?: string;
+      props?: Record<string, unknown>;
+      messageId?: string;
+    };
     if (typeof d.kind !== "string" || !d.props) return;
     const kind: string = d.kind;
     const props: Record<string, unknown> = d.props;
+    // messageId is the id of the ChatMessage row that stores this
+    // tool invocation. Confirm directives use it as the authorization
+    // anchor for POST /api/chat/confirm/<messageId>. Absent on
+    // non-confirm directives (CampaignList, ConfirmDraft, etc.) and
+    // harmlessly carried anyway — unused props don't hurt.
+    const messageId: string | undefined =
+      typeof d.messageId === "string" && d.messageId.length > 0
+        ? d.messageId
+        : undefined;
     setTurns((prev) =>
       prev.map((t) => {
         if (t.kind !== "assistant" || t.id !== assistantId) return t;
@@ -530,7 +543,7 @@ function handleEvent(
           ...t,
           blocks: [
             ...t.blocks,
-            { type: "directive", payload: { kind, props } },
+            { type: "directive", payload: { kind, props, messageId } },
           ],
         };
       }),

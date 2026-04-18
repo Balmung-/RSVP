@@ -150,8 +150,8 @@ confirm → server executes + `logAction`):**
   - _delta:_ **prompt caching is NOT yet wired.** Route still passes a plain `system: string`. The prompt builder already returns the split `{static, dynamic}` shape so the migration to `TextBlockParam[]` + `cache_control` is mechanical; deferred to its own push. Explicit TODO in the route comment at lines 49-54.
 - [~] Tool loop up to 8 iterations, each call logged.
   - _delta:_ audit `kind` is `ai.tool.<name>` (not `chat.tool.<name>`). `ai.*` reads better as the origin prefix across the audit log and aligns with `data.via = "chat"`. Keep as-is; update plan body rather than rename shipped kinds. See A9 below.
-- [~] Confirmation interception.
-  - _delta:_ dispatcher short-circuits `scope: "destructive"` with a `needs_confirmation` error (`src/lib/ai/tools/index.ts:66-72`). That error flows back to the model as a structured `tool_result`, so the model can explain. But the client-side `ConfirmSend` directive and the `/api/chat/confirm/[messageId]` route that actually re-dispatches with `allowDestructive: true` are **still open** — Push 6c/7.
+- [x] Confirmation interception.
+  - _delta:_ full destructive loop now live as of Push 7. Dispatcher short-circuits `scope: "destructive"` with `needs_confirmation` (`src/lib/ai/tools/index.ts:66-72`). `ConfirmSend` directive renders with a live Confirm button (`src/components/chat/directives/ConfirmSend.tsx`). `/api/chat/confirm/[messageId]` (`src/app/api/chat/confirm/[messageId]/route.ts`) re-dispatches `send_campaign` with `allowDestructive: true`, reading input from the stored propose_send row (no trust on the client POST).
 - [x] Persists assistant message (text) and tool rows (with `renderDirective` stringified JSON + `isError` flag).
 
 ### A5. Chat panel UI
@@ -185,14 +185,14 @@ confirm → server executes + `logAction`):**
 ### A9. Audit + logging
 - [~] Every tool invocation audited.
   - _delta:_ `kind: "ai.tool.<name>"` (not `chat.tool.<name>`), `refType: "ChatSession"`, `data: { via: "chat", ok, error, sessionId }`. See `src/app/api/chat/route.ts:406-417`. Plan body updated to reflect shipped kind rather than renaming the audit stream. If `chat.tool.*` is strictly required for consistency with BI dashboards, say so and it's a one-line rename.
-- [ ] Destructive confirm audit (`ai.confirm.<tool>` / `ai.chat.confirm.<tool>` — naming open) — not done, gated on Push 7.
-- [ ] Denied scope violation audit — not done. Open: fold into dispatcher, or only log in the `/api/chat/confirm` route when the resolved tool's scope check fails.
+- [x] Destructive confirm audit. Shipped in Push 7: `ai.confirm.<tool>` fires in the confirm route for every attempted dispatch (`data.via = "confirm"`, `data.ok`, `data.error`, `data.messageId`). Handler-level refusals land here with `ok=true` at dispatch + the tool's output carrying an `error` field.
+- [x] Denied audit. Shipped in Push 7 as `ai.denied.<tool>` for route-level denials only (stale id, wrong tool, corrupt input, anchor was itself an error). Separate kind from `ai.confirm.*` so a dashboard can distinguish "confirm clicked on a broken anchor" from "send refused for a real business reason". Dispatcher still returns `needs_confirmation` for unsolicited destructive calls — that path flows through the standard `ai.tool.*` kind (with `ok=false, error=needs_confirmation`), not `ai.denied.*`.
 
 ### A10. Tests & verification
 - [ ] Unit: dispatcher scope enforcement (non-admin cross-team campaign) — not written. No `*.test.ts` files in the repo outside `node_modules` (GPT audit, 2026-04-18).
 - [ ] Unit: confirmation gate (destructive short-circuits without running handler) — not written.
 - [ ] Manual E2E: "what's shipping this week" → CampaignList directive — not formalized, covered informally by scaffold check.
-- [ ] Manual E2E: "send the X invitations" → ConfirmSend, not execution — gated on Push 6c/7.
+- [~] Manual E2E: "send the X invitations" → ConfirmSend → operator click → actual send. Loop exists as of Push 7 but hasn't been formally walked end-to-end against a test campaign with a live provider stub yet.
 - [ ] Rate limit verification — not formalized.
 
 **Exit criteria Phase A:** chat panel opens, 6 tools run, 8 components
@@ -204,10 +204,10 @@ auditable. Human clicks required for every send.
 Distilled from the annotations above so Claude can drive a linear
 close-out and GPT can review against one list:
 
-1. **`propose_send` tool + `ConfirmSend` directive — SHIPPED in Push 6c (+ 6c fix).** Card renders with job-count semantics; confirm button is inert pending Push 7.
-2. **`/api/chat/confirm/[messageId]` route + `send_campaign` destructive tool + route-side re-dispatch with `allowDestructive: true`** (Push 7). Ship in one reviewable unit alongside the audit events below (GPT post-6c checkpoint recommendation).
-3. **Destructive-confirm and denied audit events** — names pending GPT sign-off (`ai.confirm.<tool>` / `ai.denied`?). Bundled into Push 7 per GPT checkpoint.
-4. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8.)
+1. **`propose_send` tool + `ConfirmSend` directive — SHIPPED in Push 6c (+ 6c fix).** Card renders with job-count semantics.
+2. **`/api/chat/confirm/[messageId]` route + `send_campaign` destructive tool + route-side re-dispatch with `allowDestructive: true` — SHIPPED in Push 7.** Confirm button live; end-to-end destructive loop in place.
+3. **Destructive-confirm and denied audit events — SHIPPED in Push 7.** `ai.confirm.<tool>` for attempted dispatches, `ai.denied.<tool>` for route-level denials (wrong tool / stale id / corrupt input / anchor was error). Split rationale documented in the confirm route file-top comment.
+4. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8 — now the only remaining core Phase A item.)
 5. **Prompt caching (A4 + A7)** — migrate `system: string` → `system: TextBlockParam[]` with `cache_control` on the static block + tool defs; add `anthropic-beta: prompt-caching-2024-07-31`. Static/dynamic split already exists in the prompt builder.
 6. **Directive registry gaps** — decide whether `Stat` and `Empty` are still required (A5 lists 8 components; we've shipped 6). Open for GPT input.
 7. **UI-recedes behavior** — decide whether to implement or drop.
@@ -1056,6 +1056,270 @@ Open questions / watch items for GPT:
 > - `src/lib/ai/tools/campaign_detail.ts:90-95` only loads `EventLog` rows with `refType="campaign"`. The canonical campaign activity surface in `src/app/campaigns/[id]/activity/page.tsx:14-18,56-68` treats `{campaign, stage, invitee}` as campaign-scoped, so this tool silently drops stage sends and invitee replies/check-ins while still claiming "the last 10 activity entries".
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
+
+### 2026-04-18 — commit (pending push) — Phase A Push 7: send_campaign (destructive) + /api/chat/confirm/[messageId] + ConfirmSend wiring
+
+Closes the destructive edge that Push 6c left dangling. The
+`propose_send` → ConfirmSend → operator-click → actual-send
+loop is now live end-to-end. After this commit the registry
+holds 7 tools (5 read + 1 write + 1 destructive), the confirm
+route exists, and the previously-inert ConfirmSend button
+actually POSTs.
+
+Architecture of the destructive path (worth pinning down because
+three files collaborate and the trust boundary is subtle):
+
+1. Model calls `propose_send` (scope="read"). Handler computes
+   the preview, emits the `confirm_send` directive.
+2. Chat route persists the tool row FIRST (role="tool"), then
+   sends the SSE directive frame with the row's id embedded as
+   `messageId` in the envelope: `{kind, props, messageId}`.
+   The reorder is load-bearing — pre-Push-7 the directive
+   emit preceded persist, which would leave the confirm
+   button with no id to POST to.
+3. Client morphs the directive into `<ConfirmSend/>` and renders
+   a live Confirm button. Without `messageId` the button is
+   hard-disabled (defensive path for legacy re-hydrations).
+4. Operator click → POST `/api/chat/confirm/<messageId>` with
+   NO BODY. The route re-reads the stored `toolInput` from the
+   propose_send row (never the client's POST) and re-dispatches
+   `send_campaign` with `allowDestructive: true`.
+5. `send_campaign`'s handler runs end-to-end: role gate,
+   AND-composed team scope, status pre-check, then
+   `sendCampaign(...)` with the CAS lock. Result is JSON'd back
+   to the client, which morphs the footer in place.
+
+What changed:
+- **`src/lib/ai/tools/send_campaign.ts`** (new)
+  - `scope: "destructive"`. Dispatcher short-circuits
+    unsolicited calls with `needs_confirmation` — see
+    `src/lib/ai/tools/index.ts:66-72`. The handler only runs
+    when the confirm route sets `allowDestructive: true`.
+  - Input shape is a strict superset-compatible pass-through
+    of `propose_send`'s input: `{campaign_id, channel?,
+    only_unsent?}`. Same validator discipline; channel
+    defaults to `"both"`, `only_unsent` defaults to true.
+  - Role gate: `hasRole(ctx.user, "editor")` — mirrors
+    `propose_send`. Belt-and-braces; the confirm route also
+    gates on auth, but a future direct-dispatch path should
+    still refuse viewer credentials.
+  - AND-composed scope: `{AND: [ctx.campaignScope, {id:
+    input.campaign_id}]}` so an out-of-team campaign id
+    collapses to `not_found`. Same discipline as every other
+    campaign tool.
+  - Pre-CAS status gate: only `draft` / `active` accepted.
+    `sendCampaign` itself CAS-locks and returns `{locked:
+    true}` for bad status rather than throwing, but the
+    handler also surfaces a clean `status_not_sendable` when
+    it can see the bad state up-front. Without this recheck
+    a status change between `propose_send` and the confirm
+    click would no-op with `locked: true`, which looks like
+    silent failure to the operator.
+  - Locked-path handling: if CAS lost (another send in
+    flight), surfaces `send_in_flight`. Rare but real
+    under rapid double-click pathologies.
+  - Structured summary output + no directive — the card
+    already exists on-screen; the client morphs it in place
+    from the JSON response rather than re-emitting a new
+    directive.
+  - Extensive file-top comment on WHY the scope is
+    destructive vs propose_send's read (the dispatcher
+    interception rule and its consequences).
+- **`src/lib/ai/tools/index.ts`** — registered
+  `sendCampaignTool` as the 7th tool.
+- **`src/app/api/chat/confirm/[messageId]/route.ts`** (new)
+  - POST-only, path param `messageId`, no request body.
+    Auth via `getCurrentUser()` → 401; rate limit shares the
+    `chat:${me.id}` bucket.
+  - Ownership check via session join:
+    `{id: messageId, role: "tool", session: {userId: me.id}}`.
+    A row belonging to a different user collapses to
+    `not_found` (not `forbidden`) to avoid an existence
+    probe.
+  - `toolName === "propose_send"` allow-list. Anything else
+    is a pre-dispatch denial → `ai.denied.send_campaign`
+    audit + 400.
+  - `isError: true` on the anchor row is ALSO a denial —
+    propose_send returned an error (`forbidden`,
+    `not_found`), so there's no coherent proposal to confirm.
+    UI shouldn't render the button in that state but we
+    refuse server-side anyway.
+  - Stored `toolInput` JSON is parsed and passed through
+    verbatim to `dispatch("send_campaign", ..., {
+    allowDestructive: true })`. Corrupt JSON → pre-dispatch
+    denial + audit + 400.
+  - Every attempted dispatch audits
+    `ai.confirm.send_campaign` with `data.ok` +
+    `data.error`. Handler-level refusals (forbidden /
+    status_not_sendable / send_in_flight) land here with
+    `ok=true` at the dispatch layer but the tool's output
+    carrying an `error` field — we flip `isError: true` on
+    the persisted assistant row so the model sees the error
+    honestly on the next turn.
+  - Success → persist the tool's `summary` as a NEW
+    `role="assistant"` ChatMessage and return JSON.
+    Rationale for assistant (not tool) role: transcript
+    replay in `src/lib/ai/transcript.ts` groups trailing
+    `role="tool"` rows into the PRECEDING assistant turn's
+    tool_use blocks. If we persisted role="tool", replay
+    would fabricate a `send_campaign` tool_use the model
+    never made, derailing pairing. Assistant text slots in
+    cleanly after the tool-result pseudo-turn emitted for
+    propose_send, preserving user/assistant alternation.
+- **`src/app/api/chat/route.ts`** — reordered the per-tool-call
+  block: previously `send("directive", r.directive)` fired
+  BEFORE the persist; now the persist happens first (to get
+  `toolRow.id`) and the directive envelope is emitted as
+  `{...directive, messageId: toolRow.id}`. `send("tool",
+  running)` still fires before dispatch for a snappy UI; only
+  the directive + `send("tool", ok|error)` moved. File-top
+  comment already pointed at Push 7 for this wiring; no doc
+  churn besides a new inline note on the reorder rationale.
+- **`src/components/chat/ChatPanel.tsx`** — directive event
+  handler now extracts `messageId` from the SSE payload and
+  carries it on the assistant turn's `directive` block.
+- **`src/components/chat/DirectiveRenderer.tsx`** — `AnyDirective`
+  gained an optional `messageId: string` field. Only the
+  `confirm_send` case threads it through; other cases ignore
+  the extra field harmlessly. A doc comment on the type
+  explains why it's optional (pre-Push-7 rehydration paths
+  won't have one).
+- **`src/components/chat/directives/ConfirmSend.tsx`** — Confirm
+  button is live. New local `SendState` discriminated union
+  (`idle` | `sending` | `sent` | `error`). Click handler fetches
+  POST `/api/chat/confirm/<messageId>`, reads JSON defensively
+  (non-JSON 500 surfaces as `http_<status>`). Success morphs
+  the footer to an emerald "Sent" block with the server
+  summary — button is REMOVED, not just disabled, to make a
+  duplicate click impossible. Error state keeps the button
+  live as a "Retry" CTA with the raw error code inline.
+  Missing `messageId` is a hard disable with a
+  "refresh the card" hint. The Push 6c inert-for-now note
+  is gone.
+
+Audit design:
+- `ai.tool.<name>` — existing convention for in-stream tool
+  calls (chat route).
+- `ai.confirm.<name>` — NEW. Fires in the confirm route for
+  every attempted dispatch. `data.via = "confirm"`,
+  `data.ok`, `data.error`, `data.messageId`. On handler-level
+  refusals `ok=true` (dispatch succeeded) but the tool's
+  output carries the refusal — same shape as `ai.tool.*`.
+- `ai.denied.<name>` — NEW. Fires ONLY for route-level
+  denials that never reach dispatch (wrong tool, corrupt
+  input, anchor was itself an error). Separate kind so a
+  dashboard can distinguish "the confirm button was clicked
+  on a stale / forged / broken anchor" from "the send
+  itself refused for a real business reason". Documented
+  at the top of the confirm route file.
+
+Trust model — why the confirm POST takes no body:
+- The operator's click authorizes EXECUTING a proposal, not
+  REDEFINING one. The `campaign_id` / `channel` /
+  `only_unsent` the operator saw in the card are the ones
+  the model resolved and persisted on the propose_send row.
+  Accepting them again from the client would open a
+  swap-the-target attack: click Send on preview A, intercept
+  the POST, swap to campaign B in the body, and the route
+  would happily send B. Reading straight from the stored
+  `toolInput` closes that hole. The URL `messageId` IS the
+  authorization anchor; ownership is via session join, not
+  a separately-supplied user id.
+
+Transcript coherence:
+- Persisting the confirm result as `role="assistant"`
+  (plain text, no tool_use) means the sequence replayed
+  to the model on the NEXT operator turn is: user (initial
+  ask) → assistant (propose_send tool_use) → user
+  (tool_result for propose_send) → assistant (confirm
+  summary, text-only). That's valid user/assistant
+  alternation and the model sees what happened in a form
+  it can reason about naturally — "you proposed a send
+  and it went through" — without fabricating tool_use
+  blocks that never existed.
+- `isError: true` on the persisted assistant row when the
+  tool's output carried a structured error. The flag
+  currently only influences storage; assistant rows aren't
+  reconstituted with is_error the way tool rows are, but
+  persisting it now means a later richer-transcript pass
+  can surface the failure without a second query.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- Walked the reorder by hand: `send("tool", running)` →
+  dispatch → persist (with `select: {id: true}`) → emit
+  directive with `messageId` → `send("tool", ok|error)` →
+  audit. No execution between persist and directive emit
+  that could drop the id; the row exists before the client
+  sees the button.
+- Walked the confirm route's stored-input re-dispatch: the
+  `toolInput` on a propose_send row is exactly
+  `{campaign_id, channel?, only_unsent?}`, which
+  `send_campaign.validate()` accepts unchanged. The
+  `validate()` call inside `dispatch()` still runs — a
+  tampered row would be caught there.
+- No schema changes. No new runtime deps.
+
+Files:
+- `src/lib/ai/tools/send_campaign.ts` (new)
+- `src/lib/ai/tools/index.ts`
+- `src/app/api/chat/confirm/[messageId]/route.ts` (new)
+- `src/app/api/chat/route.ts`
+- `src/components/chat/ChatPanel.tsx`
+- `src/components/chat/DirectiveRenderer.tsx`
+- `src/components/chat/directives/ConfirmSend.tsx`
+
+Open questions / watch items for GPT:
+1. **Assistant-role persistence of confirm results.** The
+   design choice (see Transcript coherence above) keeps
+   replay clean but it does mean the operator's transcript
+   shows a bare assistant text turn where the model itself
+   didn't speak. Alternative was persisting as role="tool"
+   orphaned — which would break replay — or synthesizing a
+   role="user" "[confirmed send]" pair, which pollutes the
+   transcript with fake user input. I landed on the current
+   approach; flagging in case you see a third option I
+   missed.
+2. **messageId envelope vs prop.** I kept `messageId`
+   at the SSE envelope level (`{kind, props, messageId}`)
+   rather than stuffing it into `props`. Rationale: it's an
+   identity field the directive-registry cares about, not a
+   render-time field the component cares about. But it means
+   `AnyDirective` now has three top-level fields, and the
+   confirm_send path casts `props` narrowly while reading
+   `messageId` directly. If you'd prefer it inside props,
+   say so — the refactor is mechanical.
+3. **Success morph discards the button.** Unlike ConfirmDraft
+   (Push 6b) which leaves its CTA in place, ConfirmSend on
+   success REMOVES the button to guard against
+   duplicate-send. That also means the operator can't
+   re-open the card to see "what did I just confirm" with
+   a live button — the stats strip and template preview
+   stay visible, which should be enough for a post-send
+   skim. Calling it out because it's a real UX delta vs
+   ConfirmDraft's pattern.
+4. **Rate-limit bucket sharing.** The confirm route uses
+   `chat:${me.id}` — same bucket as the chat stream
+   endpoint. An operator who's hammering confirm will
+   consume chat-send budget. I think this is correct
+   (both paths eventually hit LLM + DB) but if you'd rather
+   the confirm route have its own looser bucket I can
+   split them.
+5. **`ai.denied.send_campaign` vs inlining into
+   `ai.confirm.send_campaign`.** The split-kind rationale is
+   above — route-level denials are qualitatively different
+   from business-logic refusals and deserve their own
+   dashboard filter. Marking here in case you'd rather have
+   a single kind with a `data.phase` discriminator.
+6. **`SendState.sent` unused fields.** The state variant
+   carries `email / sms / skipped / failed` numbers that
+   the current footer doesn't render (only the text
+   summary is shown). Left them in intentionally for a
+   future richer success state; TS doesn't flag unused
+   union fields and the parse cost is trivial. Happy to
+   drop if you'd rather keep the state shape minimal.
+
+- status: awaiting-review
 
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 

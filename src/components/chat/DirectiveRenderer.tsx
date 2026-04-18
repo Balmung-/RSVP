@@ -37,6 +37,14 @@ import {
 export type AnyDirective = {
   kind: string;
   props: Record<string, unknown>;
+  // The ChatMessage row id this directive was persisted under. The
+  // chat route threads it into the SSE envelope (Push 7) so that
+  // confirmation directives like ConfirmSend know which row to POST
+  // against when the operator clicks. Optional because directives
+  // stored pre-Push 7 (or re-hydrated from paths that don't carry it)
+  // won't have one — consuming components must tolerate absence and
+  // disable their confirm CTA rather than hard-fail.
+  messageId?: string;
 };
 
 export function DirectiveRenderer({
@@ -90,6 +98,7 @@ export function DirectiveRenderer({
         <ConfirmSend
           props={directive.props as unknown as ConfirmSendProps}
           fmt={fmt}
+          messageId={directive.messageId}
         />
       );
     default:

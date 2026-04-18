@@ -5,6 +5,7 @@ import { searchContactsTool } from "./search_contacts";
 import { recentActivityTool } from "./recent_activity";
 import { draftCampaignTool } from "./draft_campaign";
 import { proposeSendTool } from "./propose_send";
+import { sendCampaignTool } from "./send_campaign";
 
 // The AI tool registry. Tools self-register by being pushed into
 // `tools` below (one file per tool, imported here). For the scaffold
@@ -39,6 +40,7 @@ export const tools: ToolDef[] = [
   recentActivityTool as unknown as ToolDef,
   draftCampaignTool as unknown as ToolDef,
   proposeSendTool as unknown as ToolDef,
+  sendCampaignTool as unknown as ToolDef,
 ];
 
 export function getTool(name: string): ToolDef | undefined {
