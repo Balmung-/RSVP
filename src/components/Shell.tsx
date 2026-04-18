@@ -4,11 +4,12 @@ import { getCurrentUser, hasRole } from "@/lib/auth";
 import { consumeFlash } from "@/lib/flash";
 import { teamsEnabled } from "@/lib/teams";
 import { readAdminLocale, adminDict } from "@/lib/adminLocale";
-import { prisma } from "@/lib/db";
+import { getNotifications } from "@/lib/notifications";
 import { Icon, type IconName } from "./Icon";
 import { Toast } from "./Toast";
 import { CommandPalette } from "./CommandPalette";
 import { CommandHint } from "./CommandHint";
+import { NotificationBell } from "./NotificationBell";
 
 // The dominant canvas. Edges are quiet: a thin rail, a thin top seam.
 // Pages can set `compactTitle` when they render their own display-size
@@ -33,15 +34,11 @@ export async function Shell({
   const showTeams = teamsEnabled() && isAdmin;
   const locale = readAdminLocale();
   const T = adminDict(locale);
-  const pendingApprovals = isAdmin
-    ? await prisma.sendApproval.count({ where: { status: "pending" } })
-    : 0;
-  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const failingInvites = isAdmin
-    ? await prisma.invitation.count({
-        where: { status: { in: ["failed", "bounced"] }, createdAt: { gte: since7d } },
-      })
-    : 0;
+  // Consolidated notification feed. When it's non-empty the header's
+  // bell shows a single dot; the detail is hidden behind a click.
+  // The bell is the single dominant "attention" signal — sidebar nav
+  // links no longer carry count badges.
+  const notifications = me ? await getNotifications(me.id, isAdmin) : [];
 
   return (
     <div className="min-h-screen grid grid-cols-[240px_1fr]">
@@ -59,12 +56,12 @@ export async function Shell({
           <NavLink href="/templates" icon="file-text">{locale === "ar" ? "القوالب" : "Templates"}</NavLink>
           <NavLink href="/inbox" icon="inbox">{T.inbox}</NavLink>
           {isAdmin ? (
-            <NavLink href="/approvals" icon="circle-alert" badge={pendingApprovals}>
+            <NavLink href="/approvals" icon="circle-alert">
               {locale === "ar" ? "الموافقات" : "Approvals"}
             </NavLink>
           ) : null}
           {isAdmin ? (
-            <NavLink href="/deliverability" icon="warning" badge={failingInvites}>
+            <NavLink href="/deliverability" icon="warning">
               {T.deliverability}
             </NavLink>
           ) : null}
@@ -116,6 +113,7 @@ export async function Shell({
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <CommandHint />
+              <NotificationBell items={notifications} />
               {actions}
             </div>
           </header>
@@ -127,6 +125,7 @@ export async function Shell({
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <CommandHint />
+              <NotificationBell items={notifications} />
               {actions}
             </div>
           </header>
