@@ -82,6 +82,10 @@ export async function submitResponse(params: {
   if (params.attending && c.eventOptions.length > 0 && !eventOptionId) {
     return { ok: false, reason: "event_option_required" };
   }
+  // A declined invitee can't meaningfully pick a date — null it out so
+  // reports don't show "declined on April 18" and confuse downstream
+  // catering / seating readers.
+  if (!params.attending) eventOptionId = null;
 
   // Upsert response + replace its answers atomically so two concurrent
   // submits for the same token can't interleave into a half-written
