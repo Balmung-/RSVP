@@ -5,6 +5,8 @@ import { Tabs, type TabItem } from "@/components/Tabs";
 import { InviteePanel } from "@/components/InviteePanel";
 import { ArrivalsBoard } from "@/components/ArrivalsBoard";
 import { CampaignHeader, CampaignHeaderCrumb } from "@/components/workspace/CampaignHeader";
+import { CampaignPulse } from "@/components/workspace/CampaignPulse";
+import { campaignPulse } from "@/lib/pulse";
 import { InviteesTab } from "@/components/workspace/InviteesTab";
 import { ScheduleTab } from "@/components/workspace/ScheduleTab";
 import { ContentTab } from "@/components/workspace/ContentTab";
@@ -345,6 +347,9 @@ export default async function CampaignWorkspace({
       })
     : null;
   const atRisk = await liveFailureCount(campaign.id);
+  // Daily RSVP pulse for the sparkline. Seeded across 30 days so empty
+  // days register as zero-height bars, not gaps.
+  const pulse = await campaignPulse(campaign.id, 30);
 
   // Per-tab data loaders. Only pay for what we render.
   const tabData = await loadForTab(campaign.id, tab, searchParams);
@@ -424,6 +429,13 @@ export default async function CampaignWorkspace({
         invited={stats.total}
         responded={stats.responded}
       />
+      <div className="mb-6">
+        <CampaignPulse
+          buckets={pulse}
+          totalAttending={stats.attending}
+          totalDeclined={stats.declined}
+        />
+      </div>
       {pendingApprovalRow ? (
         <div className="mb-6 max-w-4xl rounded-xl bg-signal-hold/10 border border-signal-hold/30 text-signal-hold px-4 py-3 flex items-center justify-between gap-4">
           <div className="text-body">
