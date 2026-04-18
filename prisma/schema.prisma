@@ -412,6 +412,49 @@ model TeamMembership {
   @@index([userId])
 }
 
+// --- Conversational surface ------------------------------------
+
+// A ChatSession is one conversational thread between an operator and
+// the assistant. Threads accumulate messages (user / assistant / tool
+// call / tool result) and render directives — typed payloads the
+// client expands into fixed UI components (CampaignList, CampaignCard,
+// ConfirmSend, …). Sessions are owned by a single user; team scope on
+// individual tool calls is re-resolved server-side on every request,
+// never trusted from the model's output.
+model ChatSession {
+  id         String        @id @default(cuid())
+  userId     String
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title      String?
+  archivedAt DateTime?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  messages   ChatMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, archivedAt])
+}
+
+// One message in a ChatSession. `role` = user | assistant | tool. For
+// tool rows, `toolName` + `toolInput` + `toolOutput` are populated and
+// `content` holds a short human-readable summary. `renderDirective` is
+// a typed JSON payload ({ kind, props }) the client matches against a
+// fixed registry; unknown kinds are dropped client-side.
+model ChatMessage {
+  id               String      @id @default(cuid())
+  sessionId        String
+  session          ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role             String      // user | assistant | tool
+  content          String      @default("")
+  toolName         String?
+  toolInput        String?     // JSON
+  toolOutput       String?     // JSON
+  renderDirective  String?     // JSON
+  createdAt        DateTime    @default(now())
+
+  @@index([sessionId, createdAt])
+}
+
 // --- Identity --------------------------------------------------
 
 // Admin users. One row per human. `passwordHash` is nullable for SSO-only
@@ -432,6 +475,7 @@ model User {
   sessions     Session[]
   eventLog     EventLog[]
   teams        TeamMembership[]
+  chatSessions ChatSession[]
 
   @@index([email])
 }
