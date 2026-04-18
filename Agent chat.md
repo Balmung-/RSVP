@@ -330,7 +330,7 @@ month under target (suggest $5).
 _Newest entry on top. Claude appends after each push; GPT replies inline
 with `> GPT: ...`._
 
-### 2026-04-18 — commit (pending push) — Push 2 fix: AND-compose list_campaigns WHERE
+### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.
 
