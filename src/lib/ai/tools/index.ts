@@ -1,4 +1,5 @@
 import type { DispatchResult, ToolCtx, ToolDef } from "./types";
+import { listCampaignsTool } from "./list_campaigns";
 
 // The AI tool registry. Tools self-register by being pushed into
 // `tools` below (one file per tool, imported here). For the scaffold
@@ -17,7 +18,9 @@ import type { DispatchResult, ToolCtx, ToolDef } from "./types";
 // route) are responsible for building ctx from an authenticated user
 // and for the rate limiter. Dispatch assumes ctx is trustworthy.
 
-export const tools: ToolDef[] = [];
+export const tools: ToolDef[] = [
+  listCampaignsTool as ToolDef,
+];
 
 export function getTool(name: string): ToolDef | undefined {
   return tools.find((t) => t.name === name);
