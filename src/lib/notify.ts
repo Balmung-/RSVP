@@ -10,6 +10,7 @@ type NotifyKind =
   | "stage.failed"
   | "approval.requested"
   | "rsvp.high_value"
+  | "rsvp.vip"
   | "webhook.inbound_review";
 
 const APP_URL = () => process.env.APP_URL ?? "http://localhost:3000";
@@ -74,4 +75,62 @@ function escape(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// VIP escalation — fired once per first-time RSVP submission when the
+// invitee's linked Contact carries a non-standard vipTier. Louder than
+// the generic rsvp.high_value path: tier-prefixed subject (so a royal
+// arrival rises to the top of an admin's inbox), and a details block
+// that pre-loads the dress / dietary / security notes stored against
+// the contact so the protocol officer doesn't have to dig them up.
+export async function notifyVipResponse(params: {
+  inviteeName: string;
+  inviteeTitle: string | null;
+  campaignName: string;
+  campaignId: string;
+  inviteeId: string;
+  attending: boolean;
+  guests: number;
+  message: string;
+  tier: "royal" | "minister" | "vip" | "standard";
+  dress: string | null;
+  dietary: string | null;
+  securityNotes: string | null;
+  organization: string | null;
+}): Promise<void> {
+  const tierLabel: Record<typeof params.tier, string> = {
+    royal: "ROYAL",
+    minister: "MINISTER",
+    vip: "VIP",
+    standard: "",
+  };
+  const urgency = params.tier === "royal" ? "Urgent · " : "";
+  const verb = params.attending
+    ? `is attending${params.guests > 0 ? ` (+${params.guests})` : ""}`
+    : "has declined";
+
+  const headline = [
+    params.inviteeTitle ? `${params.inviteeTitle} ` : "",
+    params.inviteeName,
+    params.organization ? ` (${params.organization})` : "",
+    " ",
+    verb,
+    ` for "${params.campaignName}".`,
+  ].join("");
+
+  const notes: string[] = [];
+  if (params.dress) notes.push(`Dress: ${params.dress}`);
+  if (params.dietary) notes.push(`Dietary: ${params.dietary}`);
+  if (params.securityNotes) notes.push(`Security: ${params.securityNotes}`);
+  if (params.message) notes.push(`Note from guest:\n${params.message}`);
+
+  const body = [headline, notes.length > 0 ? "\n\n" + notes.join("\n\n") : ""].join("");
+  const subject = `${urgency}${tierLabel[params.tier]} RSVP · ${params.inviteeName}`;
+
+  await notifyAdmins(
+    "rsvp.vip",
+    subject,
+    body,
+    `/campaigns/${params.campaignId}?invitee=${params.inviteeId}`,
+  );
 }

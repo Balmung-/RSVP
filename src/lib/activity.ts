@@ -73,6 +73,11 @@ export function phrase(e: ActivityRecord): { line: string; tone: "default" | "su
           : `An invitee declined.`,
         tone: data.attending ? "success" : "default",
       };
+    case "rsvp.vip.notified":
+      return {
+        line: `${data.tier === "royal" ? "Royal" : data.tier === "minister" ? "Minister" : "VIP"} RSVP — admins notified.`,
+        tone: data.tier === "royal" ? "fail" : "warn",
+      };
 
     case "stage.completed":
       return {

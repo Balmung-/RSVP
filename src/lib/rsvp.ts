@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import { filterForState, validateAnswers } from "./questions";
-import { notifyAdmins } from "./notify";
+import { notifyAdmins, notifyVipResponse } from "./notify";
+import { logAction } from "./audit";
 
 export type SubmitResult =
   | { ok: true }
@@ -164,26 +165,58 @@ export async function submitResponse(params: {
     },
   });
 
-  // High-value signal: long message, OR contact is VIP. Notify admins so
-  // someone can follow up before the event. Only on the first submission
-  // per invitee — re-submits (edits) shouldn't re-spam admins; they can
-  // watch the activity feed if they want the granular trail.
+  // Escalation paths — fire at most once per invitee (on first submit)
+  // so edits don't re-spam admins. Two distinct shapes:
+  //   - VIP tier response → rsvp.vip with tier-prefixed subject, dress
+  //     + dietary + security notes preloaded from the contact record.
+  //   - Long plain-text message from a non-VIP → rsvp.high_value
+  //     (unchanged behavior; just a soft "heads up").
   const message = (params.message ?? "").trim();
-  const isLongMessage = message.length >= 20;
   const contact = inv.contactId
     ? await prisma.contact.findUnique({
         where: { id: inv.contactId },
-        select: { vipTier: true },
+        select: {
+          vipTier: true,
+          dress: true,
+          dietary: true,
+          securityNotes: true,
+          organization: true,
+        },
       })
     : null;
-  const isVip = contact && contact.vipTier !== "standard";
-  if (isFirstSubmit && (isLongMessage || isVip)) {
+  const tier = (contact?.vipTier ?? "standard") as "royal" | "minister" | "vip" | "standard";
+  const isVip = tier !== "standard";
+
+  if (isFirstSubmit && isVip) {
+    await notifyVipResponse({
+      inviteeName: inv.fullName,
+      inviteeTitle: inv.title,
+      campaignName: c.name,
+      campaignId: c.id,
+      inviteeId: inv.id,
+      attending: params.attending,
+      guests: params.attending ? guests : 0,
+      message,
+      tier,
+      dress: contact?.dress ?? null,
+      dietary: contact?.dietary ?? null,
+      securityNotes: contact?.securityNotes ?? null,
+      organization: inv.organization ?? contact?.organization ?? null,
+    });
+    await logAction({
+      kind: "rsvp.vip.notified",
+      refType: "invitee",
+      refId: inv.id,
+      data: { tier, attending: params.attending },
+      actorId: null,
+    });
+  } else if (isFirstSubmit && message.length >= 20) {
     await notifyAdmins(
       "rsvp.high_value",
       `RSVP · ${inv.fullName}`,
-      `${inv.fullName}${isVip ? ` (${contact?.vipTier})` : ""} ${params.attending ? "is attending" : "has declined"}${
+      `${inv.fullName} ${params.attending ? "is attending" : "has declined"}${
         params.attending && guests > 0 ? ` (+${guests})` : ""
-      } for "${c.name}".${message ? `\n\nNote:\n${message}` : ""}`,
+      } for "${c.name}".\n\nNote:\n${message}`,
       `/campaigns/${c.id}?invitee=${inv.id}`,
     );
   }
