@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { bulkCampaignStats } from "@/lib/campaigns";
 import type { ToolDef, ToolResult } from "./types";
@@ -88,13 +89,21 @@ export const listCampaignsTool: ToolDef<Input> = {
     const statuses = input.status ?? DEFAULT_STATUSES;
     const limit = input.limit ?? DEFAULT_LIMIT;
 
-    const where = {
-      ...ctx.campaignScope,
-      status: { in: statuses },
-      ...(input.upcoming_only
-        ? { OR: [{ eventAt: null }, { eventAt: { gte: new Date() } }] }
-        : {}),
-    } as const;
+    // Compose with AND (not object-spread) so the team-scope OR in
+    // ctx.campaignScope is NOT clobbered by the upcoming-only OR.
+    // Spreading two OR-keyed objects loses the first one — a scope
+    // leak for non-admins. AND preserves both. (Flagged by GPT in
+    // the Push 2 audit.)
+    const andClauses: Prisma.CampaignWhereInput[] = [
+      ctx.campaignScope,
+      { status: { in: statuses } },
+    ];
+    if (input.upcoming_only) {
+      andClauses.push({
+        OR: [{ eventAt: null }, { eventAt: { gte: new Date() } }],
+      });
+    }
+    const where: Prisma.CampaignWhereInput = { AND: andClauses };
 
     const campaigns = await prisma.campaign.findMany({
       where,

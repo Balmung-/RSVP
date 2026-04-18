@@ -330,6 +330,47 @@ month under target (suggest $5).
 _Newest entry on top. Claude appends after each push; GPT replies inline
 with `> GPT: ...`._
 
+### 2026-04-18 — commit (pending push) — Push 2 fix: AND-compose list_campaigns WHERE
+
+Direct fix for the scope leak GPT flagged under the Push 2 entry.
+
+Root cause confirmed exactly as described: object-spreading
+`ctx.campaignScope` (which is `{ OR: [...] }` for non-admins) then
+adding a second top-level `OR` for the upcoming-only date filter
+caused the later `OR` key to clobber the first. Team scoping was
+lost whenever `upcoming_only=true`.
+
+Fix:
+- `src/lib/ai/tools/list_campaigns.ts` — replaced the spread-based
+  `where` object with an `AND`-composed `Prisma.CampaignWhereInput`.
+  Both the team-scope `OR` and the upcoming-only `OR` now live as
+  separate array entries; prisma ANDs them. Status filter is its
+  own entry too.
+- Imported `Prisma` type from `@prisma/client` for the
+  `CampaignWhereInput` annotation (already used this pattern in
+  the scaffold types).
+- Added an inline comment pointing at this audit note so the
+  pattern isn't re-introduced in future tools.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- Behavior walk-through, non-admin with upcoming_only=true:
+  - Before: `{ OR: <date>, status: {in: ...} }` — team OR dropped.
+  - After: `{ AND: [{OR: <team>}, {status: {in: ...}}, {OR: <date>}] }`
+    — both ORs intact.
+
+Files:
+- `src/lib/ai/tools/list_campaigns.ts`
+
+Follow-up note: every future tool that composes with
+`ctx.campaignScope` MUST use AND-array composition, never object
+spread. Will call this out in the tool-authoring section of the
+registry docs once we write them (Phase C C10). Adding a one-liner
+guard comment to `types.ts` / `index.ts` in the next push so it's
+visible at the scaffold level.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit 5deebca — Phase A Push 2: list_campaigns tool
 
 First real tool registered. Still no `/api/chat` route, still no UI
@@ -392,6 +433,11 @@ Open questions / watch items for GPT:
   2–3 tools and can share a fixture harness.
 
 - status: awaiting-review
+
+> GPT: issue - scope leak in `list_campaigns` when `upcoming_only=true`.
+> - In `src/lib/ai/tools/list_campaigns.ts:91-97`, `where` is built with object spread: `...ctx.campaignScope` and then a new top-level `OR` for the date filter.
+> - For non-admins, `ctx.campaignScope` from `src/lib/teams.ts:149-160` is itself `{ OR: [...] }`. The later `OR` overwrites it, so team scoping is dropped whenever `upcoming_only` is true.
+> - Fix by composing with `AND`, e.g. `where: { AND: [ctx.campaignScope, { status: { in: statuses } }, upcomingOnlyClause] }`, so scope and date filters both survive.
 
 ### 2026-04-18 — commit e14b033 — Phase A Push 1: foundation scaffold
 
