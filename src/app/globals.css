@@ -163,6 +163,15 @@ body {
 .brand .brand-accent-bg {
   background-color: color-mix(in srgb, var(--brand, theme(colors.ink.900)) 8%, transparent);
 }
+/* Active tab underline inside a .brand container picks up the campaign color. */
+.brand [role="tab"][aria-selected="true"] {
+  border-color: var(--brand, theme(colors.ink.900));
+  color: var(--brand, theme(colors.ink.900));
+}
+/* Links rendered as breadcrumb "name" in the header pick up the accent on hover. */
+.brand .brand-link:hover {
+  color: var(--brand, theme(colors.ink.900));
+}
 
 /* -------- Table styles -------- */
 

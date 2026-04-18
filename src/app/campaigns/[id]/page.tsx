@@ -349,6 +349,14 @@ export default async function CampaignWorkspace({
       crumb={<CampaignHeaderCrumb campaign={campaign} />}
       compactTitle
     >
+      <div
+        className={campaign.brandColor && /^#[0-9A-Fa-f]{3,8}$/.test(campaign.brandColor) ? "brand" : ""}
+        style={
+          campaign.brandColor && /^#[0-9A-Fa-f]{3,8}$/.test(campaign.brandColor)
+            ? ({ ["--brand" as unknown as string]: campaign.brandColor } as React.CSSProperties)
+            : undefined
+        }
+      >
       <CampaignHeader
         campaign={campaign}
         sendAction={sendAction}
@@ -442,6 +450,7 @@ export default async function CampaignWorkspace({
           deleteAction={singleDelete.bind(null, campaign.id)}
         />
       ) : null}
+      </div>
     </Shell>
   );
 }
