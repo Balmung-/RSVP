@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { canSeeCampaign } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -10,7 +11,11 @@ export const runtime = "nodejs";
 // idle tabs get a cheap 304 and never decode a payload.
 
 export async function GET(req: Request, { params }: { params: { id: string } }) {
-  if (!(await isAuthed())) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const me = await getCurrentUser();
+  if (!me) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), params.id))) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
 
   const agg = await prisma.response.aggregate({
     where: { campaignId: params.id, attending: true },

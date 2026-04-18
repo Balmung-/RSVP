@@ -7,7 +7,7 @@ import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
-import { teamsEnabled, canSeeCampaignRow } from "@/lib/teams";
+import { teamsEnabled, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -76,8 +76,19 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   if (!c) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
+  // Non-admins see only teams they belong to (plus the current team of
+  // the campaign so the picker still reflects its actual assignment
+  // and submits don't silently orphan it). Admins see every team.
   const teams = teamsEnabled()
-    ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+    ? hasRole(me, "admin")
+      ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+      : await prisma.team.findMany({
+          where: {
+            archivedAt: null,
+            id: { in: [...new Set([...(await teamIdsForUser(me.id)), ...(c.teamId ? [c.teamId] : [])])] },
+          },
+          orderBy: { name: "asc" },
+        })
     : [];
   const bound = updateCampaign.bind(null, c.id);
   const boundDelete = deleteCampaign.bind(null, c.id);

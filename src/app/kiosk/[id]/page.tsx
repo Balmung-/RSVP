@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { canSeeCampaignRow } from "@/lib/teams";
 import { KioskBoard } from "@/components/KioskBoard";
 
 export const dynamic = "force-dynamic";
@@ -13,13 +14,15 @@ const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 // each new arrival so the greeter hears confirmation.
 
 export default async function KioskPage({ params }: { params: { id: string } }) {
-  if (!(await isAuthed())) redirect(`/login?returnTo=${encodeURIComponent(`/kiosk/${params.id}`)}`);
+  const me = await getCurrentUser();
+  if (!me) redirect(`/login?returnTo=${encodeURIComponent(`/kiosk/${params.id}`)}`);
 
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.id },
-    select: { id: true, name: true, status: true },
+    select: { id: true, name: true, status: true, teamId: true },
   });
   if (!campaign) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
 
   const [responses, agg, arrivedCount, arrivedGuestsAgg] = await Promise.all([
     prisma.response.findMany({
