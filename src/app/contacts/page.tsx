@@ -5,7 +5,7 @@ import { Pagination } from "@/components/Pagination";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { isAuthed } from "@/lib/auth";
-import { searchContacts, VIP_LABEL, type VipTier } from "@/lib/contacts";
+import { searchContacts, VIP_LABEL, type VipTier, resolveContactOptOuts, contactOptOutState } from "@/lib/contacts";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +38,7 @@ export default async function ContactsPage({
     skip: (page - 1) * PAGE_SIZE,
     take: PAGE_SIZE,
   });
+  const optOutSet = await resolveContactOptOuts(rows);
 
   const hrefFor = (p: number) => {
     const qs = new URLSearchParams();
@@ -135,15 +136,33 @@ export default async function ContactsPage({
               </tr>
             </thead>
             <tbody>
-              {rows.map((c) => (
+              {rows.map((c) => {
+                const opt = contactOptOutState(c, optOutSet);
+                return (
                 <tr key={c.id}>
                   <td>
-                    <Link
-                      href={`/contacts/${c.id}/edit`}
-                      className="font-medium text-ink-900 hover:underline"
-                    >
-                      {c.fullName}
-                    </Link>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/contacts/${c.id}/edit`}
+                        className="font-medium text-ink-900 hover:underline"
+                      >
+                        {c.fullName}
+                      </Link>
+                      {opt.any ? (
+                        <span
+                          className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-signal-fail/10 text-signal-fail"
+                          title={
+                            opt.email && opt.sms
+                              ? "Opted out on both channels"
+                              : opt.email
+                                ? "Opted out on email — SMS still on"
+                                : "Opted out on SMS — email still on"
+                          }
+                        >
+                          Opted out
+                        </span>
+                      ) : null}
+                    </div>
                     {c.title ? <div className="text-mini text-ink-400 mt-0.5">{c.title}</div> : null}
                   </td>
                   <td className="text-ink-600">{c.organization ?? <span className="text-ink-300">—</span>}</td>
@@ -159,7 +178,8 @@ export default async function ContactsPage({
                   </td>
                   <td className="text-end tabular-nums text-ink-600">{c._count.invitees}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

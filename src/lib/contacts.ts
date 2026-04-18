@@ -122,6 +122,41 @@ export async function deleteContactRecord(contactId: string) {
 }
 
 // Find, filter, search. Admin UI consumer.
+// Returns a Set keyed by `email|<addr>` or `sms|<phone>` for every row
+// in Unsubscribe that matches one of the supplied contacts. Batches the
+// lookup into a single query so the list view stays cheap.
+export async function resolveContactOptOuts(
+  contacts: Array<{ email: string | null; phoneE164: string | null }>,
+): Promise<Set<string>> {
+  const emails = contacts.map((c) => c.email?.toLowerCase()).filter((e): e is string => !!e);
+  const phones = contacts.map((c) => c.phoneE164).filter((p): p is string => !!p);
+  if (emails.length === 0 && phones.length === 0) return new Set();
+  const rows = await prisma.unsubscribe.findMany({
+    where: {
+      OR: [
+        ...(emails.length ? [{ email: { in: emails } }] : []),
+        ...(phones.length ? [{ phoneE164: { in: phones } }] : []),
+      ],
+    },
+    select: { email: true, phoneE164: true },
+  });
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (r.email) out.add(`email|${r.email}`);
+    if (r.phoneE164) out.add(`sms|${r.phoneE164}`);
+  }
+  return out;
+}
+
+export function contactOptOutState(
+  contact: { email: string | null; phoneE164: string | null },
+  set: Set<string>,
+): { email: boolean; sms: boolean; any: boolean } {
+  const email = !!contact.email && set.has(`email|${contact.email.toLowerCase()}`);
+  const sms = !!contact.phoneE164 && set.has(`sms|${contact.phoneE164}`);
+  return { email, sms, any: email || sms };
+}
+
 export async function searchContacts(params: {
   q?: string;
   tier?: VipTier | "all";

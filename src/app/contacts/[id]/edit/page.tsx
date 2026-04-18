@@ -14,6 +14,8 @@ import {
   VIP_TIERS,
   type VipTier,
 } from "@/lib/contacts";
+import { applyUnsubscribe } from "@/lib/inbound";
+import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
 
 export const dynamic = "force-dynamic";
@@ -75,8 +77,62 @@ async function remove(contactId: string) {
   "use server";
   await requireRole("admin");
   await deleteContactRecord(contactId);
+  await logAction({ kind: "contact.deleted", refType: "contact", refId: contactId });
   setFlash({ kind: "warn", text: "Contact deleted" });
   redirect("/contacts");
+}
+
+async function optOut(contactId: string) {
+  "use server";
+  await requireRole("editor");
+  const c = await prisma.contact.findUnique({
+    where: { id: contactId },
+    select: { email: true, phoneE164: true, fullName: true },
+  });
+  if (!c) redirect(`/contacts/${contactId}/edit`);
+  if (c.email) await applyUnsubscribe("email", c.email, "admin");
+  if (c.phoneE164) await applyUnsubscribe("sms", c.phoneE164, "admin");
+  await logAction({
+    kind: "contact.unsubscribed",
+    refType: "contact",
+    refId: contactId,
+    data: { email: !!c.email, sms: !!c.phoneE164 },
+  });
+  setFlash({ kind: "info", text: `${c.fullName} is marked opted out.` });
+  redirect(`/contacts/${contactId}/edit`);
+}
+
+async function optIn(contactId: string) {
+  "use server";
+  await requireRole("editor");
+  const c = await prisma.contact.findUnique({
+    where: { id: contactId },
+    select: { email: true, phoneE164: true, fullName: true },
+  });
+  if (!c) redirect(`/contacts/${contactId}/edit`);
+  // Restoring consent is a deliberate human action on behalf of a known
+  // contact — OK to remove the opt-out rows. Keeps the paper trail via
+  // eventLog.
+  const deletes: Promise<unknown>[] = [];
+  if (c.email) {
+    deletes.push(
+      prisma.unsubscribe.deleteMany({ where: { email: c.email.toLowerCase() } }),
+    );
+  }
+  if (c.phoneE164) {
+    deletes.push(
+      prisma.unsubscribe.deleteMany({ where: { phoneE164: c.phoneE164 } }),
+    );
+  }
+  await Promise.all(deletes);
+  await logAction({
+    kind: "contact.resubscribed",
+    refType: "contact",
+    refId: contactId,
+    data: { email: !!c.email, sms: !!c.phoneE164 },
+  });
+  setFlash({ kind: "success", text: `${c.fullName} is back on the list.` });
+  redirect(`/contacts/${contactId}/edit`);
 }
 
 export default async function EditContact({
@@ -101,10 +157,30 @@ export default async function EditContact({
   });
   if (!c) notFound();
 
+  // Resolve opt-out status for the two possible addresses. We want a
+  // per-channel answer so the UI can say "email opted out, SMS still on"
+  // when the contact is reachable on only one.
+  const optOutRows = c.email || c.phoneE164
+    ? await prisma.unsubscribe.findMany({
+        where: {
+          OR: [
+            ...(c.email ? [{ email: c.email.toLowerCase() }] : []),
+            ...(c.phoneE164 ? [{ phoneE164: c.phoneE164 }] : []),
+          ],
+        },
+        select: { email: true, phoneE164: true, reason: true, createdAt: true },
+      })
+    : [];
+  const emailOptOut = optOutRows.find((o) => o.email && c.email && o.email === c.email.toLowerCase());
+  const smsOptOut = optOutRows.find((o) => o.phoneE164 && o.phoneE164 === c.phoneE164);
+  const anyOptOut = !!emailOptOut || !!smsOptOut;
+
   const boundSave = save.bind(null, c.id);
   const boundArchive = archive.bind(null, c.id);
   const boundUnarchive = unarchive.bind(null, c.id);
   const boundDelete = remove.bind(null, c.id);
+  const boundOptOut = optOut.bind(null, c.id);
+  const boundOptIn = optIn.bind(null, c.id);
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
 
   return (
@@ -132,6 +208,60 @@ export default async function EditContact({
       {error ? <p role="alert" className="max-w-3xl text-body text-signal-fail mb-6">{error}</p> : null}
 
       <ContactForm contact={c} action={boundSave} submitLabel="Save changes" cancelHref="/contacts" />
+
+      <section className="max-w-3xl mt-10">
+        <h2 className="text-sub text-ink-900 mb-3">Outreach consent</h2>
+        {anyOptOut ? (
+          <div className="panel-quiet p-5 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-body text-ink-900 flex items-center gap-2 flex-wrap">
+                <span className="dot bg-signal-fail" />
+                <span className="font-medium">Opted out</span>
+                {emailOptOut && smsOptOut
+                  ? <span className="text-mini text-ink-500">both channels</span>
+                  : emailOptOut
+                    ? <span className="text-mini text-ink-500">email only — SMS still on</span>
+                    : <span className="text-mini text-ink-500">SMS only — email still on</span>}
+              </div>
+              <p className="text-mini text-ink-500 mt-1 leading-relaxed max-w-lg">
+                Future campaign sends skip this contact automatically.
+                Source: <span className="font-mono">{(emailOptOut ?? smsOptOut)!.reason ?? "unspecified"}</span>
+                {" · "}
+                <span className="tabular-nums">{dateFmt.format((emailOptOut ?? smsOptOut)!.createdAt)}</span>
+              </p>
+            </div>
+            <form action={boundOptIn}>
+              <ConfirmButton
+                tone="default"
+                prompt={`Restore ${c.fullName} to the active list? They'll start receiving campaigns again.`}
+              >
+                Resubscribe
+              </ConfirmButton>
+            </form>
+          </div>
+        ) : (
+          <div className="panel-quiet p-5 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-body text-ink-900 flex items-center gap-2">
+                <span className="dot bg-signal-live" />
+                <span className="font-medium">On the list</span>
+              </div>
+              <p className="text-mini text-ink-500 mt-1 leading-relaxed max-w-lg">
+                Will receive future campaigns via{" "}
+                {c.email && c.phoneE164 ? "email and SMS" : c.email ? "email" : c.phoneE164 ? "SMS" : "—"}.
+              </p>
+            </div>
+            <form action={boundOptOut}>
+              <ConfirmButton
+                tone="default"
+                prompt={`Mark ${c.fullName} as opted out? Future campaigns will skip them automatically.`}
+              >
+                Mark opted out
+              </ConfirmButton>
+            </form>
+          </div>
+        )}
+      </section>
 
       <section className="max-w-3xl mt-10">
         <h2 className="text-sub text-ink-900 mb-3">Invited to</h2>
