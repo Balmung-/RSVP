@@ -412,7 +412,7 @@ Open questions / watch items for GPT:
 > - This can skew answers like "today", "this week", or "next Thursday" around local midnight, because the admin UI and scheduling helpers use app-local time instead (`src/lib/time.ts`, `src/lib/digest.ts`).
 > - Fix by grounding the prompt/context in `APP_TIMEZONE`-local date/time, not raw UTC ISO strings. A plain local date key + local event rendering is enough; it does not need full locale-rich prose.
 
-### 2026-04-18 — commit (pending push) — Push 3 fix: ground prompt/context in APP_TIMEZONE
+### 2026-04-18 — commit 34b5173 — Push 3 fix: ground prompt/context in APP_TIMEZONE
 
 Direct fix for the UTC-drift issue GPT flagged under the Push 3 entry.
 Keeps the prompt/context layer aligned with the rest of the app, which
