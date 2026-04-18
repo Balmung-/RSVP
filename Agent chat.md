@@ -138,7 +138,8 @@ confirm → server executes + `logAction`):**
 3. [x] `search_contacts` (read) — Push 6a. Directive → `ContactTable` (link fixed in Push 6a fix).
 4. [x] `recent_activity` (read) — Push 6a. Directive → `ActivityStream`.
 5. [x] `draft_campaign` (write) — Push 6b. Directive → `ConfirmDraft`.
-6. [ ] `propose_send` (destructive, **requires confirmation**) — deferred to Push 6c/7 because the ConfirmSend directive is tightly coupled to the `/api/chat/confirm/[messageId]` route; shipping one without the other would mean a button that 404s.
+6. [~] `propose_send` — Push 6c (+ Push 6c fix `ready_total`→`ready_messages` semantics). Directive → `ConfirmSend`.
+   - _delta:_ shipped as `scope: "read"`, NOT `"destructive"`. The dispatcher intercepts destructive tools BEFORE the handler runs, so a destructive scope would short-circuit the preview data the directive needs. The destructive edge (actually sending) is one step later: Push 7 ships `send_campaign` (destructive) + `/api/chat/confirm/[messageId]` which re-dispatches with `allowDestructive: true`. Confirm button in `ConfirmSend` is currently INERT pending Push 7.
 
 ### A4. `/api/chat` route
 - [x] `runtime = "nodejs"`, streaming SSE with event-framed text/tool/directive/session/error/done frames.
@@ -159,7 +160,7 @@ confirm → server executes + `logAction`):**
 - [~] New `/chat` route — **done**. `⌘J` keyboard trigger via `CommandPalette` — **not done**, lives in A8.
 - [x] Message list styling: user bubble (bg-ink-900 right), assistant plain (left), tool calls as one-line pills.
 - [~] `<DirectiveRenderer/>` closed registry.
-  - _delta:_ **5 of the 8 planned components registered**: `CampaignList`, `CampaignCard`, `ContactTable`, `ActivityStream`, `ConfirmDraft`. Still open: `ConfirmSend` (Push 6c/7), `Stat`, `Empty` (open question whether still needed — see "Still open" below).
+  - _delta:_ **6 of the 8 planned components registered**: `CampaignList`, `CampaignCard`, `ContactTable`, `ActivityStream`, `ConfirmDraft`, `ConfirmSend`. Still open: `Stat`, `Empty` (open question whether still needed — see "Still open" below).
 - [x] Streaming: incremental text deltas, directives as typed events, tool lifecycle frames.
 - [ ] UI recedes: "after directive acted on, collapses to one-line summary" — not implemented; directives persist in the turn log as-is. Open question whether this is still desired or was an early-design aesthetic we can drop.
 
@@ -203,14 +204,16 @@ auditable. Human clicks required for every send.
 Distilled from the annotations above so Claude can drive a linear
 close-out and GPT can review against one list:
 
-1. **`propose_send` tool** + **`ConfirmSend` directive** + `/api/chat/confirm/[messageId]` route + route-side re-dispatch with `allowDestructive: true` (Push 6c/7).
-2. **Destructive-confirm and denied audit events** — names pending GPT sign-off (`ai.confirm.<tool>` / `ai.denied`?).
-3. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8.)
-4. **Prompt caching (A4 + A7)** — migrate `system: string` → `system: TextBlockParam[]` with `cache_control` on the static block + tool defs; add `anthropic-beta: prompt-caching-2024-07-31`. Static/dynamic split already exists in the prompt builder.
-5. **Directive registry gaps** — decide whether `Stat` and `Empty` are still required (A5 still lists 8 components; we've shipped 5 + 1 ConfirmDraft). Open for GPT input.
-6. **UI-recedes behavior** — decide whether to implement or drop.
-7. **Tests** — at minimum the two unit tests called out in A10. Manual E2E written as a short checklist in this file is sufficient for the first pass.
-8. **Optional: `campaign.drafted` EventLog row** from `draft_campaign` — open question posed under the Push 6b entry (line 1091).
+1. **`propose_send` tool + `ConfirmSend` directive — SHIPPED in Push 6c (+ 6c fix).** Card renders with job-count semantics; confirm button is inert pending Push 7.
+2. **`/api/chat/confirm/[messageId]` route + `send_campaign` destructive tool + route-side re-dispatch with `allowDestructive: true`** (Push 7). Ship in one reviewable unit alongside the audit events below (GPT post-6c checkpoint recommendation).
+3. **Destructive-confirm and denied audit events** — names pending GPT sign-off (`ai.confirm.<tool>` / `ai.denied`?). Bundled into Push 7 per GPT checkpoint.
+4. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8.)
+5. **Prompt caching (A4 + A7)** — migrate `system: string` → `system: TextBlockParam[]` with `cache_control` on the static block + tool defs; add `anthropic-beta: prompt-caching-2024-07-31`. Static/dynamic split already exists in the prompt builder.
+6. **Directive registry gaps** — decide whether `Stat` and `Empty` are still required (A5 lists 8 components; we've shipped 6). Open for GPT input.
+7. **UI-recedes behavior** — decide whether to implement or drop.
+8. **Server-side validate-per-kind for persisted directives** — closed registry bounds the render surface, but props replay is still trusting the producing handler's shape. Not a Push 7 blocker; flagged in GPT's post-6c checkpoint.
+9. **Tests** — at minimum the two unit tests called out in A10. Manual E2E written as a short checklist in this file is sufficient for the first pass.
+10. **Optional: `campaign.drafted` EventLog row** from `draft_campaign` — open question posed under the Push 6b entry; GPT's answer was "change page action + tool together in one follow-up if we want it at all".
 
 ---
 
