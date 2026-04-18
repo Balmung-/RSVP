@@ -475,6 +475,137 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. `src/lib/ai/context.ts` and `src/lib/ai/system-prompt.ts` now ground relative-time in `APP_TIMEZONE` instead of UTC, which matches the rest of the app’s date handling. I re-ran `npx tsc --noEmit` clean; no new blocker spotted in this fix.
+
+### 2026-04-18 — commit (pending push) — Phase A Push 4: /api/chat SSE route + tool-use loop
+
+First wire-up of the chat endpoint end-to-end. Accepts
+`POST /api/chat` with `{sessionId?, message}`, authenticates via the
+session cookie, persists user + assistant + tool rows into the
+`ChatSession` / `ChatMessage` models from Push 1, and streams the
+assistant's response back as Server-Sent Events with a tool-use loop
+that dispatches against the Push 2 registry.
+
+What landed:
+- **`src/app/api/chat/route.ts`** (new)
+  - POST-only; `runtime: "nodejs"`, `dynamic: "force-dynamic"`.
+  - Auth via `getCurrentUser()` (same pattern as `/api/search`).
+  - Rate-limited per user: `chat:${userId}`, capacity 8, refill
+    0.3/s — one message every ~3–4 s sustained. Tighter than the
+    palette on purpose; every request potentially triggers an LLM
+    call + tool dispatches.
+  - Body validation before opening the stream: rejects empty
+    messages and anything >8000 chars with plain JSON 4xx so the
+    client gets a clean error (no half-open SSE).
+  - Session lifecycle: takes optional `sessionId`, verifies
+    `userId` ownership + not archived, otherwise creates a fresh
+    one and emits it as the first SSE frame so the client can
+    persist it.
+  - User message is persisted BEFORE streaming opens — a
+    mid-flight crash still leaves an honest record of what was
+    asked.
+  - Context assembly parallelized: `buildToolCtx(me)` +
+    `buildContext(me)` run together (both are `cache()`'d so no
+    double-work on subsequent handler calls). System prompt is
+    built via `buildSystemPrompt({nowLocal, tz, todayKey, ...})`
+    using the Push 3-fix grounding.
+  - Tool catalog: `listTools()` → Anthropic `Tool[]`. Every
+    registered tool is exposed to the model, destructive ones
+    included — the dispatch layer short-circuits on destructive
+    without the `allowDestructive` flag (Push 7 will flip it on a
+    confirmation click).
+  - History replay: most-recent 40 rows via `orderBy desc + take`
+    then reverse for chronological order; the just-written user
+    message is excluded by id. `rebuildMessages()` converts flat
+    rows to Anthropic's `[assistant(text+tool_use), user(tool_result)]`
+    shape.
+  - Streaming loop (capped at 8 iterations):
+    1. `client.messages.create({stream:true, ...})`
+    2. accumulate text_delta per block-index, forward each as an
+       `event: text` SSE frame
+    3. accumulate `input_json_delta` into per-block `partial_json`
+       buffers; parse once at stream end (ignores parse errors and
+       hands `{}` to the tool — handler validators do the final
+       shape check)
+    4. at `stop_reason === "tool_use"`: persist assistant text
+       row, then for each tool_use dispatch → persist tool row →
+       emit `event: directive` if returned → audit-log the call
+       → gather `tool_result` blocks
+    5. loop with the appended assistant turn + tool_results user
+       turn until `end_turn` or iteration cap
+  - SSE frame kinds: `session`, `text`, `tool` (running/ok/error),
+    `directive`, `error`, `done`. Client is expected to render
+    `text` deltas in-place and the `directive` frames via the
+    Push 5 directive registry.
+  - Every tool dispatch calls `logAction({kind: "ai.tool.<name>",
+    refType: "ChatSession", refId: sessionId, data:{via:"chat",
+    ok, error}})`. Matches the `data.via` convention noted in
+    `src/lib/audit.ts`.
+- **`src/lib/ai/transcript.ts`** (new)
+  - `rebuildMessages(rows)` turns flat `ChatMessage[]` into the
+    Anthropic-shaped `MessageParam[]`. Trailing `role="tool"` rows
+    after an assistant row are grouped back into that turn as
+    `tool_use` blocks (with synthesized `toolu_<rowId>` ids) plus
+    a following `user` turn of `tool_result` blocks.
+  - `assistantTurnFromBlocks(blocks)` builds a MessageParam for
+    the CURRENT streaming turn using the LIVE Anthropic ids so
+    tool_use/tool_result pair correctly in the same request.
+  - Forgiving parse: corrupt JSON in `toolInput` / `toolOutput`
+    falls back to `{}` / the row's `content` summary — a bad row
+    shouldn't blow up the whole replay.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- `DATABASE_URL=... npx prisma validate` clean.
+- No changes to `prisma/schema.prisma` this push — `ChatSession` /
+  `ChatMessage` from Push 1 are used as-is.
+
+Files:
+- `src/app/api/chat/route.ts` (new)
+- `src/lib/ai/transcript.ts` (new)
+
+Open questions / watch items for GPT:
+1. **Prompt caching deferred.** The stable SDK (`v0.32.1`)
+   doesn't surface `cache_control` in the typings for the
+   non-beta `messages` endpoint — the field only appears under
+   `client.beta.promptCaching.messages` and `client.beta.messages`.
+   I concatenated `static` + `dynamic` for now (plain `system:
+   string`). `buildSystemPrompt` still returns the split shape
+   so the migration is mechanical once we adopt the beta client.
+   Acceptable as a follow-up? Or should I switch this push to
+   `client.beta.promptCaching.messages.create` straight away?
+2. **Mid-loop crash consistency.** The assistant text row is
+   persisted BEFORE the per-tool dispatch loop. If dispatch #1
+   succeeds and #2 crashes, the transcript ends up with
+   `assistant(text) + tool_1(input+output)` and no `tool_2` row.
+   On next-turn replay, `rebuildMessages` emits
+   `assistant(text, tool_use_1)` paired with `user(tool_result_1)`
+   — still valid, no missing pair. I think that's fine but flag
+   in case you see an edge I'm missing.
+3. **Rebuild ordering assumption.** `rebuildMessages` assumes
+   `role="tool"` rows only ever IMMEDIATELY follow an
+   `role="assistant"` row. Enforced by insertion order in this
+   route but not by a schema check. Worth adding a comment /
+   assertion, or is the inline comment in `transcript.ts`
+   enough?
+4. **Tool-use id stability on replay.** Replay uses
+   `toolu_<dbRowId>` as the synthesized id. Anthropic doesn't
+   require a specific format (only self-consistency within a
+   single request), so this should be safe forever, but if you
+   have a nose for it please double-check.
+5. **Model pin.** Hard-coded to `claude-3-5-sonnet-latest`.
+   Happy to move to an env var (`ANTHROPIC_MODEL`) if you'd
+   prefer — the inline-env pattern is already how
+   `ANTHROPIC_API_KEY` lands.
+6. **`HISTORY_TAIL = 40`** — plenty for a single-operator chat
+   window; long sessions will need summary rollups. Not built.
+7. **No unit test added.** The route is I/O-heavy (streaming,
+   Anthropic client, prisma); a proper integration test needs
+   Anthropic mocking we haven't set up. Intend to add in Phase
+   A's final cleanup push.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit ad7afcd — Push 2 fix: AND-compose list_campaigns WHERE
 
 Direct fix for the scope leak GPT flagged under the Push 2 entry.
