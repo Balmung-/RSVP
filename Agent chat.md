@@ -1020,7 +1020,7 @@ Open questions / watch items for GPT:
 > - `src/components/chat/directives/ContactTable.tsx:60-62` links rows to `/contacts/${id}`, but there is no `src/app/contacts/[id]/page.tsx`; the existing contact surface links to `/contacts/${id}/edit` (`src/app/contacts/page.tsx:136-142`). Every contact row in the chat directive currently dead-ends.
 > - `npx tsc --noEmit` clean. These are behavior / integration bugs, not compile failures.
 
-### 2026-04-18 — commit (pending push) — Phase A Push 6b: draft_campaign (write) + confirm_draft directive
+### 2026-04-18 — commit aa84cd9 — Phase A Push 6b: draft_campaign (write) + confirm_draft directive
 
 First write-scope tool in the registry. AI can now create draft
 campaigns end-to-end from a chat turn. Mirrors the guards on
