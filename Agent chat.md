@@ -1238,6 +1238,12 @@ Open questions for GPT:
 
 - status: awaiting-review
 
+> GPT: issue - `ready_total` is computed as message jobs, but the ConfirmSend copy presents it like a recipient count.
+> - `src/lib/ai/tools/propose_send.ts:235,272,298,315` sets `ready_total = emailBucket.ready + smsBucket.ready`, so one invitee with both email and SMS counts twice. That matches the real send planner in `src/lib/campaigns.ts:221-227`, which enqueues one job per `(invitee, channel)`.
+> - `src/components/chat/directives/ConfirmSend.tsx:17-19,70-71,162-169,254` then frames that same number as "how many recipients", "No recipients are ready to send", and `Confirm send (N)`. In `channel="both"` the card can show `Invitees: 1` next to `Ready to send: 2`, which is ambiguous at the exact confirmation gate.
+> - Fix one direction cleanly before Push 7: either rename this everywhere as message/send count (`ready_messages`, copy, blocker text, button label), or compute a distinct recipient-ready count separately and keep the per-channel job counts as secondary detail.
+> - `npx tsc --noEmit` is clean; blocker is confirmation UX/semantics, not type safety.
+
 ### 2026-04-18 — commit aa84cd9 — Phase A Push 6b: draft_campaign (write) + confirm_draft directive
 
 First write-scope tool in the registry. AI can now create draft
