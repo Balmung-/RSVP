@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { timingSafeEqual } from "node:crypto";
 import { ingest } from "@/lib/inbound";
+import { secretMatches } from "@/lib/webhook-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -18,9 +18,7 @@ export async function POST(req: Request) {
   const secret = process.env.INBOUND_WEBHOOK_SECRET;
   if (!secret) return NextResponse.json({ ok: false, error: "not_configured" }, { status: 503 });
   const sent = req.headers.get("x-inbound-secret") ?? "";
-  const a = Buffer.from(sent);
-  const b = Buffer.from(secret);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+  if (!secretMatches(sent, secret)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 

@@ -51,6 +51,12 @@ async function retryOne(invitationId: string, _fd: FormData) {
   redirect("/deliverability");
 }
 
+// Retry happens inline in the server action — each provider call is ~500ms+
+// and Railway's function timeout is real. We cap to RETRY_BATCH per submit so
+// the worst case stays under the ceiling. The remainder stays selected-able
+// on the next page load.
+const RETRY_BATCH = 50;
+
 async function retryAll(formData: FormData) {
   "use server";
   await requireRole("editor");
@@ -59,8 +65,10 @@ async function retryAll(formData: FormData) {
     setFlash({ kind: "warn", text: "Pick at least one failure to retry." });
     redirect("/deliverability");
   }
+  const capped = ids.slice(0, RETRY_BATCH);
+  const deferred = ids.length - capped.length;
   const rows = await prisma.invitation.findMany({
-    where: { id: { in: ids } },
+    where: { id: { in: capped } },
     include: { campaign: true, invitee: true },
   });
   let ok = 0;
@@ -77,9 +85,10 @@ async function retryAll(formData: FormData) {
       data: { channel: r.channel, error: res.ok ? null : res.error, bulk: true },
     });
   }
+  const suffix = deferred > 0 ? ` — ${deferred} more selected, click Retry again.` : "";
   setFlash({
-    kind: fail === 0 ? "success" : "warn",
-    text: `Retry finished — ${ok} sent, ${fail} still failed.`,
+    kind: fail === 0 && deferred === 0 ? "success" : "warn",
+    text: `Retry finished — ${ok} sent, ${fail} still failed${suffix}`,
   });
   redirect("/deliverability");
 }

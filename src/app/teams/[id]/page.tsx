@@ -58,22 +58,25 @@ async function removeMemberAction(teamId: string, formData: FormData) {
   redirect(`/teams/${teamId}`);
 }
 
-async function archive(teamId: string) {
+async function archive(teamId: string, _fd: FormData) {
   "use server";
   await requireRole("admin");
   await archiveTeam(teamId);
+  await logAction({ kind: "team.archived", refType: "team", refId: teamId });
   redirect(`/teams`);
 }
-async function unarchive(teamId: string) {
+async function unarchive(teamId: string, _fd: FormData) {
   "use server";
   await requireRole("admin");
   await unarchiveTeam(teamId);
+  await logAction({ kind: "team.unarchived", refType: "team", refId: teamId });
   redirect(`/teams/${teamId}`);
 }
-async function remove(teamId: string) {
+async function remove(teamId: string, _fd: FormData) {
   "use server";
   await requireRole("admin");
   await deleteTeamRecord(teamId);
+  await logAction({ kind: "team.deleted", refType: "team", refId: teamId });
   setFlash({ kind: "warn", text: "Team deleted" });
   redirect(`/teams`);
 }
@@ -166,22 +169,23 @@ export default async function TeamPage({
             <Field label="Description" className="col-span-2">
               <textarea name="description" rows={2} className="field" maxLength={500} defaultValue={team.description ?? ""} />
             </Field>
-            <div className="col-span-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                {team.archivedAt ? null : (
-                  <form action={boundArchive}>
-                    <ConfirmButton tone="default" prompt={`Archive ${team.name}?`}>Archive</ConfirmButton>
-                  </form>
-                )}
-                <form action={boundDelete}>
-                  <ConfirmButton prompt={`Delete ${team.name}? Campaign links are nulled to office-wide.`}>
-                    Delete
-                  </ConfirmButton>
-                </form>
-              </div>
+            <div className="col-span-2 flex items-center justify-end">
               <button className="btn btn-primary">Save</button>
             </div>
           </form>
+          {/* Danger zone lives as sibling forms — nested <form> is invalid HTML. */}
+          <div className="mt-3 flex items-center gap-2">
+            {team.archivedAt ? null : (
+              <form action={boundArchive}>
+                <ConfirmButton tone="default" prompt={`Archive ${team.name}?`}>Archive</ConfirmButton>
+              </form>
+            )}
+            <form action={boundDelete}>
+              <ConfirmButton prompt={`Delete ${team.name}? Campaign links are nulled to office-wide.`}>
+                Delete
+              </ConfirmButton>
+            </form>
+          </div>
         </section>
 
         <section>

@@ -228,6 +228,7 @@ model EventLog {
 
   @@index([kind, createdAt])
   @@index([actorId, createdAt])
+  @@index([refType, refId, createdAt])
 }
 
 // --- Global address book ---------------------------------------

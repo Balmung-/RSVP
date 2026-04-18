@@ -184,8 +184,11 @@ export async function sendCampaign(
       }
     }
   } finally {
-    await prisma.campaign.update({
-      where: { id: campaignId },
+    // Release the CAS lock: only move sending → active. Anything else
+    // (archived, closed) was set by a concurrent admin and we must not
+    // resurrect the campaign.
+    await prisma.campaign.updateMany({
+      where: { id: campaignId, status: "sending" },
       data: { status: "active" },
     });
   }

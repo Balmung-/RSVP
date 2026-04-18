@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
 import { ConfirmButton } from "@/components/ConfirmButton";
-import { getCurrentUser } from "@/lib/auth";
+import { getCurrentUser, authenticateWithPassword } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { generateSecret, otpauthUri, qrForSecret, verifyTotp } from "@/lib/totp";
 import { logAction } from "@/lib/audit";
@@ -39,6 +39,13 @@ async function disable(formData: FormData) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
   const token = String(formData.get("token") ?? "");
+  const password = String(formData.get("password") ?? "");
+  // Re-auth with password: a stolen/idle session on the same device still
+  // has the authenticator app handy, so TOTP alone is weak proof.
+  const reauthed = await authenticateWithPassword(me.email, password);
+  if (!reauthed) {
+    redirect("/account/2fa?e=wrong_password");
+  }
   if (me.totpSecret && !verifyTotp(token, me.totpSecret)) {
     redirect("/account/2fa?e=wrong_code_disable");
   }
@@ -54,6 +61,7 @@ async function disable(formData: FormData) {
 const ERROR_MSG: Record<string, string> = {
   wrong_code: "That code doesn't match. Codes rotate every 30 seconds — try again.",
   wrong_code_disable: "Enter a current code to confirm you're turning it off.",
+  wrong_password: "Password didn't match. You need to re-enter it to turn off two-step sign-in.",
 };
 
 export default async function TwoFactorPage({
@@ -110,9 +118,19 @@ export default async function TwoFactorPage({
           <p className="text-body text-ink-600 mb-5">
             You&apos;ll be asked for a code from your authenticator app after your password on every sign-in.
           </p>
-          <form action={disable} className="flex items-end gap-3">
-            <label className="flex-1 flex flex-col gap-1.5">
-              <span className="text-micro uppercase text-ink-400">Current code</span>
+          <form action={disable} className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-micro uppercase text-ink-400">Password</span>
+              <input
+                name="password"
+                type="password"
+                required
+                autoComplete="current-password"
+                className="field"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-micro uppercase text-ink-400">Current 6-digit code</span>
               <input
                 name="token"
                 inputMode="numeric"
@@ -122,9 +140,11 @@ export default async function TwoFactorPage({
                 placeholder="000000"
               />
             </label>
-            <ConfirmButton prompt="Turn off two-step sign-in? You'll lose this layer of protection.">
-              Turn off
-            </ConfirmButton>
+            <div className="flex justify-end">
+              <ConfirmButton prompt="Turn off two-step sign-in? You'll lose this layer of protection.">
+                Turn off
+              </ConfirmButton>
+            </div>
           </form>
         </div>
       ) : (

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { timingSafeEqual } from "node:crypto";
 import { ingest } from "@/lib/inbound";
+import { secretMatches } from "@/lib/webhook-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,11 +16,13 @@ export async function POST(req: Request) {
   const secret = process.env.INBOUND_WEBHOOK_SECRET;
   if (!secret) return NextResponse.json({ ok: false, error: "not_configured" }, { status: 503 });
 
+  // Some SMS providers (Twilio Studio, older Unifonic configs) can only
+  // post to a plain URL and can't add a custom header; we accept the
+  // secret via ?key= as a last resort. It will land in access logs, so
+  // prefer a header whenever the provider supports it.
   const url = new URL(req.url);
   const sent = req.headers.get("x-inbound-secret") ?? url.searchParams.get("key") ?? "";
-  const a = Buffer.from(sent);
-  const b = Buffer.from(secret);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+  if (!secretMatches(sent, secret)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 

@@ -1,13 +1,18 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole } from "@/lib/auth";
+import { logAction } from "@/lib/audit";
 import { csvRow } from "@/lib/contact";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
-  if (!(await isAuthed())) return new NextResponse("Unauthorized", { status: 401 });
+  // Full PII dump — gate on editor. Viewers see responses in the workspace
+  // but can't walk out with the spreadsheet.
+  const me = await getCurrentUser();
+  if (!me) return new NextResponse("Unauthorized", { status: 401 });
+  if (!hasRole(me, "editor")) return new NextResponse("Forbidden", { status: 403 });
 
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) return new NextResponse("Not Found", { status: 404 });
@@ -35,6 +40,14 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
       ]),
     );
   }
+
+  await logAction({
+    kind: "campaign.export",
+    refType: "campaign",
+    refId: params.id,
+    data: { rows: invitees.length },
+    actorId: me.id,
+  });
 
   return new NextResponse(lines.join("\n"), {
     headers: {
