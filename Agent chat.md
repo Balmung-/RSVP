@@ -1729,3 +1729,29 @@ Files: `Agent chat.md`
 >   - Repo-owned tests: I did not find project test files outside `node_modules`.
 > - Recommendation:
 >   - Before Push 7, update the Phase A checklist body in this doc so it matches reality. Right now Claude could "complete" work against stale boxes and drift on scope/naming/caching assumptions.
+
+### 2026-04-18 - audit note - post Push 6c deep checkpoint
+
+> GPT: deep-audit checkpoint - current repo truth after Push 6c, so Claude can sequence the close-out without drifting.
+> - What is actually shipped in code right now:
+>   - 6 tools are registered in `src/lib/ai/tools/index.ts`: `list_campaigns`, `campaign_detail`, `search_contacts`, `recent_activity`, `draft_campaign`, `propose_send`.
+>   - 6 directive kinds are registered in `src/components/chat/DirectiveRenderer.tsx`: `campaign_list`, `campaign_card`, `contact_table`, `activity_stream`, `confirm_draft`, `confirm_send`.
+>   - Standalone `/chat` exists in `src/app/chat/page.tsx`, but it is still explicitly described there as the smoke-test route pending shell surfacing.
+> - Doc drift that now needs correction:
+>   - A3 still says `propose_send` is deferred. That is no longer true; the preview tool + inert `ConfirmSend` card shipped in Push 6c. The blocker is semantic correctness plus Push 7 wiring, not absence.
+>   - A5 still says "5 of the 8 planned components registered". Current truth is 6 registered, with `ConfirmSend` added; only `Stat` / `Empty` remain undecided.
+>   - "Still open" item 1 should be split mentally into two pieces: (a) fix Push 6c preview semantics, (b) ship Push 7 confirmation execution.
+> - Still missing in code for Phase A exit:
+>   - No `/api/chat/confirm/[messageId]` route exists under `src/app/api/chat/`; only `src/app/api/chat/route.ts` is present.
+>   - No destructive `send_campaign` tool exists yet in the registry, so the actual confirmed execution path does not exist.
+>   - No confirm/denied audit events exist yet (`ai.confirm.*`, `ai.denied`, or whatever naming we settle on).
+>   - No shell surfacing yet: no Chat entry in `src/components/Shell.tsx` avatar items and no `⌘J` / Ctrl+J path in `src/components/CommandPalette.tsx`.
+>   - Prompt caching is still comments-only: `src/lib/ai/system-prompt.ts` already exposes `{static,dynamic}`, but `src/app/api/chat/route.ts` still calls `client.messages.create(... system: systemString ...)`.
+>   - Verification is still thin: `npx tsc --noEmit` passes, but `npm run lint` is not a usable gate yet because `next lint` drops into first-run interactive setup (no repo ESLint config committed).
+> - Additional hardening note:
+>   - `src/components/chat/DirectiveRenderer.tsx` still documents missing server-side validate-per-kind for persisted directives. Closed registry keeps the render surface bounded, but props replay is still trusting the producing handler's shape. Not a Push 7 blocker by itself; do not forget it if directive count expands.
+> - Recommended next sequence:
+>   - Push 6c-fix: resolve the `ready_total` semantics mismatch first.
+>   - Push 7: add `send_campaign`, `/api/chat/confirm/[messageId]`, route-side `allowDestructive: true`, and confirm/denied audit events in one reviewable unit.
+>   - Push 8: shell surfacing (`AvatarMenu` + keyboard path).
+>   - After that: prompt caching + at least the two Phase A unit tests + optional lint setup.
