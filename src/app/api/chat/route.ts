@@ -3,12 +3,17 @@ import Anthropic from "@anthropic-ai/sdk";
 import type {
   MessageParam,
   ContentBlock,
-  Tool as AnthropicTool,
   TextBlock,
   ToolUseBlock,
   ToolResultBlockParam,
-  RawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/messages";
+import type {
+  BetaMessageParam,
+  BetaRawMessageStreamEvent,
+  BetaTextBlockParam,
+  BetaTool,
+  BetaToolUnion,
+} from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { getCurrentUser } from "@/lib/auth";
 import { rateLimit } from "@/lib/ratelimit";
 import { prisma } from "@/lib/db";
@@ -42,16 +47,25 @@ import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 //
 // Destructive tools are intercepted by dispatch() when
 // `allowDestructive=false` (the default on this route). A separate
-// /api/chat/confirm route — landing in Push 7 — will re-execute a
-// specific tool call with the confirmation flag flipped after the
-// operator clicks confirm on a previously-proposed directive.
+// /api/chat/confirm route re-executes a specific tool call with the
+// confirmation flag flipped after the operator clicks confirm on a
+// previously-proposed directive.
 //
-// Prompt caching: the SDK stable `messages` endpoint doesn't surface
-// cache_control in its typings (only the beta namespace does). We
-// concatenate static + dynamic system blocks here for now and will
-// layer in a proper `TextBlockParam[]` with a cache_control
-// breakpoint in a follow-up push. The prompt builder already returns
-// the split shape so the migration is mechanical.
+// Prompt caching: we use the SDK beta `messages` namespace
+// (`client.beta.messages`) because `cache_control` on system blocks
+// and tool definitions is only exposed in the beta typings. Two
+// ephemeral breakpoints are placed:
+//   1. After the static system block (role + protocol rules).
+//   2. On the LAST tool definition — marks the END of the cached
+//      prefix, which includes all tools above it.
+// The dynamic system block (tenant context + local date) stays
+// outside the cached prefix: it changes per turn but the whole
+// prefix in front of it is re-used, so for two back-to-back turns
+// in the same 5-minute window we read ~1500 tokens from cache at
+// ~10% of the normal input price.
+// The beta namespace also accepts a `betas: [...]` body param so we
+// don't need to add raw headers; `anthropic-beta: prompt-caching-
+// 2024-07-31` is set by the SDK from that param.
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -164,17 +178,44 @@ export async function POST(req: Request) {
     tz: tenantContext.grounding.tz,
     todayKey: tenantContext.grounding.todayKey,
   });
-  const systemString = `${systemParts.static}\n\n${systemParts.dynamic}`;
+  // Two system blocks: static (role / protocol rules) is the
+  // cacheable prefix, dynamic (tenant context + local date) is the
+  // per-turn tail. The `cache_control` marker on the static block
+  // tells the API "everything up to AND INCLUDING this block is the
+  // cache key; everything after is fresh input". The dynamic block
+  // carries no marker, so it isn't part of the cached prefix.
+  const systemBlocks: BetaTextBlockParam[] = [
+    {
+      type: "text",
+      text: systemParts.static,
+      cache_control: { type: "ephemeral" },
+    },
+    { type: "text", text: systemParts.dynamic },
+  ];
 
   // Build the tools array for Anthropic. We expose every read/write
   // tool — destructive ones too, since the model is allowed to
   // PROPOSE them; the dispatch layer intercepts before any
   // destructive execution.
-  const toolsForApi: AnthropicTool[] = listTools().map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema as AnthropicTool["input_schema"],
-  }));
+  //
+  // Tool order is stable (governed by the registry's registration
+  // order in `src/lib/ai/tools/index.ts`), so marking the LAST tool
+  // with `cache_control: ephemeral` means the full tool block plus
+  // the preceding static system block form a single ~1500-token
+  // cacheable prefix. When the tool list grows or reorders, the
+  // cache invalidates — expected, and correct.
+  const registered = listTools();
+  const toolsForApi: BetaTool[] = registered.map((t, idx) => {
+    const def: BetaTool = {
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema as BetaTool["input_schema"],
+    };
+    if (idx === registered.length - 1) {
+      def.cache_control = { type: "ephemeral" };
+    }
+    return def;
+  });
 
   // Load the recent tail of history, excluding the user message we
   // just wrote (it's appended back below as the live turn opener).
@@ -224,14 +265,22 @@ export async function POST(req: Request) {
           // text deltas reach the operator immediately; tool_use
           // blocks are accumulated until the stream closes, then
           // dispatched in order.
-          const apiStream = (await client.messages.create({
+          //
+          // `client.beta.messages.create(...)` + `betas: [...]` is
+          // the SDK's idiomatic way to flip the `anthropic-beta`
+          // header. We pass `liveMessages` through the beta typing
+          // even though it's built with stable `MessageParam` — the
+          // two shapes are structurally identical for the block
+          // kinds we produce (text / tool_use / tool_result).
+          const apiStream = (await client.beta.messages.create({
             model: MODEL,
             max_tokens: MAX_TOKENS,
-            system: systemString,
-            tools: toolsForApi,
-            messages: liveMessages,
+            system: systemBlocks,
+            tools: toolsForApi as BetaToolUnion[],
+            messages: liveMessages as BetaMessageParam[],
             stream: true,
-          })) as AsyncIterable<RawMessageStreamEvent>;
+            betas: ["prompt-caching-2024-07-31"],
+          })) as AsyncIterable<BetaRawMessageStreamEvent>;
 
           // Accumulators for the turn. Indexed by content-block
           // index because the API interleaves deltas across blocks.
