@@ -4,10 +4,14 @@ import { ChatPanel } from "@/components/chat/ChatPanel";
 import { getCurrentUser } from "@/lib/auth";
 import { readAdminLocale, readAdminCalendar } from "@/lib/adminLocale";
 
-// Standalone chat page. Push 8 will surface the same panel from the
-// avatar menu + a ⌘J global shortcut; this page is the honest
-// smoke-test route for now — log in, visit /chat, send a message,
-// see streaming text + directives.
+// Standalone chat page — the primary entry point to the AI
+// assistant. Surfaced from three places as of Push 8:
+//   - AvatarMenu "Chat" link (top of the dropdown, featured)
+//   - CommandPalette "Chat" item (search `/` or `⌘K`, type "chat")
+//   - Global `⌘J` / `Ctrl+J` shortcut (direct navigation)
+// The page used to describe itself as a smoke-test route while the
+// shell integration was deferred; with Push 8 live the panel is
+// just a regular app surface.
 //
 // The page is a server component: it reads the admin locale/calendar
 // cookies plus APP_TIMEZONE on the server and threads them down as

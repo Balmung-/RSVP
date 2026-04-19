@@ -134,6 +134,13 @@ function buildAvatarItems({
   locale: "en" | "ar";
 }): MenuItem[] {
   const items: MenuItem[] = [
+    // Chat sits at the top as a featured primary tool, visually
+    // separated from the account-management items below by a
+    // divider. Available to all authenticated users — the chat
+    // surface itself role-gates individual tools (viewer can
+    // list, editor can draft / send).
+    { kind: "link", href: "/chat", label: locale === "ar" ? "المحادثة" : "Chat", icon: "message" },
+    { kind: "divider" },
     { kind: "link", href: "/settings", label: locale === "ar" ? "الإعدادات" : "Settings", icon: "settings" },
     { kind: "link", href: "/account/password", label: locale === "ar" ? "تغيير كلمة المرور" : "Change password", icon: "settings" },
     { kind: "link", href: "/account/2fa", label: locale === "ar" ? "تحقق من خطوتين" : "Two-step sign-in", icon: "qr" },

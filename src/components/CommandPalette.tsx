@@ -45,6 +45,7 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
       { id: "go-contacts", label: "Contacts", href: "/contacts", icon: "users" },
       { id: "go-templates", label: "Templates", href: "/templates", icon: "file-text" },
       { id: "go-inbox", label: "Inbox", href: "/inbox", icon: "inbox" },
+      { id: "go-chat", label: "Chat", hint: "AI assistant", href: "/chat", icon: "message", keywords: ["ai", "assistant", "chatbot"] },
       { id: "new-campaign", label: "New campaign", hint: "Create", href: "/campaigns/new", icon: "plus" },
       { id: "new-contact", label: "New contact", hint: "Add to address book", href: "/contacts/new", icon: "user-plus" },
       { id: "new-template", label: "New template", href: "/templates/new", icon: "plus" },
@@ -113,6 +114,26 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
       if (meta && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setOpen((v) => !v);
+        clearGPrefix();
+        return;
+      }
+      // ⌘J / Ctrl+J jumps straight to the AI chat assistant.
+      // Separate from `⌘K` (command palette) because jumping to
+      // chat is a single-purpose action the operator repeats —
+      // going through the palette would be two keystrokes + an
+      // Enter every time.
+      //
+      // Browser conflict note: Chrome / Firefox bind Ctrl+J to
+      // the Downloads panel. `preventDefault()` overrides on
+      // both. Safari reserves ⌘J more strictly and may still
+      // open Downloads; Safari users have the `/` palette + the
+      // AvatarMenu "Chat" link as fallbacks. Accepted tradeoff —
+      // ⌘J is the shortcut operators will expect from Slack /
+      // Discord / Linear-style chat surfaces.
+      if (meta && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        router.push("/chat");
+        close();
         clearGPrefix();
         return;
       }
@@ -350,6 +371,7 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
             <div className="text-micro uppercase tracking-wider text-ink-400 mb-2">Global</div>
             <ul className="flex flex-col gap-2 text-body text-ink-700 mb-5">
               <Shortcut keys={["⌘", "K"]} label="Open command palette" />
+              <Shortcut keys={["⌘", "J"]} label="Open AI chat" />
               <Shortcut keys={["/"]} label="Open command palette" />
               <Shortcut keys={["?"]} label="Show this help" />
               <Shortcut keys={["Esc"]} label="Close any dialog" />
