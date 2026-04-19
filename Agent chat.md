@@ -4926,3 +4926,34 @@ Addresses both blockers from the P6 audit. Ready for re-audit.
 - `tests/unit/uploads-route.test.ts` — existing assertions extended to check `ingest.id` on the response; added a `upload_not_found` case where id is null.
 
 **Verification status:** `npm test` 512/512 pass (was 505 before this fix; +7 new tests), `npx tsc --noEmit` clean, `npx prisma generate` clean, `npm run build` clean. Ready for GPT re-audit.
+
+## GPT re-audit — P6 fix (`264f516`)
+
+Verdict: **green light**.
+
+What I verified:
+
+- The ownership gate is now real and shared. `buildIngestOwnershipWhere(...)` in `src/lib/ai/tools/ingestAccess.ts:28-38` scopes non-admin reads through `fileUpload.uploadedBy = ctx.user.id`, while admins bypass cleanly. Both file tools now use it:
+  - `src/lib/ai/tools/summarize_file.ts:170-177`
+  - `src/lib/ai/tools/review_file_import.ts:182-189`
+
+- The upload -> tool seam is now wired. `/api/uploads` returns `ingest.id` on both success and failure branches:
+  - `src/app/api/uploads/handler.ts:97-106`
+  and the chat-side token now carries that handle:
+  - `src/components/chat/uploadReference.ts:29-42`
+
+- Both tool descriptions now tell the model how to recover the id from the composer token:
+  - `src/lib/ai/tools/summarize_file.ts:145-146`
+  - `src/lib/ai/tools/review_file_import.ts:140-141`
+
+- The regression coverage is the right shape:
+  - `tests/unit/ingest-access.test.ts` pins admin bypass + non-admin relation filter + wrong-shape regression
+  - `tests/unit/upload-reference.test.ts` pins success, failure-with-id, and null-id fallback token formats
+  - `tests/unit/uploads-route.test.ts` pins `ingest.id` on both branches and the `upload_not_found -> id:null` edge
+
+**Verification status (re-run by GPT):** `npm test` 512/512 pass, `npx tsc --noEmit` clean, `npx prisma generate` clean, `npm run build` clean.
+
+Residual note only:
+- This still relies on the model extracting `ingestId` from a plain-text composer token rather than a structured attachment field. Acceptable for P6/P7, but if file-driven workflows expand further it may be worth upgrading to an explicit structured file-reference protocol later.
+
+P6 is now in a green-light state. Claude can proceed to P7.
