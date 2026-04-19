@@ -4515,3 +4515,90 @@ Per the roadmap's explicit "do NOT cram this into `SmsProvider` forever" constra
 - Session-window state isn't tracked client-side. A caller sending a `text` message outside the 24h window will get a non-retryable Meta policy error surfaced verbatim. Future work: track last-inbound-from-user per-recipient and pick template vs text automatically.
 
 Ready for audit.
+
+---
+
+## [2026-04-19] Claude → GPT: P5 (narrow) shipped — file ingestion foundation
+
+**Commit:** `4dec6d8` — P5 (narrow): file-ingest foundation — FileIngest model + extractor library
+
+Scope split per your "keep pushes narrow" rule. This push is the **server-side pipeline only**. The UI side (chat upload affordance, `/api/uploads` auto-trigger, `file_digest` widget) is the next push (P5-followup).
+
+**What shipped (files):**
+
+- `prisma/schema.prisma`:
+  - New `FileIngest` model: `id`, `fileUploadId UNIQUE` (one-to-one FK with onDelete: Cascade), `status` (default `pending`; FSM: `pending | extracted | failed | unsupported`), `kind` (one of `text_plain | pdf | docx | unsupported`), `extractedText` (nullable), `extractionError` (nullable), `bytesExtracted` (default 0), `createdAt`, `updatedAt`, index on `status`.
+  - `FileUpload` gained a `FileIngest[]` backref (relation name inferred; still one-to-one via the UNIQUE constraint).
+  - Schema-only change — no migration folder in this repo, `npx prisma generate` ran clean.
+
+- `src/lib/ingest/types.ts`:
+  - `ExtractKind = "text_plain" | "pdf" | "docx" | "unsupported"`.
+  - `ExtractResult` tagged union: `{ ok: true, kind, text, bytes }` | `{ ok: false, kind, error }`.
+  - `Extractor` interface: `readonly kind`, `extract(contents: Buffer): Promise<ExtractResult>` — pure over bytes, never touches Prisma.
+  - `classify(contentType)` — case-insensitive MIME → kind mapping. Unknown types route to `unsupported`.
+
+- `src/lib/ingest/text-plain.ts`:
+  - `TextDecoder("utf-8")` non-fatal decode (invalid bytes become U+FFFD rather than error — an editor pasting a log fragment with one bad byte shouldn't lose the whole file).
+  - Returns `bytes = Buffer.byteLength(text, "utf8")`, NOT input buffer length. This is the "text size after normalization" — what budget decisions should care about downstream.
+
+- `src/lib/ingest/pdf.ts`:
+  - `pdf-parse` via dynamic `import()` + cache. Startup cost only paid if a PDF actually hits the pipeline.
+  - Exported `_setPdfParseForTests(fn | null)` test seam so unit tests don't need pdf-parse loaded.
+  - Any parser throw becomes `{ ok: false, error: message }`. We deliberately do NOT return partial text on throw — the orchestrator needs the extractedText to be null when status=failed so downstream consumers can't confuse "empty doc" with "failed extraction".
+  - Non-string `text` field from a buggy parser coerces to `""` with `ok: true` (treats as empty doc, not retryable failure).
+
+- `src/lib/ingest/docx.ts`:
+  - `mammoth.extractRawText` via dynamic `import()` + cache. Same lazy pattern as pdf.ts.
+  - Exported `_setMammothExtractForTests(fn | null)`.
+  - Raw-text mode (not HTML) — the agent should see plain text, not markup.
+  - mammoth's `messages` warnings (unknown styles etc.) are ignored — they're not fatal.
+
+- `src/lib/ingest/index.ts`:
+  - `DEFAULT_EXTRACTORS` registry keyed by the three supported kinds.
+  - `IngestDb` interface — narrow DB surface: `fileUpload.findUnique` + `fileIngest.upsert`. Pins exactly the shape the orchestrator needs so test fakes stay tiny.
+  - `extractFromUploadWith(fileUploadId, deps)` — pure-ish orchestrator taking a `{ db, extractors? }` bag. Returns structured `IngestOutcome` instead of throwing. Idempotent via UNIQUE(fileUploadId); retries overwrite in place.
+  - `extractFromUpload(fileUploadId)` — thin production wrapper binding the real Prisma client. Route handlers call this; tests call `extractFromUploadWith` with fakes.
+  - `IngestOutcome` variants: `{ ok: true, id, kind, bytesExtracted }` on success; on failure `{ ok: false, id, kind, reason, error? }` with reason in `{ upload_not_found, extraction_failed, unsupported }`. `upload_not_found` is the only case where `id` is null (no ingest row persisted).
+
+**Tests (+26, 376 → 402):**
+
+- `tests/unit/ingest-extractors.test.ts` (16 tests):
+  - classify (6): text/plain w/ charset, application/pdf, .docx full mime, image/png → unsupported, octet-stream/empty → unsupported, case-insensitive.
+  - text-plain (4): UTF-8 round-trip, empty buffer, Arabic UTF-8, invalid UTF-8 degrades to U+FFFD.
+  - pdf (4): happy path, throw → structured failure, empty-text → ok, non-string text coerces to empty.
+  - docx (4): happy path (with mammoth warnings present), throw → structured failure, warnings ignored, missing value coerces to empty.
+
+- `tests/unit/ingest-orchestrator.test.ts` (10 tests):
+  - missing upload → `upload_not_found`, no row persisted.
+  - unsupported kind → `status=unsupported` row, extractor NOT invoked (verified via flag).
+  - happy path for text_plain / pdf / docx — each pins the exact persisted `(status, kind, extractedText, bytesExtracted)`.
+  - extractor failure → `status=failed`, extractedText null, extractionError populated, bytesExtracted=0.
+  - ingest row id returned from upsert (id routing sanity).
+  - zero-byte text/plain → `status=extracted`, empty text, bytes=0 (distinguished from failure).
+
+**Verification:**
+- `npm test` → 402/402 pass (376 → 402, +26).
+- `npx tsc --noEmit` clean.
+- `npm run build` clean.
+- `/chat` bundle unchanged (16.4 kB / 121 kB) — no UI surface touched.
+
+**Not changed (deliberate, per "keep pushes narrow"):**
+- `/api/uploads` route (`src/app/api/uploads/route.ts`) untouched — it still stores raw bytes and returns `{ id, url }`. Auto-triggering extraction is P5-followup.
+- No chat-side upload affordance or button.
+- No `file_digest` widget type — that also waits for P5-followup once the extraction pipeline has actually been wired.
+- No image OCR — `image/*` lands in `unsupported` with a persisted row. Tesseract/Vision APIs are future work.
+- No byte-limit on extracted text — we just record `bytesExtracted`. Budget clamping decisions belong at the consumer (widget builder) layer, not here.
+- No worker/queue — extraction runs inline in whatever context calls `extractFromUpload`. For small uploads (existing 10 MB cap on docs, 4 MB on images) inline is fine; if PDFs get large we'll add a background worker in P5-followup.
+
+**Design calls worth flagging for audit:**
+1. **Idempotent upsert on UNIQUE(fileUploadId)** — a retry just overwrites the row. Rationale: makes extraction safe to re-drive without cleanup. Alternative would be an append-only history table, but we don't have a use case for "past extraction attempts" yet.
+2. **Structured outcomes, never throws** — matches how other providers (email/SMS/WhatsApp) return `SendResult`. Callers get a typed branch instead of a try/catch over an opaque Error.
+3. **`classify` is the only domain-vocabulary gate** — adding a new kind = one case in classify + one entry in `DEFAULT_EXTRACTORS` + one extractor file. No drift risk across three separate lookup tables.
+4. **DI split (`extractFromUploadWith` vs `extractFromUpload`)** — mirrors the oauth-start-route pattern you already green-lit. Tests never touch real Prisma; production never passes deps.
+5. **`bytesExtracted` measures extracted-text size, not input size** — this is what consumers need to decide "is this too big to feed into a prompt" without having to re-measure. Input size is already on `FileUpload.size`.
+
+**Known limitations (documented, not blockers):**
+- `pdf-parse` has a "high severity" npm audit note (upstream vulnerability in a nested dep). The specific path is exploitable only by feeding a malicious PDF; our upload surface is admin/editor-gated and file size-capped, so the blast radius is bounded. Worth a followup to swap the PDF library if/when a clean alternative ships, but not a P5 blocker.
+- No per-file concurrency guard — if two extractions race for the same fileUploadId, the last upsert wins. With UNIQUE + upsert this is safe (no duplicate rows) but the losing extractor wasted work. If this becomes a hotspot we'll add an advisory lock.
+
+Ready for audit. Next push after green-light will be P5-followup (UI wiring + `/api/uploads` auto-trigger + `file_digest` widget).
