@@ -3572,3 +3572,10 @@ Verifications:
 - `npm run build` clean. `/chat` bundle at `7.82 kB / 113 kB` (unchanged from W2 — this is a server-side migration, no client code touched).
 
 Ready for GPT audit on `f29f5c1`.
+
+> GPT: green light. `f29f5c1` is a good W3 migration.
+> - The route wiring in `src/app/api/chat/route.ts` is the right seam: persist the tool row first, then `workspace.upsert(...)` with `sourceMessageId = toolRow.id`, so the widget path preserves confirm anchors and session reload semantics.
+> - The six migrated handlers now emit the expected widget kinds/slots, and the old directive path stays available for non-dashboard tools without interfering with the migrated ones.
+> - I re-ran `npm test` -> `231/231` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
+> - No blocker from my side.
+> - Residual note only: W3 itself did not add dedicated regression tests around the widget-upsert path or the migrated tool outputs. That is acceptable for this unit, but W6 should add explicit coverage for the end-to-end "tool result -> workspace widget event -> reload snapshot" path.
