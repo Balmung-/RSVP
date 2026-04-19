@@ -425,14 +425,18 @@ export async function POST(
             data,
           }),
         // Terminal-state writer for the confirm_import widget. Key
-        // formula is `confirm.import.<target>.<ingestId>` — we pull
-        // target + ingestId off the same parsedInput the dispatcher
-        // forwards to commit_import, so the widget key agrees with
-        // the one propose_import emitted. A missing / malformed pair
-        // (shouldn't happen — both tools' validators reject it)
-        // leaves the widget untouched; the operator sees the pre-
-        // action state on next reload and the single-use anchor
-        // prevents a second commit.
+        // formula is target-dependent:
+        //   contacts → `confirm.import.contacts.<ingestId>`
+        //   invitees → `confirm.import.invitees.<campaignId>.<ingestId>`
+        // We pull target + ingestId + campaign_id off the same
+        // parsedInput the dispatcher forwards to commit_import, so
+        // the widget key agrees with the one propose_import emitted.
+        // An invitees anchor without a campaign_id (shouldn't happen
+        // — propose_import refuses that case with plain text, and
+        // commit_import's validator rejects it) leaves the widget
+        // untouched: the single-use claim has already run, so no
+        // second commit is possible; the operator sees the pre-
+        // action state on next reload.
         markConfirmImportOutcome: async (outcome) => {
           const rec =
             parsedInput &&
@@ -450,7 +454,17 @@ export async function POST(
           ) {
             return;
           }
-          const widgetKey = confirmImportWidgetKey(target, ingestId);
+          let campaignIdForKey: string | null = null;
+          if (target === "invitees") {
+            const cid = rec.campaign_id;
+            if (typeof cid !== "string" || cid.length === 0) return;
+            campaignIdForKey = cid;
+          }
+          const widgetKey = confirmImportWidgetKey(
+            target,
+            ingestId,
+            campaignIdForKey,
+          );
           const existing = await focusWidget(
             { prismaLike: prisma },
             row.sessionId,

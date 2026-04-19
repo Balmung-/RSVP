@@ -284,48 +284,62 @@ export async function runImport(
     return report;
   }
 
-  // Commit path — build the target-specific createMany payload.
-  if (fresh.length > 0) {
-    if (inputs.target === "contacts") {
-      const batch: Prisma.ContactCreateManyInput[] = fresh.map((n) => ({
-        fullName: n.fullName,
-        title: n.title,
-        organization: n.organization,
-        email: n.email,
-        phoneE164: n.phoneE164,
-        preferredLocale: n.preferredLocale,
-        vipTier: resolveTier(n.rawTier),
-        tags: n.tags,
-        notes: n.notes,
-        dedupKey: n.dedupKey,
-        createdBy: inputs.createdBy ?? null,
-      }));
-      const res = await deps.createContacts(batch);
-      report.created = res.count;
-    } else {
-      const batch: Prisma.InviteeCreateManyInput[] = fresh.map((n) => ({
-        campaignId: inputs.campaignId,
-        fullName: n.fullName,
-        title: n.title,
-        organization: n.organization,
-        email: n.email,
-        phoneE164: n.phoneE164,
-        locale: n.rawLocale.slice(0, 5) || null,
-        tags: n.tags,
-        notes: n.notes,
-        guestsAllowed: clampInt(n.rawGuests, 0, 20, 0),
-        dedupKey: n.dedupKey,
-        rsvpToken: newRsvpToken(),
-      }));
-      const res = await deps.createInvitees(batch);
-      report.created = res.count;
-    }
+  // Commit path with nothing to write — every row was a within-file
+  // dup, an existing-DB match, or invalid. Skip BOTH the createMany
+  // and the EventLog audit. Writing `import.completed` here would
+  // tell the audit stream an import happened when no DB state moved,
+  // and it would contradict the `commit_import` chat flow which
+  // turns this same case into a `nothing_to_commit` structured
+  // refusal (the single-use claim gets released so the operator can
+  // fix the file and retry). Keeping the audit in sync with the
+  // user-visible outcome matters for trace-back queries and for the
+  // admin-UI "imports" table which reads the same event kind.
+  if (fresh.length === 0) {
+    return report;
   }
 
-  // EventLog audit on commit only. refType/refId matches the
-  // pre-existing wrapper functions so the audit stream's
-  // `kind: "import.completed"` rows keep the same trace-back shape
-  // whether the import came from the admin UI or the chat flow.
+  // Commit path with a non-empty batch — run the target-specific
+  // createMany and emit the audit row.
+  if (inputs.target === "contacts") {
+    const batch: Prisma.ContactCreateManyInput[] = fresh.map((n) => ({
+      fullName: n.fullName,
+      title: n.title,
+      organization: n.organization,
+      email: n.email,
+      phoneE164: n.phoneE164,
+      preferredLocale: n.preferredLocale,
+      vipTier: resolveTier(n.rawTier),
+      tags: n.tags,
+      notes: n.notes,
+      dedupKey: n.dedupKey,
+      createdBy: inputs.createdBy ?? null,
+    }));
+    const res = await deps.createContacts(batch);
+    report.created = res.count;
+  } else {
+    const batch: Prisma.InviteeCreateManyInput[] = fresh.map((n) => ({
+      campaignId: inputs.campaignId,
+      fullName: n.fullName,
+      title: n.title,
+      organization: n.organization,
+      email: n.email,
+      phoneE164: n.phoneE164,
+      locale: n.rawLocale.slice(0, 5) || null,
+      tags: n.tags,
+      notes: n.notes,
+      guestsAllowed: clampInt(n.rawGuests, 0, 20, 0),
+      dedupKey: n.dedupKey,
+      rsvpToken: newRsvpToken(),
+    }));
+    const res = await deps.createInvitees(batch);
+    report.created = res.count;
+  }
+
+  // EventLog audit. refType/refId matches the pre-existing wrapper
+  // functions so the audit stream's `kind: "import.completed"` rows
+  // keep the same trace-back shape whether the import came from the
+  // admin UI or the chat flow. Only written when createMany actually
+  // ran — see the fresh.length === 0 early return above.
   await deps.auditImport({
     refType: inputs.target === "contacts" ? "contact_batch" : "campaign",
     refId: inputs.target === "contacts" ? null : inputs.campaignId,

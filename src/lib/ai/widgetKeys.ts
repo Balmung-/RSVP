@@ -75,11 +75,25 @@ export function importReviewWidgetKey(
 }
 
 // P7 — commit-confirmation card. Like `confirm_send`, it's entity-
-// scoped so a second propose_import for the same (target, ingest)
-// pair upserts the SAME action card rather than stacking duplicates.
-// Target is part of the key because a single file can power a
-// contacts import AND a per-campaign invitees import in flight at
-// the same time — two targets, two separate confirmation anchors.
+// scoped so a second propose_import for the SAME destructive target
+// upserts the SAME action card rather than stacking duplicates.
+//
+// Key composition:
+//   - contacts  → `confirm.import.contacts.${ingestId}` — the
+//                 contact book is global, so (target, ingest) is a
+//                 unique destructive target on its own.
+//   - invitees  → `confirm.import.invitees.${campaignId}.${ingestId}` —
+//                 each campaign is a separate destructive target, so
+//                 campaign_id is part of the identity. Without it, a
+//                 previously emitted ready card for campaign A could
+//                 silently remain live when the operator pivots to
+//                 campaign B on the same file (ready-card-for-A ghost
+//                 problem GPT's P7 audit flagged).
+//
+// Guards at the seam — a caller that forgets to pass campaignId on
+// invitees (or passes one on contacts) fails loudly here, not with a
+// silent key collision. This is the one place the invariant lives;
+// moving it would reintroduce the drift.
 //
 // `campaign_metadata` is intentionally excluded from this seam:
 // metadata imports stay read-only in P7 (the `draft_campaign` tool
@@ -88,6 +102,20 @@ export function importReviewWidgetKey(
 export function confirmImportWidgetKey(
   target: "contacts" | "invitees",
   ingestId: string,
+  campaignId: string | null,
 ): string {
-  return `confirm.import.${target}.${ingestId}`;
+  if (target === "invitees") {
+    if (!campaignId) {
+      throw new Error(
+        "confirmImportWidgetKey: invitees target requires a non-empty campaignId",
+      );
+    }
+    return `confirm.import.invitees.${campaignId}.${ingestId}`;
+  }
+  if (campaignId !== null) {
+    throw new Error(
+      "confirmImportWidgetKey: contacts target must receive campaignId=null (contacts are global)",
+    );
+  }
+  return `confirm.import.contacts.${ingestId}`;
 }

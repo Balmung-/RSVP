@@ -236,6 +236,101 @@ test("parity: invitees — preview matches commit scoped to campaignId", async (
   assert.equal(previewA2.duplicatesExisting, 2);
 });
 
+test("commit with all-existing dupes: no createMany, no audit — EventLog stays in sync with user-visible 'nothing_to_commit'", async () => {
+  // GPT's P7 audit caught this: the chat flow turns the "every row
+  // is already existing" outcome into a `nothing_to_commit` refusal
+  // (the operator sees "Refused: no rows would be created"), but
+  // the planner was ALWAYS writing an `import.completed` audit row
+  // before the refusal was classified. That made the EventLog say
+  // the import happened while the user saw it refused — a real
+  // state-safety bug for any trace-back query reading the audit
+  // stream.
+  //
+  // This test pins the fix: when normalised rows survive but ALL of
+  // them are existing-DB matches, the planner's commit path MUST
+  // skip both the createMany call (no DB write) AND the audit
+  // (keeps the EventLog honest).
+  //
+  // We seed the store by running a first commit, then re-run the
+  // same import — the second pass's rows are all existing. Using
+  // the planner to seed means we don't have to reproduce the
+  // dedupKey hash formula here (it's a SHA1 of email|phone); the
+  // parity guarantee from the earlier tests already pins that
+  // seeding this way reflects what a real commit would produce.
+  const text = csv([
+    ["name", "email"],
+    ["Alice", "alice@example.com"],
+    ["Bob", "bob@example.com"],
+  ]);
+  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+
+  const store = makeStore();
+  // First commit seeds the store with both rows + writes one audit.
+  const seedReport = await runImport(inputs, "commit", makeDeps(store));
+  assert.equal(seedReport.created, 2, "seed pass creates both rows");
+  assert.equal(store.audits.length, 1, "seed pass writes one audit");
+
+  // Second commit — every row is now an existing dup. Track
+  // createMany calls + audit writes on this pass ONLY.
+  let createCalls = 0;
+  const auditsBefore = store.audits.length;
+  const baseDeps = makeDeps(store);
+  const wrapped: PlannerDeps = {
+    ...baseDeps,
+    async createContacts(rows) {
+      createCalls += 1;
+      return baseDeps.createContacts(rows);
+    },
+  };
+
+  const report = await runImport(inputs, "commit", wrapped);
+  assert.equal(report.total, 2);
+  assert.equal(report.willCreate, 0, "every row is an existing dup");
+  assert.equal(report.created, 0);
+  assert.equal(report.duplicatesExisting, 2);
+  assert.equal(
+    createCalls,
+    0,
+    "createMany must not run when fresh is empty",
+  );
+  assert.equal(
+    store.audits.length,
+    auditsBefore,
+    "audit must not fire when nothing was created — keeps EventLog in sync with commit_import's nothing_to_commit refusal",
+  );
+});
+
+test("commit with all-existing dupes (invitees): same audit-skip discipline per campaign", async () => {
+  // Same invariant on the invitees path — a commit that would
+  // produce zero new rows must not leave an `import.completed`
+  // audit row for a campaign. Seeding via first commit so the
+  // dedupKey formula stays internal to the planner.
+  const text = csv([
+    ["name", "email"],
+    ["Alice", "alice@example.com"],
+  ]);
+  const inputs: PlannerInputs = {
+    target: "invitees",
+    text,
+    campaignId: "camp_B",
+  };
+
+  const store = makeStore();
+  const seedReport = await runImport(inputs, "commit", makeDeps(store));
+  assert.equal(seedReport.created, 1);
+  assert.equal(store.audits.length, 1, "seed pass writes one campaign audit");
+
+  const auditsBefore = store.audits.length;
+  const report = await runImport(inputs, "commit", makeDeps(store));
+  assert.equal(report.created, 0);
+  assert.equal(report.duplicatesExisting, 1);
+  assert.equal(
+    store.audits.length,
+    auditsBefore,
+    "no second per-campaign audit when nothing was created",
+  );
+});
+
 test("commit-only: preview does not write rows or audit, commit does both", async () => {
   // Preview must be side-effect-free. The whole point of the mode
   // split is that operators can see the expected counters before

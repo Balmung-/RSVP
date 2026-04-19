@@ -7,6 +7,7 @@ import {
   CAMPAIGNS_LIST_WIDGET_KEY,
   CONTACTS_TABLE_WIDGET_KEY,
   confirmDraftWidgetKey,
+  confirmImportWidgetKey,
   confirmSendWidgetKey,
 } from "../../src/lib/ai/widgetKeys";
 
@@ -108,6 +109,90 @@ test("confirmSendWidgetKey: reader and writer resolve the same key for the same 
 });
 
 // ---- non-interpolation guardrails ----
+
+// ---- confirmImportWidgetKey — target-dependent shape ----
+//
+// Pinned separately from the other entity-keyed helpers because its
+// formula branches on target and guards against caller mistakes at
+// the seam. The P7 GPT audit flagged a real bug here: the initial
+// formula `(target, ingestId)` collapsed two different campaigns'
+// invitees confirm cards onto the same key, so a ready card for
+// campaign A could silently remain live when the operator pivoted
+// to campaign B on the same file. The fix composes campaignId into
+// the invitees formula and forbids it on contacts — these tests are
+// the regression guard.
+
+test("confirmImportWidgetKey: contacts formula is 'confirm.import.contacts.<ingestId>'", () => {
+  // Contacts are global — campaign_id is meaningless, passed as null.
+  assert.equal(
+    confirmImportWidgetKey("contacts", "ing_42", null),
+    "confirm.import.contacts.ing_42",
+  );
+});
+
+test("confirmImportWidgetKey: invitees formula includes campaignId — 'confirm.import.invitees.<campaignId>.<ingestId>'", () => {
+  // Invitees per-campaign dedupe requires campaignId in the key.
+  // Without it, a ready card for camp_A on ingest X would collide
+  // with a propose_import for camp_B on the same ingest X, and
+  // the late preview would overwrite / fail-to-write (depending on
+  // the validator), leaving a stale destructive card pointed at A.
+  assert.equal(
+    confirmImportWidgetKey("invitees", "ing_42", "camp_A"),
+    "confirm.import.invitees.camp_A.ing_42",
+  );
+});
+
+test("confirmImportWidgetKey: different campaigns produce different keys for the same ingest", () => {
+  // The whole point of including campaignId: a user previewing A,
+  // then previewing B on the same file, must end up with two
+  // separate destructive anchors (or one succeeds while the other
+  // fails with plain text) — not one key that both writes overwrite.
+  const keyA = confirmImportWidgetKey("invitees", "ing_shared", "camp_A");
+  const keyB = confirmImportWidgetKey("invitees", "ing_shared", "camp_B");
+  assert.notEqual(keyA, keyB);
+});
+
+test("confirmImportWidgetKey: same (target, campaignId, ingestId) produces bytewise-identical keys", () => {
+  // Reader/writer invariant — propose_import writes, the confirm
+  // route reads. Both derive via this helper; a drift here would
+  // silently miss the outcome write.
+  const fromWriter = confirmImportWidgetKey("invitees", "ing_x", "camp_z");
+  const fromReader = confirmImportWidgetKey("invitees", "ing_x", "camp_z");
+  assert.equal(fromWriter, fromReader);
+});
+
+test("confirmImportWidgetKey: throws when invitees receives null campaignId", () => {
+  // Guard at the formula. A caller that forgets campaignId on the
+  // invitees path must fail loudly, not collapse to a stale key.
+  // The current propose_import code returns plain text on missing
+  // campaign_id before even calling this helper, but the test pins
+  // the defence-in-depth shape.
+  assert.throws(
+    () => confirmImportWidgetKey("invitees", "ing_1", null),
+    /invitees target requires a non-empty campaignId/,
+  );
+});
+
+test("confirmImportWidgetKey: throws when invitees receives empty-string campaignId", () => {
+  // Empty string is "technically a string" but would produce
+  // `confirm.import.invitees..ing_1` — a valid-looking key that
+  // could still collide across callers. Reject at the seam.
+  assert.throws(
+    () => confirmImportWidgetKey("invitees", "ing_1", ""),
+    /invitees target requires a non-empty campaignId/,
+  );
+});
+
+test("confirmImportWidgetKey: throws when contacts target receives a non-null campaignId", () => {
+  // The inverse guard. Contacts are global; threading a campaign
+  // through the key would create the illusion that contacts imports
+  // are per-campaign. Fail loudly so a buggy caller can't silently
+  // fragment the contacts import into per-campaign widgets.
+  assert.throws(
+    () => confirmImportWidgetKey("contacts", "ing_1", "camp_A"),
+    /contacts target must receive campaignId=null/,
+  );
+});
 
 test("entity-keyed helpers reject no silently on empty id but type system rules out undefined", () => {
   // The TypeScript signature requires `string`, so undefined/null

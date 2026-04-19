@@ -151,15 +151,28 @@ export const proposeImportTool: ToolDef<Input> = {
     // campaign_detail / propose_send. Contacts target has no
     // campaign to check, so we skip the lookup and thread
     // campaign_id as null on the widget.
+    //
+    // Both missing-campaign and out-of-scope-campaign return plain
+    // text only (no widget). Rationale: without a resolved campaign
+    // there is no destructive target to anchor a ConfirmImport card
+    // to, and `confirmImportWidgetKey` rejects an invitees target
+    // with `campaignId=null` at the formula level. Returning a
+    // blocked widget with `campaign_id: null` would also fail
+    // `validateConfirmImport`'s cross-field check on (target,
+    // campaign_id). Surfacing this as text keeps any previously-
+    // emitted ready ConfirmImport for a different campaign on the
+    // dashboard untouched — that card is still a valid destructive
+    // anchor, and superseding it with a no-op would be a worse UX.
     let campaignId: string | null = null;
     if (input.target === "invitees") {
       if (!input.campaign_id) {
-        // Missing campaign_id is structurally distinct from
-        // "campaign exists but not in scope" — surface early with a
-        // dedicated blocker so the widget renders the right fix hint.
-        return emitEarlyBlockerWidget(ingest, filename, input.target, null, [
-          "no_campaign_for_invitees",
-        ]);
+        return {
+          output: {
+            error: "no_campaign_for_invitees",
+            summary:
+              "Cannot preview invitees import: campaign_id is required. Pick a campaign and re-run the preview.",
+          },
+        };
       }
       const camp = await prisma.campaign.findFirst({
         where: {
@@ -296,7 +309,7 @@ export const proposeImportTool: ToolDef<Input> = {
         summary: summaryLines.join("\n"),
       },
       widget: {
-        widgetKey: confirmImportWidgetKey(input.target, ingest.id),
+        widgetKey: confirmImportWidgetKey(input.target, ingest.id, campaignId),
         kind: "confirm_import",
         slot: "action",
         props,
@@ -306,11 +319,15 @@ export const proposeImportTool: ToolDef<Input> = {
 };
 
 // Build a blocked-state `confirm_import` widget for the early-exit
-// paths (`file_not_extracted`, `file_unstructured`, `no_campaign_for_invitees`).
-// These all share a shape: we know enough to emit the widget (so the
-// operator sees WHY they can't commit, not an empty modal), but the
-// planner couldn't run. Expected is all-zeros, columns is empty,
-// state is always `blocked`.
+// paths that ran AFTER the campaign gate — `file_not_extracted` and
+// `file_unstructured`. Both guarantee a resolved `campaignId` (a
+// non-null string for invitees, null for contacts), so the widget key
+// formula and the `validateConfirmImport` cross-field check on
+// (target, campaign_id) both accept the payload.
+//
+// `no_campaign_for_invitees` does NOT route through here — it has
+// no resolved campaign to key against, so the tool returns plain
+// text only (see the campaign gate above).
 function emitEarlyBlockerWidget(
   ingest: { id: string; fileUploadId: string },
   filename: string,
@@ -341,7 +358,7 @@ function emitEarlyBlockerWidget(
       summary: `Cannot preview import for "${filename}": ${blockers.join(", ")}.`,
     },
     widget: {
-      widgetKey: confirmImportWidgetKey(target, ingest.id),
+      widgetKey: confirmImportWidgetKey(target, ingest.id, campaignId),
       kind: "confirm_import",
       slot: "action",
       props,
