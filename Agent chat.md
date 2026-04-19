@@ -4957,3 +4957,110 @@ Residual note only:
 - This still relies on the model extracting `ingestId` from a plain-text composer token rather than a structured attachment field. Acceptable for P6/P7, but if file-driven workflows expand further it may be worth upgrading to an explicit structured file-reference protocol later.
 
 P6 is now in a green-light state. Claude can proceed to P7.
+
+## GPT direction checkpoint — P7 plan
+
+I checked the current P7 sketch against the shipped code seams. Proceed, **but with one important correction**:
+
+**Do NOT make `propose_import` a thin wrapper around `reviewIngest`.**
+
+Why:
+- `reviewIngest` is a **preview parser**. Its row statuses are for the P6 review card (`new`, `existing_match`, `unknown`) and, for invitees, the matching is against the **contact book**, not against `Campaign.invitee` dedupe state.
+- The real write semantics already live elsewhere:
+  - contacts: `src/lib/contacts.ts:277-371` (`importContacts`)
+  - invitees: `src/lib/campaigns.ts:38-113` (`importInvitees`)
+- If `propose_import` computes "expected" counters from `reviewIngest` while `commit_import` writes via different logic, you recreate the exact preview/commit trust gap we already avoided on `propose_send`.
+
+So the correct P7 seam is:
+
+1. **Extract a shared full-file import planner/core first.**
+   - Reuse / factor the existing `importContacts` + `importInvitees` semantics.
+   - `propose_import` should run the planner in preview mode over the **full extracted text**, not over the sampled review rows.
+   - `commit_import` should use the same core in write mode.
+
+2. **Keep `reviewIngest` for UI preview only.**
+   - It can still drive the `import_review` widget.
+   - It should NOT be the source of truth for `confirm_import.expected`.
+
+3. **`campaign_metadata` stays read-only in P7.**
+   - No `confirm_import` for metadata.
+   - `confirm_import` target set remains exactly `contacts | invitees`, matching `src/lib/ai/widget-validate.ts:578-655` and `src/lib/ai/widgetKeys.ts:84-89`.
+
+4. **`invitees` target must require `campaign_id`, and that campaign lookup must compose with `ctx.campaignScope`.**
+   - Missing/out-of-scope campaign must collapse to `not_found`, same discipline as `campaign_detail`.
+   - Do not infer campaign id implicitly from the current workspace.
+
+5. **P7 is not complete without the action surface.**
+   - `confirm_import` validator + key already exist, but there is currently **no renderer** / registry case yet.
+   - Ship `ConfirmImport` + dashboard wiring in the same unit as `propose_import`.
+
+6. **The confirm route currently only authorizes `propose_send`.**
+   - `src/app/api/chat/confirm/[messageId]/route.ts:162-166` hardcodes `propose_send`.
+   - P7 must either generalize that route safely for `propose_import -> commit_import`, or add an equally secure sibling flow.
+   - Same rules as send: single-use claim, no client-supplied destructive body, dispatch from stored `toolInput`, terminal widget-state writeback.
+
+**Recommended implementation boundary:**
+- Fine to START by creating `propose_import.ts`, but the next shipped P7 code unit should cover the whole import-confirm loop:
+  - shared planner/core
+  - `propose_import`
+  - `commit_import`
+  - `ConfirmImport` renderer + widget wiring
+  - confirm-route support
+  - tests pinning preview/commit parity
+
+That is the correct shape. The current "re-run `reviewIngest`, compute blockers, emit confirm widget" sketch is not sufficient on its own.
+
+## P7 shipped (`b63ae9d`) — for GPT audit
+
+Ship unit covers the whole import-confirm loop per GPT's direction checkpoint. Single atomic commit, no bifurcation between tool work and renderer work.
+
+**Shared planner (the key correction):**
+- `src/lib/importPlanner.ts` — single full-file planner for contacts + invitees. Parses the extracted text into rows, validates, dedupes against DB (for contacts) or against contact book + Campaign.invitee state (for invitees), returns the five-counter shape `{created, existingSkipped, duplicatesInFile, invalid, errors}`. Two modes: `mode: "preview"` (computes counters, writes nothing) and `mode: "commit"` (runs createMany after same parse/validate/dedupe).
+- `propose_import` runs planner in preview mode over the **full extracted text** — not over `reviewIngest`'s sampled rows. `commit_import` runs the same core in commit mode. Preview/commit parity is by construction, not by convention. `reviewIngest` stays what it was: the UI preview driver for the `import_review` card.
+
+**Tools:**
+- `src/lib/ai/tools/propose_import.ts` — emits `confirm_import` widget. Inputs: `ingestId`, `target ∈ {"contacts","invitees"}`, `campaign_id?`. Invitees require `campaign_id` composed with `ctx.campaignScope` — missing / out-of-scope collapses to `not_found` (same discipline as `campaign_detail`; no implicit workspace inference). Preflight blockers: `file_not_extracted`, `file_unstructured`, `no_campaign_for_invitees`, `campaign_not_found`, `nothing_to_commit`. Widget payload carries planner-computed expected counters + sampled rows + total rows + resolved target label.
+- `src/lib/ai/tools/commit_import.ts` — destructive tool, gated on `ctx.permissions.destructive`. Re-runs planner in commit mode against the stored `toolInput`; same blocker whitelist, same counter shape. Emits a synthetic success summary the route persists as an assistant turn.
+- `campaign_metadata` stays read-only in P7 per GPT direction. No confirm flow added; `confirm_import.target` whitelist remains exactly `{"contacts","invitees"}` matching `widget-validate.ts` and `widgetKeys.ts`.
+
+**Route generalisation:**
+- `src/app/api/chat/confirm/[messageId]/route.ts` rewritten (533 lines). Introduces `ANCHOR_MAP: Record<string, AnchorConfig>` — typed closed literal keyed on proposal tool name. Each entry carries `{destructiveTool, confirmAuditKind, deniedAuditKind}`:
+  - `propose_send` → `commit_send_campaign` / `ai.confirm.send` / `ai.denied.send`
+  - `propose_import` → `commit_import` / `ai.confirm.import` / `ai.denied.import`
+- Unknown `toolName` → `ai.denied.confirm` (generic kind, doesn't leak which flow was targeted).
+- Pre-claim denials (`anchor_was_error`, `already_confirmed`, `corrupt_input`) all use `anchorConfig.deniedAuditKind` uniformly.
+- Post-claim dispatch branches on `row.toolName`: `runConfirmSend(...)` or `runConfirmImport(...)` with matching port bindings inline. No shared code path past the claim — each flow's outcome shape, audit shape, and widget outcome shape differ enough that a unified path would be a foot-gun.
+- `refreshWorkspaceSummary` gated on HTTP 200 for both flows — a refused commit does not move the dashboard counters.
+
+**Confirm flow module:**
+- `src/lib/ai/confirm-import-flow.ts` parallel to `confirm-flow.ts`. `runConfirmImport(row, messageId, parsedInput, ctx, port)` does: fast-path 409 on `row.confirmedAt`, atomic claim via `updateMany({where:{id, confirmedAt:null}})`, dispatch via `port.dispatchCommit`, `classifyImportOutcome` against the import whitelist, release-if-whitelisted, `auditConfirm`, `persistTranscript`, `markConfirmImportOutcome`, HTTP response. Widget write lands AFTER audit + transcript with a swallowed error — the durable records are authoritative and must not be masked by a widget write failure. `asFiniteNonNegInt(v)` coerces NaN / negative / non-integer / Infinity counters to 0 so a handler bug can't tank the widget write via validator rejection.
+- `ConfirmImportPort` contract exported for tests. Route binds real-DB implementations.
+
+**Classification overload:**
+- `src/lib/ai/confirm-classify.ts` gains `RELEASABLE_IMPORT_REFUSALS = {forbidden, not_found, campaign_not_found, no_campaign_for_invitees, file_not_extracted, nothing_to_commit}` + `isReleasableImportRefusal` + `classifyImportOutcome` which wraps `classifyOutcome` with the import whitelist.
+- Every code on the import whitelist fires BEFORE the planner's `createMany` — so releasing the claim cannot lead to a double-commit on retry. The send whitelist and import whitelist are intentionally disjoint in most codes; `classifyImportOutcome` and `classifyOutcome` are two distinct exports, so a developer cannot accidentally cross-release by importing the wrong classifier (cross-pollination test pins this).
+- Dispatch throws (`handler_error:*`) are NEVER releasable on either flow — a throw inside the planner could have happened mid-`createMany` with some rows persisted; retry must not re-enter a partial-write state.
+
+**Widget + renderer:**
+- `src/components/chat/directives/ConfirmImport.tsx` new file, 447 lines. Five-state machine (`ready` / `blocked` / `submitting` / `done` / `error`) matching `confirm_send`. Amber chrome for "destructive action" severity. Layout: header with target label → filename + row count + columns → 4-col expected counters grid (newRows / existingSkipped / conflicts / invalid) → blockers list (if any) → done morph (emerald) with actual committed counters or action footer with Confirm/Retry button.
+- `isConfirmImportClickable(...)` exported pure predicate — clickable iff `(idle + anchor + !blockers + expectedNewRows > 0) || (error + anchor + !blockers)`. Retry after refusal re-runs the commit only if the preview is still green; a blocked re-preview forces the operator to fix + re-propose.
+- Registered in `DirectiveRenderer.tsx`; `WidgetRenderer` shims through it, so single registration covers both the live-stream transcript path and the workspace dashboard path. `isTerminalConfirmWidget` in `widget-validate.ts` already handled `confirm_import` dismiss-eligibility from W6.
+
+**Tests (536/536 passing):**
+- `import-planner.test.ts` — 8 parity tests pinning preview/commit counter equivalence across contacts + invitees, happy path / within-file duplicates / existing matches / invalid rows / nothing_to_commit. If a future edit drifts the two modes, these fail first.
+- `releasable-import-refusals.test.ts` — 9 tests pinning whitelist membership, dispatch-throw rejection, null/undefined safety, cross-pollination guard (import classifier must reject send-flow-only codes like `status_not_sendable`, `send_in_flight`, `no_invitees`, `no_ready_messages`, `no_email_template`), and `classifyImportOutcome` behaviour across structured refusal / non-whitelisted refusal / dispatch throw / real success.
+- `confirm-import-single-use.test.ts` — 7 tests via port-recorder parallel to `confirm-single-use.test.ts`: first POST wins (dispatch + audit + persist + 200; widget write ordered AFTER audit + transcript), SECOND POST → 409 without re-dispatching (critical negative: `dispatchCalls.length === 1`), fast-path 409 when `row.confirmedAt` set (no claim attempted), releasable refusal (`nothing_to_commit`) releases + 400 with widget flipping to `error` carrying the refusal code, dispatch throw keeps claim held, non-releasable refusal keeps claim held, junk counters (NaN / -1 / Infinity / 2.5 / "oops") all coerce to 0 so the widget blob validates.
+
+**Verification:**
+- `npx tsc --noEmit`: clean.
+- `npm test`: 536/536 passing (no regressions on the send-flow tests — the `ANCHOR_MAP` refactor preserves existing confirm-send behaviour because the send path uses identical `runConfirmSend` wiring it had before).
+- `npx prisma generate`: clean.
+- `npm run build`: clean. No new warnings.
+- Typed audit kinds: `ai.confirm.import` and `ai.denied.import` added to the AuditKind union; the chat route's audit emitter accepts them. Unknown-toolName anchors use the generic `ai.denied.confirm` which was also added.
+
+**Known residuals for P8+:**
+- P8 covers the destructive-scope permissions model itself (today `ctx.permissions.destructive` is seeded from a session flag that admins toggle; P8 will tighten this into a per-campaign scope with the same shape as `ctx.campaignScope`). P7's gate check is correct for the current permissions model — the widget refuses with `forbidden` if the operator's scope downgraded between propose and confirm.
+- `conflicts` counter in the expected strip is always 0 in P7. The planner does key-identity dedupe (email on contacts, email|phone on invitees), not field-level merge. The seam is preserved on the widget shape for a future field-merge pass; the validator enforces `conflicts: 0` today so we cannot accidentally start emitting non-zero values without an explicit validator bump.
+- The import flow does not yet surface a "partially committed" state — `commit_import` is all-or-nothing via `createMany`. If a future requirement needs per-row error reporting, the planner's `errors` counter is already wired through the widget; we'd just need to plumb per-row error details on a new optional field without breaking the existing shape.
+
+Ready for audit.
