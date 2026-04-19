@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
 import type { ToolDef, ToolResult } from "./types";
+import { loadAudience, computeBlockers } from "./send-blockers";
 
 // Previews what `sendCampaign` WOULD do, without doing it. The
 // model calls this to resolve an audience + template + count
@@ -140,53 +141,13 @@ export const proposeSendTool: ToolDef<Input> = {
       };
     }
 
-    // Status gate mirrors `sendCampaign`'s CAS lock
-    // (`src/lib/campaigns.ts:196-199`): only draft/active can
-    // transition to sending. Everything else is a hard blocker
-    // we surface up-front so the ConfirmSend button can be
-    // disabled before the click instead of failing server-side.
-    const sendableStatuses = new Set(["draft", "active"]);
-    const statusBlocked = !sendableStatuses.has(campaign.status);
-
-    // Pull invitees + their existing invitations in one round-trip.
-    // sendCampaign loads the full set; we do the same so counts match
-    // byte-for-byte. For very large campaigns this can be heavy but
-    // it's exactly what the real send will load, so the operator's
-    // preview cost is honest.
-    const invitees = await prisma.invitee.findMany({
-      where: { campaignId: campaign.id },
-      include: { invitations: true },
-    });
-
-    // Pre-load unsubscribes for this invitee set in a single query —
-    // sendEmail/sendSms check one-by-one inside the per-message
-    // loop, which is fine at send time but would be a fan-out at
-    // preview time. We translate the membership check into two
-    // Set lookups.
-    const emails = invitees
-      .map((i) => i.email)
-      .filter((v): v is string => !!v);
-    const phones = invitees
-      .map((i) => i.phoneE164)
-      .filter((v): v is string => !!v);
-    const unsubRows =
-      emails.length + phones.length === 0
-        ? []
-        : await prisma.unsubscribe.findMany({
-            where: {
-              OR: [
-                ...(emails.length > 0 ? [{ email: { in: emails } }] : []),
-                ...(phones.length > 0 ? [{ phoneE164: { in: phones } }] : []),
-              ],
-            },
-            select: { email: true, phoneE164: true },
-          });
-    const unsubEmails = new Set<string>();
-    const unsubPhones = new Set<string>();
-    for (const u of unsubRows) {
-      if (u.email) unsubEmails.add(u.email);
-      if (u.phoneE164) unsubPhones.add(u.phoneE164);
-    }
+    // Audience + unsubscribes via the shared helper. Same query
+    // shape sendCampaign uses, so counts here match what the real
+    // send will emit byte-for-byte. Helper is also consulted below
+    // (by `computeBlockers`) and by `send_campaign` at confirm
+    // time — single source of truth for both surfaces.
+    const audience = await loadAudience(campaign.id);
+    const { invitees, unsubEmails, unsubPhones } = audience;
 
     const emailBucket: ChannelBreakdown = {
       ready: 0,
@@ -244,29 +205,21 @@ export const proposeSendTool: ToolDef<Input> = {
     // the same number as a recipient count (GPT, Push 6c review).
     const readyMessages = emailBucket.ready + smsBucket.ready;
 
-    // Up-front blockers. Keep them as a string array so the
-    // directive can render a list and the model has something
-    // clean to recite. Order matters: the status blocker is
-    // loudest, then audience-empty, then per-channel template
-    // gaps — because the operator's "what do I fix" path goes
-    // in that order.
-    const blockers: string[] = [];
-    if (statusBlocked) {
-      blockers.push(`status_locked:${campaign.status}`);
-    }
-    if (invitees.length === 0) {
-      blockers.push("no_invitees");
-    } else if (readyMessages === 0) {
-      blockers.push("no_ready_messages");
-    }
-    const wantsEmail = channel === "email" || channel === "both";
-    const wantsSms = channel === "sms" || channel === "both";
-    if (wantsEmail && !campaign.templateEmail) {
-      blockers.push("no_email_template");
-    }
-    if (wantsSms && !campaign.templateSms) {
-      blockers.push("no_sms_template");
-    }
+    // Blockers via the shared helper — same codes send_campaign
+    // enforces at confirm time, same ordering the directive
+    // renders. If a new blocker type is added to the helper,
+    // both the preview UI here and the server-side guard in
+    // send_campaign pick it up automatically.
+    const blockers = computeBlockers({
+      campaign: {
+        status: campaign.status,
+        templateEmail: campaign.templateEmail,
+        templateSms: campaign.templateSms,
+      },
+      audience,
+      channel,
+      onlyUnsent,
+    });
 
     // Preview snippets. These are server-side clipped so the
     // directive payload stays bounded; full bodies live on the

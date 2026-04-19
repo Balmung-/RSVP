@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
 import { sendCampaign } from "@/lib/campaigns";
 import type { ToolDef, ToolResult } from "./types";
+import { loadAudience, computeBlockers } from "./send-blockers";
 
 // The destructive companion to `propose_send`. Same input shape; the
 // difference is that this tool actually dispatches messages through
@@ -105,12 +106,23 @@ export const sendCampaignTool: ToolDef<Input> = {
     // AND-compose with ctx.campaignScope so a non-admin trying to
     // send a campaign outside their team collapses to `not_found`.
     // Same discipline as `propose_send` / `campaign_detail`.
+    //
+    // Widened select: `templateEmail` / `templateSms` are read so
+    // we can re-enforce propose_send's blockers below. Without
+    // those fields we'd have to trust the client-side blocker
+    // disable (see the "Blocker re-check" block further down).
     const where: Prisma.CampaignWhereInput = {
       AND: [ctx.campaignScope, { id: input.campaign_id }],
     };
     const campaign = await prisma.campaign.findFirst({
       where,
-      select: { id: true, status: true, name: true },
+      select: {
+        id: true,
+        status: true,
+        name: true,
+        templateEmail: true,
+        templateSms: true,
+      },
     });
     if (!campaign) {
       return {
@@ -132,6 +144,14 @@ export const sendCampaignTool: ToolDef<Input> = {
     // and the send would no-op with `locked: true`, which is
     // technically correct but looks like a silent failure to the
     // operator.
+    //
+    // Kept as a dedicated `status_not_sendable` code (rather than
+    // folding into the generic `blocked` path below) because the
+    // confirm route's release-on-refusal whitelist has an entry
+    // for this exact code — any rename would need a paired change
+    // there. Keeping them separate also makes the audit stream
+    // easy to filter: `data.error === "status_not_sendable"` is a
+    // "wrong state" vs a "missing template" refusal.
     const sendableStatuses = new Set(["draft", "active"]);
     if (!sendableStatuses.has(campaign.status)) {
       return {
@@ -139,6 +159,54 @@ export const sendCampaignTool: ToolDef<Input> = {
           error: "status_not_sendable",
           status: campaign.status,
           summary: `Refused: campaign "${campaign.name}" is in status "${campaign.status}" — only draft or active can send.`,
+        },
+      };
+    }
+
+    // Blocker re-check. `propose_send` surfaces blockers
+    // (`no_email_template`, `no_sms_template`, `no_invitees`,
+    // `no_ready_messages`) to the ConfirmSend directive, which
+    // disables the button. That client-side disable is NOT a
+    // security boundary — a forged POST or a bad history
+    // rehydrate could hit /api/chat/confirm pointing at a
+    // blocked preview row. Without a server-side re-check,
+    // sendCampaign falls back to default localized copy when a
+    // template is missing (`src/lib/preview.ts:60-61,80` uses
+    // `templateEmail || L.email.body`), so a blocked campaign
+    // would still deliver real messages using the fallback
+    // text. (GPT flagged this on the Push 7 fix review.)
+    //
+    // We consult the same `computeBlockers` helper propose_send
+    // uses, so the two surfaces cannot drift — a new blocker
+    // type gets rendered by propose_send AND enforced here in
+    // the same commit.
+    //
+    // Status is filtered out — we already returned
+    // `status_not_sendable` above for that case, and keeping
+    // those two codes distinct is deliberate (see comment on
+    // the status gate). Any remaining blocker becomes the
+    // structured error code; the full list is attached so the
+    // audit record / future UI can show them all.
+    const audience = await loadAudience(campaign.id);
+    const blockers = computeBlockers({
+      campaign: {
+        status: campaign.status,
+        templateEmail: campaign.templateEmail,
+        templateSms: campaign.templateSms,
+      },
+      audience,
+      channel,
+      onlyUnsent,
+    });
+    const nonStatusBlockers = blockers.filter(
+      (b) => !b.startsWith("status_locked:"),
+    );
+    if (nonStatusBlockers.length > 0) {
+      return {
+        output: {
+          error: nonStatusBlockers[0],
+          blockers: nonStatusBlockers,
+          summary: `Refused: "${campaign.name}" cannot be sent — ${nonStatusBlockers.join(", ")}.`,
         },
       };
     }

@@ -96,11 +96,23 @@ export const runtime = "nodejs";
 // retrying cannot double-send. Any other error (including a
 // dispatch-layer throw bubbling up as handler_error:*) keeps the
 // claim in place.
+//
+// Blocker codes (`no_*`) are sourced from `src/lib/ai/tools/
+// send-blockers.ts::computeBlockers` — the same helper
+// propose_send uses to surface blockers to the ConfirmSend
+// directive. send_campaign re-checks that helper at confirm time
+// and refuses with the first non-status blocker as the error
+// code; all of those refusals happen before sendCampaign's
+// fan-out, hence releasable.
 const RELEASABLE_REFUSALS = new Set([
   "forbidden",
   "not_found",
   "status_not_sendable",
   "send_in_flight",
+  "no_invitees",
+  "no_ready_messages",
+  "no_email_template",
+  "no_sms_template",
 ]);
 
 export async function POST(
