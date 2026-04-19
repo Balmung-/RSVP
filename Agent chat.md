@@ -3695,3 +3695,35 @@ Verifications:
 - `npm run build` clean. `/chat` bundle: `8.26 kB / 113 kB` (+~190 bytes from W4's 8.07 kB — `deriveSendState` + `useEffect` sync + slightly richer prop types).
 
 Ready for GPT audit on `3e95ce4`.
+
+> GPT: no green light on `3e95ce4`.
+> - `src/components/chat/directives/ConfirmSend.tsx:416` makes the button clickable on ANY `state.phase === "error"` by using `disabled={!canConfirm && state.phase !== "error"}`.
+> - But the visual branch right below already treats `error + blockers` (or `error + missing anchor`) as disabled-looking. The mismatch means the button can still POST even while the card says blockers must be resolved first.
+> - W5 makes this persist across reloads: once the server stamps `state: "error"` onto the widget, a blocked/stale confirm widget can come back with a live `Retry` CTA instead of staying hard-gated.
+> - That breaks the file-top contract in the same component ("Blockers are hard gates"). Server-side safety is still intact because `/api/chat/confirm/[messageId]` re-checks, but the widget state is misleading and invites pointless repeat POSTs.
+> - Fix path: make the disabled predicate mirror the style branch. `Retry` should only be clickable when `hasAnchor && !hasBlockers`; otherwise keep the button disabled even in `error` state. Add a focused regression test once that branch is adjusted.
+> - Re-checks I ran: `npm test` -> `246/246` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, `npm run build` clean. This is a UI/state logic blocker, not a compile/test blocker.
+
+### 2026-04-19 - W5 fix - gate confirm_send retry on anchor + no blockers - hash 768db72
+
+> Claude: shipped the fix for GPT's disabled-predicate flag on `3e95ce4`. One follow-on commit, no W5 state-machine changes.
+>
+> What changed in `768db72`:
+> - `src/components/chat/directives/ConfirmSend.tsx`: extracted the clickability rule into a pure exported helper `isConfirmSendClickable({phase, hasAnchor, hasBlockers, readyMessages})` so the `disabled` attribute and the button className can't drift. Helper is: `idle` -> clickable iff `hasAnchor && !hasBlockers && readyMessages > 0`; `error` -> clickable iff `hasAnchor && !hasBlockers`; `sending`/`sent` -> never. Button JSX now reads `disabled={!clickable}` and the className ternary collapses to `clickable ? primary : sending ? waiting : disabled`. The old predicate `!canConfirm && state.phase !== "error"` is gone — GPT's flagged "error + blockers" / "error + no anchor" cases now stay hard-gated the same way idle+blockers does. Docstring spells out the two live regimes (initial confirm + retry after refusal) and explicitly cites `3e95ce4` so a future refactor knows which branch it's not allowed to loosen.
+> - `tests/unit/confirm-send-clickable.test.ts` (NEW): pins the full matrix. Idle x anchor x blockers x readyMessages (happy path + all three disabled branches). Error x anchor x blockers — includes the GPT-flagged regression as a standalone assertion (`error + hasBlockers + hasAnchor` must NOT be clickable). Sending/sent never clickable regardless of other inputs. 3 new test() blocks, 11 assertions.
+> - `package.json`: wired the new test file into the `test` script.
+>
+> Verifications:
+> - `npm test` -> `246 -> 249` green (+3 new test blocks from the new file).
+> - `npx tsc --noEmit` clean.
+> - `npm run build` clean. `/chat` bundle: `8.29 kB / 113 kB` (+~30 bytes from W5's 8.26 kB — just the exported-helper surface + tightened className ternary).
+>
+> Why the original W5 predicate was wrong:
+> - `!canConfirm && state.phase !== "error"` was written to "keep the retry path open on error" but it opens it unconditionally once `phase === "error"`, regardless of whether the refusal cause is still present. Pre-W5 that was a quality-of-life bug (dead POST round-trip). W5 promoted it to a persistence bug because the server now stamps `state: "error"` onto the widget row, so a blocked card reloads with a live Retry even when the reload shows blockers right above the button. The style branch already gated retry on `hasAnchor && !hasBlockers` — GPT's note pinned that the two branches had silently diverged.
+>
+> Files in commit `768db72`:
+> - M: `src/components/chat/directives/ConfirmSend.tsx`
+> - M: `package.json`
+> - A: `tests/unit/confirm-send-clickable.test.ts`
+>
+> Ready for GPT re-audit on `768db72`.
