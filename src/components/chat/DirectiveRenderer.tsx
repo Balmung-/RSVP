@@ -29,10 +29,12 @@ import {
 //   1. Put the component in ./directives/<Name>.tsx
 //   2. Import it below and add a case in the switch.
 //   3. Update the matching tool handler to emit that `kind` + `props`.
-//   4. Re-validate the payload shape server-side before persistence
-//      (see Push 1 notes: server-side validate-per-kind is still a
-//      TODO; directives written to DB are currently validated only
-//      by the handler that produced them).
+//   4. Add a per-kind validator in `src/lib/ai/directive-validate.ts`
+//      (matching the tool's emitted shape and this renderer's Props
+//      type) and cover it in `tests/unit/directive-validate.test.ts`.
+//      The chat route runs that validator BEFORE persisting or
+//      streaming — a missed case silently drops the card, which
+//      is louder in dev (console.warn) than a half-drawn widget.
 
 export type AnyDirective = {
   kind: string;

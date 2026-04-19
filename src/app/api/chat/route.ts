@@ -24,6 +24,7 @@ import { buildContext } from "@/lib/ai/context";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { listTools, dispatch } from "@/lib/ai/tools";
 import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
+import { validateDirective } from "@/lib/ai/directive-validate";
 
 // The chat endpoint. Accepts a POST body `{ sessionId?, message }`,
 // authenticates via the usual session cookie, then opens a
@@ -415,7 +416,31 @@ export async function POST(req: Request) {
                   ? r.output
                   : JSON.stringify(r.output);
               if (r.directive) {
-                directiveForStorage = r.directive;
+                // Push 11 — server-side validate-per-kind. Directives
+                // written to the DB or streamed to the client must
+                // match the renderer's expected shape for their kind.
+                // A null return here means the handler produced
+                // something malformed (missing required field, wrong
+                // type, unknown kind) — we drop the directive on the
+                // floor so nothing bad persists or renders. The
+                // assistant's text still carries the answer; we just
+                // lose the card. The server log tells the operator /
+                // maintainer the tool is misbehaving. See
+                // `src/lib/ai/directive-validate.ts` and
+                // `tests/unit/directive-validate.test.ts`.
+                const validated = validateDirective(r.directive);
+                if (validated) {
+                  directiveForStorage = validated;
+                } else {
+                  console.warn(
+                    `[chat] invalid directive from tool ${call.name}; dropped`,
+                    { kind:
+                      (r.directive && typeof r.directive === "object" &&
+                        "kind" in r.directive)
+                        ? (r.directive as { kind: unknown }).kind
+                        : null },
+                  );
+                }
               }
             } else {
               isError = true;
