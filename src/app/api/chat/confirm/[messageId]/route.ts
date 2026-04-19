@@ -5,7 +5,7 @@ import { prisma } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { dispatch } from "@/lib/ai/tools";
-import { classifyOutcome } from "@/lib/ai/confirm-classify";
+import { runConfirmSend } from "@/lib/ai/confirm-flow";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -91,12 +91,14 @@ import { classifyOutcome } from "@/lib/ai/confirm-classify";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Classification of the `dispatch(...)` result — structured-refusal
-// vs real failure vs real success, plus the releasable-refusals
-// whitelist used to decide whether to release the single-use claim
-// — lives in `src/lib/ai/confirm-classify.ts`. Extracted for unit
-// testing (see tests/unit/confirm-outcome.test.ts and
-// tests/unit/releasable-refusals.test.ts).
+// The destructive-action core — claim, dispatch, classify, release,
+// audit, persist, respond — lives in `src/lib/ai/confirm-flow.ts`
+// behind a dependency-injectable port. The route below handles auth,
+// rate limiting, row lookup, pre-claim pre-checks (wrong_tool /
+// anchor_was_error / corrupt_input), and then hands off to
+// runConfirmSend. See `tests/unit/confirm-single-use.test.ts` and
+// `tests/unit/confirm-outcome.test.ts` for the regression coverage
+// that extraction enables.
 
 export async function POST(
   _req: Request,
@@ -195,30 +197,6 @@ export async function POST(
     );
   }
 
-  // Fast-path already_confirmed check. Not race-safe on its own —
-  // two parallel clicks can both see confirmedAt=null here — but
-  // the atomic claim below is the real guard. This just yields a
-  // faster 409 on the common "refreshed the tab, clicked again"
-  // case without needing to compute ctx / parse input.
-  if (row.confirmedAt) {
-    await logAction({
-      kind: "ai.denied.send_campaign",
-      refType: "ChatSession",
-      refId: row.sessionId,
-      actorId: me.id,
-      data: {
-        via: "confirm",
-        reason: "already_confirmed",
-        messageId,
-        confirmedAt: row.confirmedAt.toISOString(),
-      },
-    });
-    return NextResponse.json(
-      { ok: false, error: "already_confirmed" },
-      { status: 409 },
-    );
-  }
-
   // Recover the propose_send input. Its shape is a SUPERSET-compatible
   // pass-through for send_campaign (both tools accept campaign_id +
   // optional channel + optional only_unsent), so we forward verbatim
@@ -242,128 +220,69 @@ export async function POST(
     }
   }
 
-  // Atomic single-use claim. The `confirmedAt: null` predicate is
-  // what makes this race-safe — two parallel clicks race on the
-  // same row, exactly one wins (count=1), the other gets
-  // already_confirmed. Stamp the time now rather than post-
-  // dispatch so any subsequent arrivals see it immediately.
-  const claim = await prisma.chatMessage.updateMany({
-    where: { id: row.id, confirmedAt: null },
-    data: { confirmedAt: new Date() },
-  });
-  if (claim.count === 0) {
-    // Lost the race. Either a concurrent POST claimed between our
-    // findFirst and this updateMany, or the fast-path check above
-    // missed due to replica lag. Either way the other request is
-    // authoritative; surface already_confirmed.
-    await logAction({
-      kind: "ai.denied.send_campaign",
-      refType: "ChatSession",
-      refId: row.sessionId,
-      actorId: me.id,
-      data: {
-        via: "confirm",
-        reason: "already_confirmed",
-        messageId,
-        raced: true,
-      },
-    });
-    return NextResponse.json(
-      { ok: false, error: "already_confirmed" },
-      { status: 409 },
-    );
-  }
-
-  // We own the claim. From here on, any exit path that doesn't
-  // actually send MUST release the claim (see RELEASABLE_REFUSALS).
   const ctx = await buildToolCtx(me);
-  const result = await dispatch("send_campaign", parsedInput, ctx, {
-    allowDestructive: true,
-  });
 
-  // Classify the outcome. `result.ok` only tells us whether
-  // dispatch reached the handler — a structured refusal
-  // (`return {output: {error: "..."}}`) still lands under
-  // `result.ok === true`. `classifyOutcome` flips to effective
-  // failure when the handler's output carries an error field, and
-  // tells us whether this outcome is safe to release the claim on.
-  const {
-    effectiveOk,
-    effectiveError,
-    shouldReleaseClaim,
-    handlerSummary,
-    output,
-  } = classifyOutcome(result);
-
-  // Release the claim only on a refusal that couldn't have sent
-  // anything (see RELEASABLE_REFUSALS in confirm-classify.ts for
-  // the whitelist rationale). Dispatch-throws (`handler_error:*`)
-  // keep the claim because the throw could have happened inside
-  // sendCampaign's per-invitee loop with partial state.
-  if (shouldReleaseClaim) {
-    await prisma.chatMessage.updateMany({
-      where: { id: row.id },
-      data: { confirmedAt: null },
-    });
-  }
-
-  // Audit reflects the EFFECTIVE outcome. A structured refusal
-  // lands as ok:false with the handler error, so the audit stream
-  // can be scanned for real sends vs refused attempts by a single
-  // data.ok filter.
-  await logAction({
-    kind: "ai.confirm.send_campaign",
-    refType: "ChatSession",
-    refId: row.sessionId,
-    actorId: me.id,
-    data: {
-      via: "confirm",
-      ok: effectiveOk,
-      error: effectiveOk ? null : effectiveError,
-      messageId,
-      sessionId: row.sessionId,
-    },
-  });
-
-  // Summary text for the transcript row. On success, prefer the
-  // handler's summary (it carries "Sent N: E email, S sms" already).
-  // On failure, surface the error code + any handler summary so
-  // the operator reads something actionable in the transcript.
-  const summary = effectiveOk
-    ? (handlerSummary ??
-      (typeof output === "string" ? output : "Send complete."))
-    : `Send refused: ${effectiveError ?? "unknown"}${handlerSummary ? ` — ${handlerSummary}` : ""}`;
-
-  // Persist as a plain assistant text turn. Why not role="tool"?
-  // Because rebuildMessages groups trailing role="tool" rows into
-  // the PRECEDING assistant turn's tool_use blocks (see
-  // src/lib/ai/transcript.ts) — and no assistant turn here actually
-  // called send_campaign. A tool row would fabricate a tool_use the
-  // model never made and derail replay. role="assistant" with plain
-  // text slots in cleanly after the tool-result pseudo-turn emitted
-  // for propose_send, preserving user/assistant alternation.
+  // Hand off to the testable flow core. Ports wire prisma, dispatch,
+  // and the audit logger behind a dependency-injection boundary so
+  // the single-use claim contract is covered by unit tests without
+  // a DB harness (see `tests/unit/confirm-single-use.test.ts`).
   //
-  // We persist on BOTH paths — the operator's transcript should
-  // show that they clicked and what happened.
-  await prisma.chatMessage.create({
-    data: {
-      sessionId: row.sessionId,
-      role: "assistant",
-      content: summary,
-      isError: !effectiveOk,
+  // Binding notes:
+  //   - `claim` MUST preserve the `confirmedAt: null` predicate —
+  //     that's the atomic-claim contract documented on ConfirmPort.
+  //   - `dispatchSend` closes over `allowDestructive: true`; that
+  //     flag is ONLY ever set here, never in the chat route.
+  //   - `auditConfirm` / `auditDenied` both write to `logAction`
+  //     with the same refType/refId/actorId — different kinds so
+  //     the audit stream can be sliced by intent vs denial.
+  const { status, body } = await runConfirmSend(
+    { id: row.id, sessionId: row.sessionId, confirmedAt: row.confirmedAt },
+    messageId,
+    parsedInput,
+    ctx,
+    {
+      claim: () =>
+        prisma.chatMessage.updateMany({
+          where: { id: row.id, confirmedAt: null },
+          data: { confirmedAt: new Date() },
+        }),
+      release: async () => {
+        await prisma.chatMessage.updateMany({
+          where: { id: row.id },
+          data: { confirmedAt: null },
+        });
+      },
+      dispatchSend: (input, c) =>
+        dispatch("send_campaign", input, c, { allowDestructive: true }),
+      persistTranscript: async ({ sessionId, content, isError }) => {
+        // Persist as a plain assistant text turn. Why not role="tool"?
+        // Because rebuildMessages groups trailing role="tool" rows
+        // into the PRECEDING assistant turn's tool_use blocks (see
+        // src/lib/ai/transcript.ts) — and no assistant turn here
+        // actually called send_campaign. A tool row would fabricate
+        // a tool_use the model never made and derail replay.
+        await prisma.chatMessage.create({
+          data: { sessionId, role: "assistant", content, isError },
+        });
+      },
+      auditConfirm: ({ sessionId, data }) =>
+        logAction({
+          kind: "ai.confirm.send_campaign",
+          refType: "ChatSession",
+          refId: sessionId,
+          actorId: me.id,
+          data,
+        }),
+      auditDenied: ({ sessionId, data }) =>
+        logAction({
+          kind: "ai.denied.send_campaign",
+          refType: "ChatSession",
+          refId: sessionId,
+          actorId: me.id,
+          data,
+        }),
     },
-  });
+  );
 
-  if (!effectiveOk) {
-    return NextResponse.json(
-      { ok: false, error: effectiveError, summary },
-      { status: 400 },
-    );
-  }
-
-  return NextResponse.json({
-    ok: true,
-    result: output,
-    summary,
-  });
+  return NextResponse.json(body, { status });
 }
