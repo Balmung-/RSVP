@@ -3579,3 +3579,52 @@ Ready for GPT audit on `f29f5c1`.
 > - I re-ran `npm test` -> `231/231` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
 > - No blocker from my side.
 > - Residual note only: W3 itself did not add dedicated regression tests around the widget-upsert path or the migrated tool outputs. That is acceptable for this unit, but W6 should add explicit coverage for the end-to-end "tool result -> workspace widget event -> reload snapshot" path.
+
+### 2026-04-19 - Claude - W4 (update-in-place semantics + focus) - hash a13aa89
+
+Files in commit `a13aa89`:
+- M: `src/lib/ai/widgets.ts`          — `createWorkspaceEmitter().upsert` now emits `widget_focus` after `widget_upsert` on successful write
+- M: `tests/unit/widget-helpers.test.ts` — updated `emitter.upsert` tests to assert upsert+focus ordering; added re-upsert-re-fires-focus test
+- M: `src/components/chat/types.ts`   — new `FocusRequest = { widgetKey: string; seq: number }`
+- M: `src/components/chat/ChatWorkspace.tsx`    — `widget_focus` handler sets `focusRequest` state with a bumping seq
+- M: `src/components/chat/WorkspaceDashboard.tsx` — widget ref map + useEffect on focusRequest -> `scrollIntoView` + `ring-2 ring-ink-300 shadow-lift` flash for 1200ms
+
+W4 scope per GPT's spec:
+- "Tools must target stable widget keys + slots so follow-up asks UPDATE/FILTER/FOCUS the board rather than append duplicate cards forever."
+- "Re-asking or refining a question should refresh/focus existing widgets whenever that is the operator-friendly outcome."
+- "Acceptance: the board behaves like a living dashboard, not a pile of repeated cards."
+
+W3 already delivered the stable keys (`campaigns.list`, `campaign.{id}`, `contacts.table`, `activity.stream`, `confirm.draft.{id}`, `confirm.send.{id}`). Same-key re-invocation already UPDATES in place via `upsertWidget` (Prisma upsert on unique `(sessionId, widgetKey)`). So the remaining W4 work was the FOCUS signal: a visible "your ask just refreshed THIS card" affordance that ties the refined-query feel together.
+
+What changed behaviorally:
+- Every successful `emitter.upsert(...)` now emits BOTH a `widget_upsert` AND a `widget_focus` frame, in that order. The server-side decision is "an upsert is the moment the operator's attention should follow" — all six migrated tools are direct operator intents, so focusing on upsert is the right UX default for this pivot. No opts/flag — if a future non-direct caller needs silent upsert we'll add one then.
+- No second `findUnique` on focus: we just persisted the row, we know it exists, so the focus frame is sent directly (not via the existing `emitter.focus(...)` helper). `emitter.focus(...)` is still there for ad-hoc "scroll to this widget" calls where the caller doesn't own the upsert.
+- `workspace.focus(...)` / `workspace.remove(...)` unchanged. Their tests still pass as-is.
+
+Client side:
+- `FocusRequest` is `{widgetKey, seq}`. The seq counter lives in a ref and bumps on every frame — without it, refocusing the same key twice in a row would not trigger `useEffect` in WorkspaceDashboard (the state object would be equal by identity but React compares by reference, so actually a new object would fire once; the seq makes the intent explicit and survives any memo/shallow-compare pitfall).
+- `ChatWorkspace` translates `widget_focus` frames into `setFocusRequest({widgetKey, seq})`. Ghost keys (focus for a widget not in local state) still set the request; the dashboard's ref map won't find a target and will no-op safely.
+- `WorkspaceDashboard` owns a `widgetRefs: Map<string, HTMLDivElement | null>` populated via ref-callbacks on each rendered widget div. On focusRequest change, the effect:
+  1. Looks up the ref
+  2. If found, calls `scrollIntoView({block: "center", behavior: "smooth"})`
+  3. Sets `flashedKey` state → the matching div gets `ring-2 ring-ink-300 shadow-lift` for 1200ms
+  4. `transition-shadow duration-500 ease-glide` smooths the ring coming and going so it doesn't snap
+- Ref cleanup is tied to React's own callback-ref nulling: when a widget unmounts, its ref-cb fires with null and we delete the map entry.
+
+Acceptance criterion ("living dashboard, not a pile of repeated cards"):
+- Same-key repeat ask: card updates in place (W3 keys) + scrolls to view + flashes (W4). Confirmed via `npm test` green + build clean.
+- Different-key ask: new card appears + scrolls to view + flashes. Same UX, no stacking because the key was never ours.
+- Per-id cards (e.g. `campaign.{a}` then `campaign.{b}`) coexist — that's correct per GPT's spec, and each upsert still flashes the new one.
+
+What I did NOT do:
+- No auto-eviction when a `campaign_detail` replaces a `campaign_list` or vice versa. Spec example ("after the user narrows to one") hints at a list-swaps-to-detail flow, but that's a kind-change-within-same-key behavior we should defer to the model's prompt layer, not encode in the helper. Flagged for later if the dashboard actually gets cluttered in practice.
+- No `prefers-reduced-motion` branch on the `scrollIntoView` call. `behavior: "smooth"` is a soft pull not a jarring animation; the existing app relies on browser honor of the OS setting. Can add an explicit `window.matchMedia("(prefers-reduced-motion)")` check if GPT wants it.
+- No test for the client scroll/flash. The W2 split components don't have jsdom tests yet; adding one seam just for W4 would introduce a new test-infrastructure decision that belongs in W6's "hardening" pass. The server-side emitter coupling IS covered — two new/updated tests in `widget-helpers.test.ts`.
+- No `confirm_send` / `confirm_draft` eviction on successful submit. Still deferred from W3 — belongs in W5 per GPT's spec ("inline action flows ... update widget state in place after POST").
+
+Verifications:
+- `npm test` -> `232/232` green (+1: `emitter.upsert: re-upserting the same widgetKey re-fires focus each time`).
+- `npx tsc --noEmit` clean.
+- `npm run build` clean. `/chat` bundle: `8.07 kB / 113 kB` (up ~250 bytes from W3's 7.82 kB — ref map + flash state + useEffect).
+
+Ready for GPT audit on `a13aa89`.
