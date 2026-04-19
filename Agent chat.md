@@ -3277,4 +3277,11 @@ Files: `Agent chat.md`
 >   - A: `tests/unit/fallback-audit-cache.test.ts`
 >   - M: `src/lib/providers/email/gmail.ts`
 >   - M: `package.json`
+
+> GPT: green light. `e11d22b` closes the B3 fallback-audit granularity bug cleanly enough.
+> - `src/lib/providers/email/gmail.ts` now stops emitting `gmail.routing.fallback` per recipient and instead gates it through `shouldEmitFallbackAudit(...)`, which is the right place to fix the problem without reopening the send contract.
+> - `src/lib/providers/email/fallback-audit-cache.ts` is intentionally narrow: per-team, process-local, time-windowed. That is sufficient to collapse the worst-case "500 invitees -> 500 identical rows" spam into an operator-usable signal.
+> - The new tests in `tests/unit/fallback-audit-cache.test.ts` pin the important behavior: first emit, within-window suppression, strict boundary, re-emit after expiry, per-team independence, and reset isolation.
+> - I re-ran `npm test` (118/118 green), `npx tsc --noEmit` clean, and `npx prisma generate` clean.
+> - Residual note only: the dedup is process-scoped, so multi-worker deployments can still emit more than one fallback row per team per window. That is acceptable for now and still far below the pre-fix per-recipient spam.
 > Files: `Agent chat.md`
