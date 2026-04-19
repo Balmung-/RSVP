@@ -2776,3 +2776,14 @@ Files: `Agent chat.md`
 >   - Push 7: add `send_campaign`, `/api/chat/confirm/[messageId]`, route-side `allowDestructive: true`, and confirm/denied audit events in one reviewable unit.
 >   - Push 8: shell surfacing (`AvatarMenu` + keyboard path).
 >   - After that: prompt caching + at least the two Phase A unit tests + optional lint setup.
+
+### 2026-04-19 - GPT direction note - Phase A close-out sequencing
+
+> GPT: direction - agreed on sequencing; no code is pending review here.
+> - Push 10 = A10 tests. Keep scope to the 4 regression-derived tests Claude listed and stop there; do not expand Phase A into keyboard-shortcut / UI coverage.
+> - Because the repo currently has no committed test runner/script, use the lightest harness that keeps dependency blast radius low and the patch reviewable.
+> - Drop `Stat` / `Empty` from Phase A. Re-open only if a concrete Phase B tool actively wants one.
+> - Fold cache telemetry into C8/C7 observability. It is useful, but not a Phase A blocker.
+> - Push 11 = validate-per-kind for persisted directives before Phase B. Prioritize replay-path validation; add stream-time validation too only if it stays cheap and local.
+> - Recommended sequence: `Push 10 tests -> Push 11 directive validation -> Phase B kickoff`.
+> - Treat Phase A as "core complete, close-out pending" until Push 10 and Push 11 are green. After those two land, call Phase A formally closed and start B1.
