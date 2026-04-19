@@ -53,16 +53,21 @@ import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 //
 // Prompt caching: we use the SDK beta `messages` namespace
 // (`client.beta.messages`) because `cache_control` on system blocks
-// and tool definitions is only exposed in the beta typings. Two
-// ephemeral breakpoints are placed:
-//   1. After the static system block (role + protocol rules).
-//   2. On the LAST tool definition — marks the END of the cached
-//      prefix, which includes all tools above it.
-// The dynamic system block (tenant context + local date) stays
-// outside the cached prefix: it changes per turn but the whole
-// prefix in front of it is re-used, so for two back-to-back turns
-// in the same 5-minute window we read ~1500 tokens from cache at
-// ~10% of the normal input price.
+// and tool definitions is only exposed in the beta typings.
+//
+// The server hashes the request in a fixed order — `tools → system
+// → messages` — so each breakpoint caches a PREFIX that respects
+// that order, not the order fields appear in this source file. With
+// two ephemeral breakpoints we get two cached prefixes:
+//   - Tool-tail breakpoint (on the LAST tool): caches the tools
+//     block alone (~1000-1200 tokens).
+//   - Static-system breakpoint (on the first system block): caches
+//     tools + static system (~1500-1750 tokens) — the bigger win.
+// The dynamic system block (tenant context + local date) changes
+// per turn and sits OUTSIDE both prefixes; likewise the messages
+// array. For two back-to-back turns in the same 5-minute window we
+// read ~1500 tokens from cache at ~10% of normal input price.
+//
 // The beta namespace also accepts a `betas: [...]` body param so we
 // don't need to add raw headers; `anthropic-beta: prompt-caching-
 // 2024-07-31` is set by the SDK from that param.
@@ -199,11 +204,13 @@ export async function POST(req: Request) {
   // destructive execution.
   //
   // Tool order is stable (governed by the registry's registration
-  // order in `src/lib/ai/tools/index.ts`), so marking the LAST tool
-  // with `cache_control: ephemeral` means the full tool block plus
-  // the preceding static system block form a single ~1500-token
-  // cacheable prefix. When the tool list grows or reorders, the
-  // cache invalidates — expected, and correct.
+  // order in `src/lib/ai/tools/index.ts`). Marking the LAST tool
+  // with `cache_control: ephemeral` caches the full tools block as
+  // a standalone prefix (server-side order is `tools → system →
+  // messages`, so this prefix is tools-only; the larger
+  // tools + static-system prefix is cached by the breakpoint on the
+  // static system block itself, above). If the tool list grows or
+  // reorders, both caches invalidate — expected, and correct.
   const registered = listTools();
   const toolsForApi: BetaTool[] = registered.map((t, idx) => {
     const def: BetaTool = {
