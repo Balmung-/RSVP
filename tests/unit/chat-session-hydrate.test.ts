@@ -1,0 +1,437 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { ChatMessage, ChatSession } from "@prisma/client";
+
+import {
+  hydrateSessionHandler,
+  type HydrateDeps,
+  type HydrateResult,
+  type HydrateResultOk,
+  type HydrateUser,
+} from "../../src/app/api/chat/session/[id]/handler";
+import type { PrismaLike, WidgetRow } from "../../src/lib/ai/widgets";
+
+// Route-level tests for GET /api/chat/session/[id]. The handler is
+// pure — auth + ownership + transcript-UI rebuild + widget snapshot
+// are all wired through injected deps so we can pin every branch
+// without an RSC runtime or a real Prisma:
+//
+//   - 401 unauthorized         -> no user
+//   - 404 not_found (missing)  -> findSession returns null
+//   - 404 not_found (empty id) -> empty path param (defence-in-depth)
+//   - 200 ok (fresh session)   -> empty turns + empty widgets
+//   - 200 ok (transcript rows) -> turns rebuilt via rebuildUiTurns,
+//                                 widgets rebuilt via listWidgets,
+//                                 both with correct content + order
+//   - 200 ok (row cap)         -> sessions with >500 rows keep the
+//                                 newest 500, drop oldest (newest-at-
+//                                 bottom UX)
+//   - 401 short-circuits       -> no DB calls on unauthenticated probe
+//   - 404 short-circuits       -> no transcript / widget read when
+//                                 ownership check fails (info-leak
+//                                 defence: "doesn't exist" and "not
+//                                 yours" must look identical externally)
+//   - widget drift skip        -> broken widget rows counted in
+//                                 `skipped`, NOT returned in `widgets`
+//   - transcript contains a directive -> a directive block is emitted
+//                                 with messageId = tool row id
+
+// ---- helpers ----
+
+const NOW = new Date("2026-04-19T10:00:00Z");
+
+const USER: HydrateUser = { id: "user-1" };
+
+function makeSession(id: string): Pick<
+  ChatSession,
+  "id" | "createdAt" | "updatedAt"
+> {
+  return {
+    id,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
+// Minimal ChatMessage shape the handler projects into UiTranscriptRow.
+type MsgRow = Pick<
+  ChatMessage,
+  | "id"
+  | "role"
+  | "content"
+  | "toolName"
+  | "renderDirective"
+  | "isError"
+  | "createdAt"
+>;
+
+function userMsg(id: string, content: string, atMs = 0): MsgRow {
+  return {
+    id,
+    role: "user",
+    content,
+    toolName: null,
+    renderDirective: null,
+    isError: false,
+    createdAt: new Date(NOW.getTime() + atMs),
+  };
+}
+
+function asstMsg(id: string, content: string, atMs = 0): MsgRow {
+  return {
+    id,
+    role: "assistant",
+    content,
+    toolName: null,
+    renderDirective: null,
+    isError: false,
+    createdAt: new Date(NOW.getTime() + atMs),
+  };
+}
+
+function toolMsg(
+  id: string,
+  name: string,
+  opts: {
+    content?: string;
+    isError?: boolean;
+    renderDirective?: string | null;
+    atMs?: number;
+  } = {},
+): MsgRow {
+  return {
+    id,
+    role: "tool",
+    content: opts.content ?? "",
+    toolName: name,
+    renderDirective: opts.renderDirective ?? null,
+    isError: opts.isError ?? false,
+    createdAt: new Date(NOW.getTime() + (opts.atMs ?? 0)),
+  };
+}
+
+// In-memory PrismaLike that models the (sessionId, widgetKey) unique
+// constraint. Lifted in spirit from widget-helpers.test.ts but
+// slimmed to only the findMany path the hydrate handler touches
+// (listWidgets reads; it never upserts or deletes).
+function makeStubPrisma(initialRows: WidgetRow[] = []): {
+  prismaLike: PrismaLike;
+  rows: WidgetRow[];
+} {
+  const rows = [...initialRows];
+  const prismaLike: PrismaLike = {
+    chatWidget: {
+      async findMany(args) {
+        const filtered = rows.filter((r) => r.sessionId === args.where.sessionId);
+        // listWidgets orders by slot asc, order asc, updatedAt asc.
+        return [...filtered].sort((a, b) => {
+          for (const entry of args.orderBy) {
+            const [key, dir] = Object.entries(entry)[0] as [
+              keyof WidgetRow,
+              "asc" | "desc",
+            ];
+            const av = a[key];
+            const bv = b[key];
+            if (av === bv) continue;
+            const cmp =
+              (av as unknown as number) < (bv as unknown as number) ? -1 : 1;
+            return dir === "asc" ? cmp : -cmp;
+          }
+          return 0;
+        });
+      },
+      async upsert() {
+        throw new Error("upsert should not be called by hydrate handler");
+      },
+      async deleteMany() {
+        throw new Error("deleteMany should not be called by hydrate handler");
+      },
+      async findUnique() {
+        throw new Error("findUnique should not be called by hydrate handler");
+      },
+    },
+  };
+  return { prismaLike, rows };
+}
+
+// Capture-style deps so tests can assert dep usage AND short-circuits.
+// Every dep pushes its inputs onto a trace array — a 401 test then
+// asserts the trace stays empty past the auth check.
+function makeDeps(overrides: {
+  user?: HydrateUser | null;
+  session?: Pick<ChatSession, "id" | "createdAt" | "updatedAt"> | null;
+  messages?: MsgRow[];
+  widgets?: WidgetRow[];
+} = {}) {
+  const findSessionCalls: Array<{ userId: string; sessionId: string }> = [];
+  const findMessagesCalls: string[] = [];
+  const { prismaLike } = makeStubPrisma(overrides.widgets ?? []);
+
+  const user = overrides.user === undefined ? USER : overrides.user;
+  const session =
+    overrides.session === undefined ? makeSession("s-1") : overrides.session;
+  const messages = overrides.messages ?? [];
+
+  const deps: HydrateDeps = {
+    getCurrentUser: async () => user,
+    findSession: async (userId, sessionId) => {
+      findSessionCalls.push({ userId, sessionId });
+      return session;
+    },
+    findMessages: async (sessionId) => {
+      findMessagesCalls.push(sessionId);
+      return messages;
+    },
+    prismaLike,
+  };
+
+  return { deps, findSessionCalls, findMessagesCalls };
+}
+
+function assertOk(r: HydrateResult): HydrateResultOk {
+  assert.equal(r.kind, "ok", `expected ok, got ${r.kind}`);
+  if (r.kind !== "ok") throw new Error("unreachable");
+  return r;
+}
+
+function widgetRow(
+  overrides: Partial<WidgetRow> & {
+    sessionId: string;
+    widgetKey: string;
+    kind: string;
+    slot: string;
+    props: string;
+  },
+): WidgetRow {
+  return {
+    id: overrides.id ?? `w-${overrides.widgetKey}`,
+    sessionId: overrides.sessionId,
+    widgetKey: overrides.widgetKey,
+    kind: overrides.kind,
+    slot: overrides.slot,
+    props: overrides.props,
+    order: overrides.order ?? 0,
+    sourceMessageId: overrides.sourceMessageId ?? null,
+    createdAt: overrides.createdAt ?? NOW,
+    updatedAt: overrides.updatedAt ?? NOW,
+  };
+}
+
+// ---- auth / ownership ----
+
+test("401 when no user session — no DB calls", async () => {
+  // Unauthenticated probe must short-circuit before findSession or
+  // findMessages — a leaky "does this session id exist?" probe would
+  // let an attacker enumerate session ids across tenants.
+  const { deps, findSessionCalls, findMessagesCalls } = makeDeps({
+    user: null,
+  });
+  const r = await hydrateSessionHandler("s-1", deps);
+  assert.equal(r.kind, "error");
+  if (r.kind !== "error") throw new Error("unreachable");
+  assert.equal(r.status, 401);
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.error, "unauthorized");
+  assert.equal(findSessionCalls.length, 0);
+  assert.equal(findMessagesCalls.length, 0);
+});
+
+test("404 when session id is empty string — no DB calls", async () => {
+  // Next routes with a dynamic `[id]` should never hand us an empty
+  // string, but a hand-crafted request could still land here. Match
+  // the not-found response for the ownership-probe defence.
+  const { deps, findSessionCalls, findMessagesCalls } = makeDeps();
+  const r = await hydrateSessionHandler("", deps);
+  assert.equal(r.kind, "error");
+  if (r.kind !== "error") throw new Error("unreachable");
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "not_found");
+  // Short-circuits before getCurrentUser so no trace of the probe
+  // touches the DB either.
+  assert.equal(findSessionCalls.length, 0);
+  assert.equal(findMessagesCalls.length, 0);
+});
+
+test("404 when findSession returns null — no transcript / widget read", async () => {
+  // The ownership check collapses "doesn't exist", "archived", and
+  // "belongs to another user" into one 404 so an attacker can't
+  // probe ids. findMessages MUST NOT run after the 404.
+  const { deps, findSessionCalls, findMessagesCalls } = makeDeps({
+    session: null,
+  });
+  const r = await hydrateSessionHandler("s-foreign", deps);
+  assert.equal(r.kind, "error");
+  if (r.kind !== "error") throw new Error("unreachable");
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "not_found");
+  // findSession ran (once) with the right userId + sessionId.
+  assert.equal(findSessionCalls.length, 1);
+  assert.equal(findSessionCalls[0].userId, USER.id);
+  assert.equal(findSessionCalls[0].sessionId, "s-foreign");
+  // findMessages did NOT run — the ownership check gated it.
+  assert.equal(findMessagesCalls.length, 0);
+});
+
+// ---- happy path: empty session ----
+
+test("200 for a fresh session returns empty turns and empty widgets", async () => {
+  const { deps } = makeDeps();
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.session.id, "s-1");
+  assert.equal(typeof ok.body.session.createdAt, "string");
+  assert.equal(typeof ok.body.session.updatedAt, "string");
+  assert.deepEqual(ok.body.turns, []);
+  assert.deepEqual(ok.body.widgets, []);
+  assert.equal(ok.body.skipped, 0);
+});
+
+// ---- happy path: populated session ----
+
+test("200 rebuilds turns from transcript rows (user -> assistant+tool+directive)", async () => {
+  const { deps } = makeDeps({
+    messages: [
+      userMsg("u1", "show active campaigns", 0),
+      asstMsg("a1", "Looking up:", 100),
+      toolMsg("t1", "list_campaigns", {
+        atMs: 200,
+        renderDirective: JSON.stringify({
+          kind: "campaign_list",
+          props: { items: [{ id: "c1", name: "Royal Dinner" }] },
+        }),
+      }),
+    ],
+  });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.turns.length, 2);
+  assert.equal(ok.body.turns[0].kind, "user");
+  const asst = ok.body.turns[1];
+  assert.equal(asst.kind, "assistant");
+  if (asst.kind !== "assistant") throw new Error("unreachable");
+  // text + pill + directive
+  assert.equal(asst.blocks.length, 3);
+  assert.equal(asst.blocks[0].type, "text");
+  assert.equal(asst.blocks[1].type, "tool");
+  assert.equal(asst.blocks[2].type, "directive");
+  if (asst.blocks[2].type === "directive") {
+    // messageId must be the TOOL row id — that's the anchor
+    // ConfirmSend POST uses, same as the live SSE path.
+    assert.equal(asst.blocks[2].payload.messageId, "t1");
+    assert.equal(asst.blocks[2].payload.kind, "campaign_list");
+  }
+  // Hydrated turns never claim to be streaming.
+  assert.equal(asst.streaming, false);
+});
+
+test("200 surfaces persisted widgets via listWidgets", async () => {
+  // Empty-items props is the smallest VALID campaign_list shape — the
+  // item validator has a ton of required fields (id/name/status/
+  // event_at/venue/team_id/stats.*), and we're testing the hydrate
+  // wiring here, not the per-kind prop validator (that has its own
+  // widget-validate.test.ts).
+  const widget = widgetRow({
+    sessionId: "s-1",
+    widgetKey: "campaign_list:active",
+    kind: "campaign_list",
+    slot: "primary",
+    props: JSON.stringify({ items: [] }),
+    order: 0,
+  });
+  const { deps } = makeDeps({ widgets: [widget] });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.widgets.length, 1);
+  assert.equal(ok.body.widgets[0].widgetKey, "campaign_list:active");
+  assert.equal(ok.body.widgets[0].slot, "primary");
+  assert.deepEqual(ok.body.widgets[0].props, { items: [] });
+  assert.equal(ok.body.skipped, 0);
+});
+
+test("200 counts drifted widget rows in `skipped`, drops them from `widgets`", async () => {
+  // A broken row (bad JSON in `props`) must not blank the dashboard —
+  // listWidgets returns it in `skipped` and suppresses it from the
+  // array. Same read-path fail-closed behavior as the live snapshot.
+  const goodWidget = widgetRow({
+    sessionId: "s-1",
+    widgetKey: "good",
+    kind: "campaign_list",
+    slot: "primary",
+    props: JSON.stringify({ items: [] }),
+  });
+  const brokenWidget = widgetRow({
+    sessionId: "s-1",
+    widgetKey: "broken",
+    kind: "campaign_list",
+    slot: "primary",
+    props: "{not-valid-json",
+  });
+  const { deps } = makeDeps({ widgets: [goodWidget, brokenWidget] });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.widgets.length, 1);
+  assert.equal(ok.body.widgets[0].widgetKey, "good");
+  assert.equal(ok.body.skipped, 1);
+});
+
+test("200 only returns widgets scoped to the requested session", async () => {
+  // Defence-in-depth: even though the ownership check gates the
+  // read, prove the widget query is sessionId-scoped so a leak in
+  // the ownership check can't spray another session's widgets into
+  // the response.
+  const mine = widgetRow({
+    sessionId: "s-mine",
+    widgetKey: "mine",
+    kind: "campaign_list",
+    slot: "primary",
+    props: JSON.stringify({ items: [] }),
+  });
+  const theirs = widgetRow({
+    sessionId: "s-theirs",
+    widgetKey: "theirs",
+    kind: "campaign_list",
+    slot: "primary",
+    props: JSON.stringify({ items: [] }),
+  });
+  const { deps } = makeDeps({
+    session: makeSession("s-mine"),
+    widgets: [mine, theirs],
+  });
+  const r = await hydrateSessionHandler("s-mine", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.widgets.length, 1);
+  assert.equal(ok.body.widgets[0].widgetKey, "mine");
+});
+
+// ---- row cap ----
+
+test("200 trims transcript to HYDRATION_ROW_CAP keeping the newest rows", async () => {
+  // Pathological long session: 600 rows. Cap is 500 — we should keep
+  // rows[100..600] (the last 500). The transform won't be asked to
+  // pair orphan tools at the cut boundary; we intentionally shape
+  // the data so the cut lands between two user messages.
+  const rows: MsgRow[] = [];
+  for (let i = 0; i < 600; i += 1) {
+    rows.push(userMsg(`u-${i}`, `msg ${i}`, i));
+  }
+  const { deps } = makeDeps({ messages: rows });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.turns.length, 500);
+  // The FIRST turn after the cap should be the 100th original (we
+  // dropped 0..99).
+  assert.equal(ok.body.turns[0].id, "u-100");
+  assert.equal(ok.body.turns[499].id, "u-599");
+});
+
+// ---- direct-call assertion: widget-scoped session id ----
+
+test("findSession receives the (userId, sessionId) pair the handler was called with", async () => {
+  const { deps, findSessionCalls } = makeDeps({
+    session: makeSession("s-42"),
+  });
+  await hydrateSessionHandler("s-42", deps);
+  assert.equal(findSessionCalls.length, 1);
+  assert.equal(findSessionCalls[0].userId, USER.id);
+  assert.equal(findSessionCalls[0].sessionId, "s-42");
+});
