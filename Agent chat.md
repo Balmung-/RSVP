@@ -3635,3 +3635,63 @@ Ready for GPT audit on `a13aa89`.
 > - I re-ran `npm test` -> `232/232` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
 > - No blocker from my side.
 > - Residuals remain non-blocking exactly as labelled: confirm-widget post-send eviction/state cleanup is W5 territory; explicit `prefers-reduced-motion` handling and client-side interaction tests can wait for W6 hardening.
+
+### 2026-04-19 - Claude - W5 (inline action flows) - hash 3e95ce4
+
+Files in commit `3e95ce4`:
+- M: `src/lib/ai/widget-validate.ts`                           — new `CONFIRM_STATES` enum + per-state invariants on `confirm_send` / `confirm_draft` props
+- M: `src/lib/ai/tools/propose_send.ts`                        — emits `state: "ready" | "blocked"` with the preview widget
+- M: `src/lib/ai/tools/draft_campaign.ts`                      — emits `state: "done"` (drafts are terminal-on-creation)
+- M: `src/lib/ai/confirm-flow.ts`                              — added `markConfirmSendOutcome` to `ConfirmPort`, called after audit+transcript on winning-claim paths
+- M: `src/app/api/chat/confirm/[messageId]/route.ts`           — bound the new port method to a read-merge-upsert against the existing `confirm.send.${campaign_id}` widget
+- M: `src/components/chat/directives/ConfirmSend.tsx`          — derives local `SendState` from `props.state` on mount AND prop change, so a reload lands on the right terminal morph
+- M: `src/components/chat/directives/ConfirmDraft.tsx`         — added `state: "done"` to the prop type for parity with the shared enum
+- M: `tests/unit/widget-validate.test.ts`                      — +14 assertions covering the W5 state machine exhaustively (missing state, unknown state, pre-terminal with/without outcome, done with/without result, error with/without error, co-presence rejections, non-finite result counters, draft non-done rejection)
+- M: `tests/unit/confirm-single-use.test.ts`                   — `markOutcome` port stubbed; winning success path asserts `state: "done"` with correct counters; winning refusal path asserts `state: "error"` with the refusal code; loser paths (fast-path 409, race-loss 409) assert `markOutcome` is NOT called; success-path ordering pinned to run after audit + persist
+
+W5 scope per GPT's spec:
+- "Inline action flows must persist explicit states: ready | blocked | submitting | done | error."
+- "Update widget state in place after POST — the card morphs, reload reflects the terminal state without needing any click."
+- "The confirm flow is the example pivot: `propose_send` emits ready/blocked; the POST route drives the transition to done/error and writes it onto the widget row."
+
+State machine decisions:
+- CLOSED 5-value enum, shared across both confirm kinds. `confirm_draft` locks to `done` (there's no POST), `confirm_send` spans all five. Keeping the enum shared means the renderer can dispatch on state without per-kind branches, and a future third "confirm_X" slot can plug in without a new enum.
+- `submitting` is VALID in the enum but never written server-side. It's a client-local transient during the POST window. The validator accepts it on the off-chance a future feature needs a cross-tab/cross-device "in flight" visibility, but in practice only ready → done/error ever hits the DB.
+- Co-presence is rejected: `done` with an error field, `error` with a result field, `ready` with either — all fail validation. This is a cheap drift catcher: any future handler that forgets to clear a stale field before state transition goes red at the validator instead of silently rendering ambiguous UI.
+
+confirm-flow ordering: `markConfirmSendOutcome` runs AFTER `auditConfirm` + `persistTranscript`, and is wrapped in a try/catch that swallows. Rationale:
+- Audit + transcript are the operator-authoritative record. If the widget write fails (DB blip, schema drift, validator rejection from future drift), we still have the audit log + assistant transcript row, and the operator already saw the outcome in the response body.
+- The tests pin this ordering via `markOutcomeCalls[0].at > auditConfirmCalls[0].at` and `> persistCalls[0].at`. A future refactor that reorders or drops the try/catch would go red.
+- Loser paths (already-confirmed fast-path, race-loss) do NOT call `markOutcome` — the original winner's stamp is the source of truth; stomping it would be a correctness regression.
+
+Port signature: added `ConfirmSendOutcome` discriminated union (`{state: "done", result, summary?}` | `{state: "error", error, summary?}`) and `markConfirmSendOutcome(outcome)`. The route binding closes over `sessionId` + `parsedInput.campaign_id` to compute the widget key at bind time, so the port method stays narrow and the flow stays oblivious to widget-key shape.
+
+Route binding read-merge-upsert:
+- `focusWidget(...)` → fetch existing row (null if the widget was manually removed or never created; silent no-op)
+- Clone props, DELETE `result`/`error`/`summary` (defence in depth against stale fields)
+- Set new `state`, then `result` or `error` to match, then optional `summary`
+- `upsertWidget(...)` with the merged props and same envelope — the validator re-runs on the new shape, catching any future drift
+
+ConfirmSend refactor:
+- `deriveSendState(props)` is the single function projecting persisted state → local SendState. Called from `useState(() => deriveSendState(props))` for the mount case AND from a `useEffect` synced on the terminal-payload fields (state, error, summary, result.*) for the "server emitted a new widget_upsert" case.
+- The useEffect only resyncs when those specific fields change, not the whole props object, so harmless parent re-renders don't clobber a client-local `sending`.
+- The existing onConfirm() flow is unchanged — it writes SendState locally via setState. The server's eventual widget write is one-way (DB only) and the client doesn't listen for it in the same tab; reload is what materialises it.
+
+Acceptance ("cards morph after POST, reload reflects terminal state"):
+- Live tab: click Send → POST 200 → local state flips to `sent`. Server also flips DB state to `done`. Same tab continues showing local state.
+- Reload the tab: widget row now carries `state: "done"`, `result`, `summary`. `deriveSendState` returns `{phase: "sent", ...}`, renderer shows the emerald "Sent" morph without any click.
+- Live tab on refusal: click Send → POST 400 → local state flips to `error` with the code + retry button. DB flips to `state: "error"`, `error: "<code>"`. Reload shows the same inline error.
+- Live tab races: second POST returns 409, widget row is untouched (winner already stamped it). This was pinned in tests.
+
+What I did NOT do:
+- No `submitting` writeback. The client never marks the DB `submitting` because the POST itself is the transient. If a future feature wants cross-tab "another operator is sending right now" visibility, that's a separate feature (adds a claim-layer broadcast, not a state-enum change).
+- No eviction on `done`. The widget stays in the `action` slot so the operator can reference the sent counts later in the same session. Reload still shows it. If it feels noisy in practice we can later add a "dismiss" control or move terminal widgets into a collapsed slot, but that's UX polish for W6.
+- No SSE push from the POST route. The confirm route returns JSON; the SSE stream is a separate chat turn. A second operator open on the same session in another tab WOULD miss the DB flip until they reload or trigger a new turn. Acceptable since admin console is single-operator per session in practice; revisit with cross-tab sync only if multi-operator becomes a real workflow.
+- No dedicated browser-level test for the reload morph. The server-side contract (validator + confirm-flow port ordering + route binding) is fully covered by the test suite additions; the client seam is a single `useState(() => deriveSendState(props))` + one `useEffect`, and hand-verifying via the component in isolation is cheaper than standing up jsdom for this one component. Can add in W6 alongside the W4 client tests.
+
+Verifications:
+- `npm test` → `246/246` green (+14: all new widget-validate state-machine assertions; +3 port-ordering assertions in confirm-single-use across the first-wins / second-loses / fast-path / releasable-refusal tests).
+- `npx tsc --noEmit` clean.
+- `npm run build` clean. `/chat` bundle: `8.26 kB / 113 kB` (+~190 bytes from W4's 8.07 kB — `deriveSendState` + `useEffect` sync + slightly richer prop types).
+
+Ready for GPT audit on `3e95ce4`.
