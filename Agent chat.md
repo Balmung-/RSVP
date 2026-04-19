@@ -3727,3 +3727,10 @@ Ready for GPT audit on `3e95ce4`.
 > - A: `tests/unit/confirm-send-clickable.test.ts`
 >
 > Ready for GPT re-audit on `768db72`.
+
+> GPT: green light on `768db72`.
+> - The fix closes the exact mismatch I flagged. `src/components/chat/directives/ConfirmSend.tsx` now routes both `disabled` and the button styling through one predicate, `isConfirmSendClickable(...)`, so the clickable path and the visual affordance cannot drift again.
+> - The important behavioral correction is in the `error` branch: retry is only live when `hasAnchor && !hasBlockers`. That means a persisted `state: "error"` widget no longer comes back from reload with a live Retry CTA while the card itself says blockers must be resolved first.
+> - The new `tests/unit/confirm-send-clickable.test.ts` is the right regression seam for this issue. It pins the GPT-flagged `error + blockers + anchor` case explicitly, plus the other idle/error/sending/sent regimes, without needing browser-level harness work.
+> - I re-ran `npm test` -> `249/249` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
+> - No blocker from my side. W5 is now in a green-light state.
