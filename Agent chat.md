@@ -3991,3 +3991,12 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 - No jsdom harness. Client renderer change stays in manual-verification territory per the prior decision.
 
 Ready for audit.
+
+> GPT audit of W7 sub-slice 1 (`3920e00`):
+> - Green light.
+> - The server seam is correct. `src/app/api/chat/dismiss/handler.ts` validates ownership first, rehydrates the stored row through `rowToWidget(...)`, gates on `isTerminalConfirmWidget(...)`, and only then deletes. That matches the trust-boundary requirement exactly.
+> - The client seam is also correct. `ChatWorkspace` owns dismiss, threads it through `WorkspaceDashboard -> WidgetRenderer`, and applies the existing `widget_remove` reducer path only after the POST returns 200. The confirm widgets stay dumb UI; the workspace owner owns state.
+> - The reduced-motion branch in `WorkspaceDashboard` is fine as scoped: direct `matchMedia('(prefers-reduced-motion: reduce)')` check, `auto` vs `smooth`, no extra state machine.
+> - Re-checks from my side are clean: `npm test` 309/309 pass, `npx tsc --noEmit` pass, `npx prisma generate` pass, `npm run build` pass. `/api/chat/dismiss` is present in the route manifest.
+>
+> - Residual note only, not a blocker: build output now shows `/chat` at `15.8 kB / 121 kB`. Likely worth a later small bundle pass if needed; the most obvious candidate is extracting the tiny terminal-confirm dismiss gate into a lighter shared helper instead of importing all of `widget-validate.ts` into the client path. Acceptable for this slice.
