@@ -4426,3 +4426,41 @@ Per GPT's strict 14-phase roadmap, P1 introduces a provider abstraction BEFORE a
 **Why the anthropic wrapper still imports `@anthropic-ai/sdk`:** Only `src/lib/ai/runtime/anthropic.ts` imports the SDK now. The chat route depends on the internal contract. For P2 (OpenRouter), adding a second module and flipping `AI_RUNTIME=openrouter` is sufficient — no route changes required.
 
 Ready for audit.
+
+---
+
+## P10 shipped — Taqnyat SMS provider (commit `7d4b785`)
+
+Per the roadmap's implementation order (P1 → P10 → P11 → P5), P10 adds Taqnyat as a first-class outbound SMS backend. Fits into the existing `src/lib/providers/sms/*` pattern — no abstraction change needed, just a new adapter + factory case.
+
+**What shipped:**
+- `src/lib/providers/sms/taqnyat.ts`:
+  - `taqnyat(token, sender)` returns `SmsProvider` with `name: "taqnyat"` for audit.
+  - Endpoint: `POST https://api.taqnyat.sa/v1/messages` with `Authorization: Bearer <token>`, `Content-Type: application/json`, body `{ recipients: [normalizedTo], body, sender }`.
+  - `normalizeRecipient(raw)` exported for direct test coverage: `+`-strip, `00`-strip, bare digits passthrough, whitespace trim, single-pass (pathological `+00966` → `00966` documented as caller-contract violation).
+  - Success: HTTP 2xx with `statusCode === "201"` OR any 2xx carrying a non-empty identifier. Identifier picked from `messageId | requestId | id` in order — forward as `SendResult.providerId`.
+  - Failure: `statusDescription` / `message` surfaced in `error`; HTTP ≥500 retryable, 4xx not.
+- `src/lib/providers/index.ts`: factory wiring behind `SMS_PROVIDER=taqnyat`. Reads `TAQNYAT_SMS_TOKEN` + `TAQNYAT_SMS_SENDER` through the existing `must()` helper (missing env throws at resolution, same as every other provider).
+
+**Tests (+15, 345 → 360):**
+- `tests/unit/taqnyat-sms.test.ts`:
+  - normalizeRecipient: 5 cases (E.164 strip, `00`-prefix strip, bare digits, trim, single-pass contract).
+  - Request formatting: URL, method, Bearer header, JSON Content-Type.
+  - Request body: normalized recipient + sender + message body.
+  - Success mapping: statusCode=201 → ok:true + providerId=messageId; requestId fallback; 2xx without statusCode but with identifier still succeeds (schema-drift tolerance).
+  - Error mapping: 400 non-retryable with provider message, 401 non-retryable, 500 retryable, unparseable-body → typed error (no throw).
+  - `provider.name === "taqnyat"` pinned for audit attribution.
+
+**Verification:**
+- `npm test` → 360/360 pass
+- `npx tsc --noEmit` clean
+- `npm run build` clean
+- No chat-route / UI impact.
+
+**Not changed (per P10 constraint "no existing SMS behavior changed"):**
+- Twilio / Unifonic / Msegat / Whatsapp-Twilio adapters untouched.
+- `SmsProvider` / `SmsMessage` interfaces unchanged — Taqnyat fits the existing seam.
+- No WhatsApp support yet — P11 handles that via the broader channel/provider seam (WhatsApp template/session/media semantics don't fit `SmsMessage {to, body}`).
+- No delivery webhook / inbound route — P12.
+
+Ready for audit.
