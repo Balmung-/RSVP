@@ -27,6 +27,7 @@
 //     silently. Shouldn't happen in practice; matches transcript.ts.
 
 import type { ChatMessage } from "@prisma/client";
+import { validateDirective } from "./directive-validate";
 
 // UI-shaped block / turn types. DELIBERATELY DUPLICATED from
 // ChatPanel.tsx instead of imported — the panel is a client
@@ -148,41 +149,42 @@ export function rebuildUiTurns(rows: UiTranscriptRow[]): UiTurn[] {
         blocks.push(pill);
 
         // Persisted directive: the tool handler stored this under
-        // `renderDirective` after Push 11 validated the shape.
-        // Absent for tools that don't produce a card; present and
-        // already-validated for every row written from that commit
-        // forward. We re-check the envelope shape here
-        // (defence-in-depth) but DO NOT rerun the per-kind
-        // validator — the renderer already silent-drops unknown
-        // kinds, and the payload went through the validator once on
-        // its way into the DB.
-        const directive = parseJson(tool.renderDirective);
-        if (
-          directive &&
-          typeof directive === "object" &&
-          !Array.isArray(directive)
-        ) {
-          const d = directive as Record<string, unknown>;
-          if (
-            typeof d.kind === "string" &&
-            d.props &&
-            typeof d.props === "object" &&
-            !Array.isArray(d.props)
-          ) {
-            const block: UiAssistantBlock = {
-              type: "directive",
-              payload: {
-                kind: d.kind,
-                props: d.props as Record<string, unknown>,
-              },
-            };
-            // messageId is the anchor ConfirmSend uses to POST
-            // confirmations against. Thread the tool row id — same
-            // contract the live SSE path uses
-            // (`directive.messageId = toolRow.id`).
-            block.payload.messageId = tool.id;
-            blocks.push(block);
-          }
+        // `renderDirective` after Push 11 validated the shape on
+        // WRITE. We revalidate here on the READ path too, because
+        // hydration is the first moment since the write that an
+        // unchecked blob reaches the renderer, and
+        // `DirectiveRenderer` casts `directive.props` straight into
+        // concrete prop types (`CampaignListProps`, `ConfirmSendProps`,
+        // etc.) without a runtime guard. Relying solely on the
+        // write-side gate would leave three holes open:
+        //   - Rows written BEFORE Push 11 landed the strict
+        //     write-side validator (historic session restore).
+        //   - Rows whose kind's prop schema evolved between write
+        //     and read (schema drift).
+        //   - Rows touched by a manual DB repair, an old migration,
+        //     or a future code path that forgets to validate.
+        // `validateDirective` closes all three: it rejects bad
+        // envelopes, unknown kinds, AND shape-invalid props for
+        // known kinds — same behavior as the write path. Any failure
+        // drops the directive block but KEEPS the tool status pill,
+        // so the operator still sees that a tool ran even when its
+        // card can't be safely surfaced.
+        const parsed = parseJson(tool.renderDirective);
+        const validated = validateDirective(parsed);
+        if (validated) {
+          const block: UiAssistantBlock = {
+            type: "directive",
+            payload: {
+              kind: validated.kind,
+              props: validated.props,
+            },
+          };
+          // messageId is the anchor ConfirmSend uses to POST
+          // confirmations against. Thread the tool row id — same
+          // contract the live SSE path uses
+          // (`directive.messageId = toolRow.id`).
+          block.payload.messageId = tool.id;
+          blocks.push(block);
         }
         j += 1;
       }

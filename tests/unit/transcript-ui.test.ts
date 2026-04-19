@@ -31,6 +31,19 @@ import {
 // to read — the `UiTranscriptRow` shape is a narrow Pick of
 // ChatMessage so tests don't need to fabricate the full schema.
 
+// A minimum fully-valid campaign_list item — every field the
+// per-kind validator in `directive-validate.ts` requires. Used where
+// a test needs a directive that SURVIVES the read-path validator.
+const VALID_CAMPAIGN_ITEM = {
+  id: "c1",
+  name: "Royal Dinner",
+  status: "scheduled",
+  event_at: null,
+  venue: null,
+  team_id: null,
+  stats: { total: 0, responded: 0, headcount: 0 },
+};
+
 // ---- row builders ----
 
 function userRow(id: string, content: string): UiTranscriptRow {
@@ -276,7 +289,10 @@ test("rebuildUiTurns: tool row with missing toolName falls back to 'unknown_tool
 test("rebuildUiTurns: tool row with valid renderDirective emits a directive block after its pill", () => {
   const directive = {
     kind: "campaign_list",
-    props: { items: [] },
+    // A fully-shaped item so the read-path validator has something
+    // real to accept — if this test regresses we'll know within
+    // milliseconds of someone widening the prop schema.
+    props: { items: [VALID_CAMPAIGN_ITEM] },
   };
   const turns = rebuildUiTurns([
     assistantRow("a1", "Here you go:"),
@@ -290,11 +306,69 @@ test("rebuildUiTurns: tool row with valid renderDirective emits a directive bloc
   assert.equal(a.blocks[2].type, "directive");
   if (a.blocks[2].type === "directive") {
     assert.equal(a.blocks[2].payload.kind, "campaign_list");
-    assert.deepEqual(a.blocks[2].payload.props, { items: [] });
+    assert.deepEqual(a.blocks[2].payload.props, {
+      items: [VALID_CAMPAIGN_ITEM],
+    });
     // messageId is the tool row id — same anchor the live SSE path
     // threads for ConfirmSend round-trips.
     assert.equal(a.blocks[2].payload.messageId, "t1");
   }
+});
+
+test("rebuildUiTurns: known kind with shape-invalid props DROPS the directive block (pill stays)", () => {
+  // W2 read-path trust-boundary regression. Persisted directives
+  // whose envelope is fine but whose per-kind prop shape is wrong
+  // must not reach the renderer — DirectiveRenderer casts props
+  // straight into concrete types (`CampaignListProps`, etc.) with
+  // no runtime guard, so a drifted row would crash the renderer.
+  //
+  // This covers:
+  //   - Old rows written before Push 11's write-side validator
+  //     landed.
+  //   - Rows whose kind's prop schema evolved between write and
+  //     read (schema drift).
+  //   - Rows touched by manual DB repair / migration.
+  //
+  // The item here is MISSING required fields (`status`, `event_at`,
+  // `venue`, `team_id`, `stats.*`) — envelope is valid, per-kind
+  // shape is not.
+  const directive = {
+    kind: "campaign_list",
+    props: { items: [{ id: "c1", name: "Royal Dinner" }] },
+  };
+  const turns = rebuildUiTurns([
+    assistantRow("a1", "Here you go:"),
+    toolRow("t1", "list_campaigns", {
+      renderDirective: JSON.stringify(directive),
+    }),
+  ]);
+  const a = asAssistant(turns[0]);
+  // text + pill ONLY — directive was dropped, pill preserved so the
+  // operator still sees that a tool ran.
+  assert.equal(a.blocks.length, 2);
+  assert.equal(a.blocks[0].type, "text");
+  assert.equal(a.blocks[1].type, "tool");
+});
+
+test("rebuildUiTurns: unknown kind in renderDirective DROPS the directive block", () => {
+  // Envelope-valid ({kind: string, props: {}}) but `kind` isn't in
+  // the closed registry. The write-side validator would have
+  // rejected this, so a row like this implies DB drift or
+  // tampering — drop it on read to keep the renderer trust
+  // boundary intact.
+  const directive = {
+    kind: "not_a_real_kind",
+    props: { anything: true },
+  };
+  const turns = rebuildUiTurns([
+    assistantRow("a1", ""),
+    toolRow("t1", "list_campaigns", {
+      renderDirective: JSON.stringify(directive),
+    }),
+  ]);
+  const a = asAssistant(turns[0]);
+  assert.equal(a.blocks.length, 1);
+  assert.equal(a.blocks[0].type, "tool");
 });
 
 test("rebuildUiTurns: corrupt renderDirective JSON keeps the pill, drops only the directive block", () => {
@@ -382,7 +456,7 @@ test("rebuildUiTurns: realistic interleave (user, assistant+tool+directive, user
     toolRow("t1", "list_campaigns", {
       renderDirective: JSON.stringify({
         kind: "campaign_list",
-        props: { items: [{ id: "c1", name: "Royal Dinner" }] },
+        props: { items: [VALID_CAMPAIGN_ITEM] },
       }),
     }),
     userRow("u2", "thanks"),

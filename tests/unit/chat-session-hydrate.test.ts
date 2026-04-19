@@ -42,6 +42,20 @@ const NOW = new Date("2026-04-19T10:00:00Z");
 
 const USER: HydrateUser = { id: "user-1" };
 
+// A minimum fully-valid campaign_list item — every field the
+// per-kind validator (`directive-validate.ts`) and the widget prop
+// validator require. Used when a test needs a persisted directive
+// that survives the read-path validator.
+const VALID_CAMPAIGN_ITEM = {
+  id: "c1",
+  name: "Royal Dinner",
+  status: "scheduled",
+  event_at: null,
+  venue: null,
+  team_id: null,
+  stats: { total: 0, responded: 0, headcount: 0 },
+};
+
 function makeSession(id: string): Pick<
   ChatSession,
   "id" | "createdAt" | "updatedAt"
@@ -297,7 +311,12 @@ test("200 rebuilds turns from transcript rows (user -> assistant+tool+directive)
         atMs: 200,
         renderDirective: JSON.stringify({
           kind: "campaign_list",
-          props: { items: [{ id: "c1", name: "Royal Dinner" }] },
+          // A fully-shaped item — the read-path validator in
+          // transcript-ui drops known-kind rows whose item shape is
+          // invalid, so this test would silently lose coverage of
+          // the happy-path directive emission if the item skipped
+          // any required field.
+          props: { items: [VALID_CAMPAIGN_ITEM] },
         }),
       }),
     ],
@@ -322,6 +341,40 @@ test("200 rebuilds turns from transcript rows (user -> assistant+tool+directive)
   }
   // Hydrated turns never claim to be streaming.
   assert.equal(asst.streaming, false);
+});
+
+test("200 drops a hydrated directive whose per-kind props are shape-invalid", async () => {
+  // End-to-end read-path trust-boundary assertion. A persisted
+  // directive with a valid envelope but malformed per-kind props
+  // (missing required item fields) must NOT reach the response —
+  // DirectiveRenderer casts props into concrete prop types, so a
+  // drifted row would crash the renderer after a reload.
+  //
+  // The tool pill survives (operator still sees that a tool ran);
+  // only the directive block is dropped.
+  const { deps } = makeDeps({
+    messages: [
+      asstMsg("a1", "", 0),
+      toolMsg("t1", "list_campaigns", {
+        atMs: 10,
+        renderDirective: JSON.stringify({
+          kind: "campaign_list",
+          // `items[0]` is missing `status`, `event_at`, `venue`,
+          // `team_id`, and `stats.*` — envelope passes, per-kind
+          // validator rejects.
+          props: { items: [{ id: "c1", name: "Royal Dinner" }] },
+        }),
+      }),
+    ],
+  });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.turns.length, 1);
+  const asst = ok.body.turns[0];
+  if (asst.kind !== "assistant") throw new Error("unreachable");
+  // Just the pill — directive dropped.
+  assert.equal(asst.blocks.length, 1);
+  assert.equal(asst.blocks[0].type, "tool");
 });
 
 test("200 surfaces persisted widgets via listWidgets", async () => {
