@@ -1,19 +1,4 @@
 import { NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
-import type {
-  MessageParam,
-  ContentBlock,
-  TextBlock,
-  ToolUseBlock,
-  ToolResultBlockParam,
-} from "@anthropic-ai/sdk/resources/messages";
-import type {
-  BetaMessageParam,
-  BetaRawMessageStreamEvent,
-  BetaTextBlockParam,
-  BetaTool,
-  BetaToolUnion,
-} from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { getCurrentUser } from "@/lib/auth";
 import { rateLimit } from "@/lib/ratelimit";
 import { prisma } from "@/lib/db";
@@ -28,6 +13,15 @@ import { validateDirective } from "@/lib/ai/directive-validate";
 import { createWorkspaceEmitter } from "@/lib/ai/widgets";
 import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
 import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
+import { resolveRuntime } from "@/lib/ai/runtime";
+import type {
+  InternalAssistantContent,
+  InternalMessage,
+  InternalSystemBlock,
+  InternalTool,
+  InternalToolResultBlock,
+  StopReason,
+} from "@/lib/ai/runtime";
 
 // The chat endpoint. Accepts a POST body `{ sessionId?, message }`,
 // authenticates via the usual session cookie, then opens a
@@ -78,14 +72,18 @@ import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
 // confirmation flag flipped after the operator clicks confirm on a
 // previously-proposed directive.
 //
-// Prompt caching: we use the SDK beta `messages` namespace
-// (`client.beta.messages`) because `cache_control` on system blocks
-// and tool definitions is only exposed in the beta typings.
+// Prompt caching: this route marks `cacheBreakpoint: true` on the
+// static system block and the last tool. Providers that support
+// prompt caching (Anthropic, via `src/lib/ai/runtime/anthropic.ts`)
+// translate those flags into real cache boundaries; providers that
+// don't (OpenRouter, arriving in P2) ignore them — correctness
+// unchanged, just fewer savings.
 //
-// The server hashes the request in a fixed order — `tools → system
-// → messages` — so each breakpoint caches a PREFIX that respects
-// that order, not the order fields appear in this source file. With
-// two ephemeral breakpoints we get two cached prefixes:
+// On Anthropic specifically, the server hashes the request in a
+// fixed order — `tools → system → messages` — so each breakpoint
+// caches a PREFIX that respects that order, not the order fields
+// appear in this source file. With two breakpoints we get two
+// cached prefixes:
 //   - Tool-tail breakpoint (on the LAST tool): caches the tools
 //     block alone (~1000-1200 tokens).
 //   - Static-system breakpoint (on the first system block): caches
@@ -94,10 +92,6 @@ import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
 // per turn and sits OUTSIDE both prefixes; likewise the messages
 // array. For two back-to-back turns in the same 5-minute window we
 // read ~1500 tokens from cache at ~10% of normal input price.
-//
-// The beta namespace also accepts a `betas: [...]` body param so we
-// don't need to add raw headers; `anthropic-beta: prompt-caching-
-// 2024-07-31` is set by the SDK from that param.
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -151,13 +145,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "message_too_long" }, { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  // Resolve the AI runtime at request time. `AI_RUNTIME` env flips
+  // the backend (anthropic / openrouter). Resolution returns a
+  // typed failure when the selected backend is missing its API key
+  // or is unknown — we translate to a 503 so the client gets the
+  // same error-code surface as before (the "anthropic_not_configured"
+  // string is preserved for the default/current path).
+  const runtimeResolution = resolveRuntime();
+  if (!runtimeResolution.ok) {
     return NextResponse.json(
-      { ok: false, error: "anthropic_not_configured" },
+      { ok: false, error: runtimeResolution.reason },
       { status: 503 },
     );
   }
+  const runtime = runtimeResolution.runtime;
 
   // Resolve / create the session. Ownership is enforced on load:
   // supplying someone else's session id is treated as
@@ -212,44 +213,37 @@ export async function POST(req: Request) {
   });
   // Two system blocks: static (role / protocol rules) is the
   // cacheable prefix, dynamic (tenant context + local date) is the
-  // per-turn tail. The `cache_control` marker on the static block
-  // tells the API "everything up to AND INCLUDING this block is the
-  // cache key; everything after is fresh input". The dynamic block
-  // carries no marker, so it isn't part of the cached prefix.
-  const systemBlocks: BetaTextBlockParam[] = [
-    {
-      type: "text",
-      text: systemParts.static,
-      cache_control: { type: "ephemeral" },
-    },
+  // per-turn tail. The `cacheBreakpoint` marker on the static block
+  // tells the runtime "everything up to AND INCLUDING this block is
+  // the cache key; everything after is fresh input". The dynamic
+  // block carries no marker, so it isn't part of the cached prefix.
+  // Providers that don't support prompt caching ignore the flag.
+  const systemBlocks: InternalSystemBlock[] = [
+    { type: "text", text: systemParts.static, cacheBreakpoint: true },
     { type: "text", text: systemParts.dynamic },
   ];
 
-  // Build the tools array for Anthropic. We expose every read/write
-  // tool — destructive ones too, since the model is allowed to
-  // PROPOSE them; the dispatch layer intercepts before any
-  // destructive execution.
+  // Build the tools array for the runtime. We expose every
+  // read/write tool — destructive ones too, since the model is
+  // allowed to PROPOSE them; the dispatch layer intercepts before
+  // any destructive execution.
   //
   // Tool order is stable (governed by the registry's registration
   // order in `src/lib/ai/tools/index.ts`). Marking the LAST tool
-  // with `cache_control: ephemeral` caches the full tools block as
-  // a standalone prefix (server-side order is `tools → system →
-  // messages`, so this prefix is tools-only; the larger
-  // tools + static-system prefix is cached by the breakpoint on the
-  // static system block itself, above). If the tool list grows or
-  // reorders, both caches invalidate — expected, and correct.
+  // with `cacheBreakpoint` caches the full tools block as a
+  // standalone prefix on Anthropic (server-side order there is
+  // `tools → system → messages`, so this prefix is tools-only; the
+  // larger tools + static-system prefix is cached by the breakpoint
+  // on the static system block itself, above). If the tool list
+  // grows or reorders, both caches invalidate — expected, and
+  // correct. Providers without caching ignore the flag.
   const registered = listTools();
-  const toolsForApi: BetaTool[] = registered.map((t, idx) => {
-    const def: BetaTool = {
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema as BetaTool["input_schema"],
-    };
-    if (idx === registered.length - 1) {
-      def.cache_control = { type: "ephemeral" };
-    }
-    return def;
-  });
+  const tools: InternalTool[] = registered.map((t, idx) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema as Record<string, unknown>,
+    cacheBreakpoint: idx === registered.length - 1,
+  }));
 
   // Load the recent tail of history, excluding the user message we
   // just wrote (it's appended back below as the live turn opener).
@@ -263,12 +257,10 @@ export async function POST(req: Request) {
   });
   const history = historyDesc.reverse();
   const priorMessages = rebuildMessages(history);
-  const liveMessages: MessageParam[] = [
+  const liveMessages: InternalMessage[] = [
     ...priorMessages,
     { role: "user", content: message },
   ];
-
-  const client = new Anthropic({ apiKey });
 
   // SSE stream. Node's `ReadableStream` is the idiomatic Next.js 14
   // shape; we frame events manually.
@@ -318,97 +310,83 @@ export async function POST(req: Request) {
         await workspace.snapshot();
 
         for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter += 1) {
-          // One round-trip to Anthropic. We stream the response so
-          // text deltas reach the operator immediately; tool_use
+          // One round-trip to the AI runtime. We stream the response
+          // so text deltas reach the operator immediately; tool_use
           // blocks are accumulated until the stream closes, then
           // dispatched in order.
           //
-          // `client.beta.messages.create(...)` + `betas: [...]` is
-          // the SDK's idiomatic way to flip the `anthropic-beta`
-          // header. We pass `liveMessages` through the beta typing
-          // even though it's built with stable `MessageParam` — the
-          // two shapes are structurally identical for the block
-          // kinds we produce (text / tool_use / tool_result).
-          const apiStream = (await client.beta.messages.create({
+          // `runtime.stream(...)` is provider-agnostic: whether the
+          // backend is Anthropic (with prompt caching + beta headers)
+          // or OpenRouter (with OpenAI-compatible tool_calls),
+          // translation lives inside the runtime module and this
+          // route consumes a normalized event sequence.
+          const apiStream = runtime.stream({
             model: MODEL,
-            max_tokens: MAX_TOKENS,
+            maxTokens: MAX_TOKENS,
             system: systemBlocks,
-            tools: toolsForApi as BetaToolUnion[],
-            messages: liveMessages as BetaMessageParam[],
-            stream: true,
-            betas: ["prompt-caching-2024-07-31"],
-          })) as AsyncIterable<BetaRawMessageStreamEvent>;
+            tools,
+            messages: liveMessages,
+          });
 
           // Accumulators for the turn. Indexed by content-block
-          // index because the API interleaves deltas across blocks.
+          // index because the runtime event sequence interleaves
+          // deltas across blocks.
           const blockText = new Map<number, string>();
           const blockToolUse = new Map<
             number,
             { id: string; name: string; partialJson: string }
           >();
-          let stopReason:
-            | "end_turn"
-            | "max_tokens"
-            | "stop_sequence"
-            | "tool_use"
-            | null = null;
+          let stopReason: StopReason = null;
 
           for await (const ev of apiStream) {
-            if (ev.type === "content_block_start") {
-              const block = ev.content_block;
-              if (block.type === "text") {
-                blockText.set(ev.index, "");
-              } else if (block.type === "tool_use") {
-                blockToolUse.set(ev.index, {
-                  id: block.id,
-                  name: block.name,
-                  partialJson: "",
-                });
-              }
+            if (ev.type === "tool_use_start") {
+              blockToolUse.set(ev.index, {
+                id: ev.id,
+                name: ev.name,
+                partialJson: "",
+              });
               continue;
             }
-            if (ev.type === "content_block_delta") {
-              if (ev.delta.type === "text_delta") {
-                const cur = blockText.get(ev.index) ?? "";
-                const next = cur + ev.delta.text;
-                blockText.set(ev.index, next);
-                send("text", { delta: ev.delta.text });
-                continue;
-              }
-              if (ev.delta.type === "input_json_delta") {
-                const cur = blockToolUse.get(ev.index);
-                if (cur) cur.partialJson += ev.delta.partial_json;
-                continue;
-              }
+            if (ev.type === "text_delta") {
+              const cur = blockText.get(ev.index) ?? "";
+              blockText.set(ev.index, cur + ev.text);
+              send("text", { delta: ev.text });
               continue;
             }
-            if (ev.type === "message_delta") {
-              if (ev.delta.stop_reason) stopReason = ev.delta.stop_reason;
+            if (ev.type === "tool_input_delta") {
+              const cur = blockToolUse.get(ev.index);
+              if (cur) cur.partialJson += ev.partialJson;
               continue;
             }
-            // content_block_stop / message_start / message_stop — nothing to do
+            if (ev.type === "stop") {
+              stopReason = ev.reason;
+              continue;
+            }
           }
 
           // Reconstruct the assistant turn's blocks in index order.
           const indices = Array.from(
             new Set([...blockText.keys(), ...blockToolUse.keys()]),
           ).sort((a, b) => a - b);
-          const orderedBlocks: ContentBlock[] = [];
+          const orderedBlocks: InternalAssistantContent = [];
           const textPieces: string[] = [];
           const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
           for (const idx of indices) {
             if (blockText.has(idx)) {
               const text = blockText.get(idx) ?? "";
-              orderedBlocks.push({ type: "text", text } as TextBlock);
+              orderedBlocks.push({ type: "text", text });
               if (text) textPieces.push(text);
               continue;
             }
             const tu = blockToolUse.get(idx);
             if (tu) {
-              let parsed: unknown = {};
+              let parsed: Record<string, unknown> = {};
               if (tu.partialJson.length > 0) {
                 try {
-                  parsed = JSON.parse(tu.partialJson);
+                  const raw = JSON.parse(tu.partialJson);
+                  if (raw && typeof raw === "object") {
+                    parsed = raw as Record<string, unknown>;
+                  }
                 } catch {
                   parsed = {};
                 }
@@ -418,7 +396,7 @@ export async function POST(req: Request) {
                 id: tu.id,
                 name: tu.name,
                 input: parsed,
-              } as ToolUseBlock);
+              });
               toolCalls.push({ id: tu.id, name: tu.name, input: parsed });
             }
           }
@@ -445,7 +423,7 @@ export async function POST(req: Request) {
           // Dispatch tool calls in order. Each one is persisted
           // before the next call so a mid-loop crash still leaves a
           // coherent transcript.
-          const toolResults: ToolResultBlockParam[] = [];
+          const toolResults: InternalToolResultBlock[] = [];
           for (const call of toolCalls) {
             send("tool", { name: call.name, status: "running" });
             const result = await dispatch(call.name, call.input, ctx, {
@@ -522,7 +500,7 @@ export async function POST(req: Request) {
                 renderDirective: directiveForStorage
                   ? safeStringify(directiveForStorage)
                   : null,
-                // Carried through to ToolResultBlockParam.is_error
+                // Carried through to InternalToolResultBlock.is_error
                 // on next-turn replay (src/lib/ai/transcript.ts).
                 // Without this, destructive short-circuits
                 // (`needs_confirmation`) and handler throws would
@@ -655,7 +633,7 @@ export async function POST(req: Request) {
           }
 
           // Feed assistant turn + tool results back for the next
-          // iteration. We use the LIVE Anthropic ids here so the
+          // iteration. We use the LIVE provider ids here so the
           // tool_use/tool_result pairing is self-consistent.
           liveMessages.push(assistantTurnFromBlocks(orderedBlocks));
           liveMessages.push({ role: "user", content: toolResults });
