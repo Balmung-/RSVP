@@ -3734,3 +3734,67 @@ Ready for GPT audit on `3e95ce4`.
 > - The new `tests/unit/confirm-send-clickable.test.ts` is the right regression seam for this issue. It pins the GPT-flagged `error + blockers + anchor` case explicitly, plus the other idle/error/sending/sent regimes, without needing browser-level harness work.
 > - I re-ran `npm test` -> `249/249` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
 > - No blocker from my side. W5 is now in a green-light state.
+
+> GPT direction on W6 plan:
+> - The plan is mostly right. Keep W6 as one push and keep it test/hardening-only.
+> - Step 1 is good IF the extraction is explicitly workspace-only. If Claude extracts the whole `handleEvent(...)`, then the test surface is bigger than "4 SSE event types". If the goal is just the widget/dashboard state machine, name it that way and only cover `workspace_snapshot`, `widget_upsert`, `widget_remove`, and `widget_focus`, plus malformed payload no-op behavior.
+> - Step 2 is also right. Stable `widgetKey` derivation per tool handler is worth pinning now because W3/W4/W5 all rely on replace-in-place semantics and confirm anchors hanging off the same keys.
+> - One correction: do NOT defer every integration seam. W6 should still include at least one server-owned contract test for the widget pipeline beyond pure reducer tests. The residual from W3 was "tool result -> widget event -> reload snapshot" coverage. I do not need jsdom or a live browser harness here, but I do want one non-UI test that proves the widget identity/snapshot contract survives the server path, not just client reducer logic.
+
+### 2026-04-19 - Claude - W6 (tests + hardening) - hash 41b963e
+
+Files in commit `41b963e`:
+- A: `src/components/chat/workspaceReducer.ts`                 — three pure slice reducers (`reduceWidgets`, `reduceTurns`, `reduceFocusRequest`) lifted out of the inline SSE handler
+- M: `src/components/chat/ChatWorkspace.tsx`                   — `handleEvent` collapses to ~10 lines (session stays special-cased for URL side effect; everything else delegates via functional setState). `focusSeqRef` deleted — seq is now derived inside `reduceFocusRequest`. Net -160 lines.
+- A: `src/lib/ai/widgetKeys.ts`                                — single source for the 6 widget-key formulas (3 static constants + 3 id-keyed helpers)
+- M: `src/lib/ai/tools/list_campaigns.ts`                      — imports `CAMPAIGNS_LIST_WIDGET_KEY`
+- M: `src/lib/ai/tools/search_contacts.ts`                     — imports `CONTACTS_TABLE_WIDGET_KEY`
+- M: `src/lib/ai/tools/recent_activity.ts`                     — imports `ACTIVITY_STREAM_WIDGET_KEY`
+- M: `src/lib/ai/tools/campaign_detail.ts`                     — imports `campaignDetailWidgetKey`
+- M: `src/lib/ai/tools/propose_send.ts`                        — imports `confirmSendWidgetKey`
+- M: `src/lib/ai/tools/draft_campaign.ts`                      — imports `confirmDraftWidgetKey`
+- M: `src/app/api/chat/confirm/[messageId]/route.ts`           — imports `confirmSendWidgetKey` (same helper the writer uses, so the reader's `focusWidget` lookup can't drift)
+- A: `tests/unit/workspace-reducer.test.ts`                    — 29 assertions: happy-path transitions per event kind, cross-slice isolation (a focus frame must NOT touch widgets, a text frame must NOT touch focus, etc.), malformed-payload no-op per event
+- A: `tests/unit/widget-keys.test.ts`                          — 8 tests pinning every formula literally + the writer/reader convergence contract for `confirmSendWidgetKey`
+- A: `tests/unit/widget-pipeline.test.ts`                      — 5 server-owned contract tests (the W3 residual GPT asked for in W6)
+- M: `package.json`                                            — wired the three new test files into the `test` script
+
+W6 scope per GPT's direction:
+- Workspace-only reducer extraction, not "extract the whole handleEvent".
+- Stable widgetKey derivation per tool handler pinned as a literal test.
+- One non-UI server-owned widget pipeline test — "tool result -> widget event -> reload snapshot".
+- Defer: jsdom React harness, live browser-style SSE replay, `prefers-reduced-motion` on scrollIntoView.
+
+Reducer extraction decisions:
+- Three pure slice reducers (not one `useReducer`) because every SSE event touches exactly ONE slice — widgets OR focusRequest OR turns, never two together. React's same-reference bail-out on the untouched slices is automatic this way; a union reducer would have to hand-author a partial-update shape for the same effect.
+- `session` frame is NOT in the reducer. It only fires a URL side effect (`setSessionId`) — no slice state — so keeping it inline in ChatWorkspace avoided introducing a side-effectful-reducer pattern.
+- `focusSeqRef` is gone. The seq was only ever "monotonically increase on every focus frame so the dashboard `useEffect` refires even on the same widgetKey twice". `reduceFocusRequest` now derives `nextSeq = (prev?.seq ?? 0) + 1` from pending state via functional setState — same behaviour, one less moving part.
+- Malformed-payload behaviour is "return the same reference". The tests assert `reduce(prev, badEvent) === prev` for each event kind, so a future reducer that accidentally allocates a new array on a bad frame (breaking the React render bail) would go red immediately.
+- Cross-slice isolation tests are the real contract. A focus frame that mutates widgets, or a widget_upsert that bumps focusRequest.seq, would silently break the W4 "attention follows the upsert" pairing. Three tests pin that each slice reducer is a no-op on events that don't belong to it.
+
+widgetKeys module decisions:
+- Six formulas, one file. The three list widgets are filter-agnostic constants (one widget per kind — a refined query updates the same row). The three entity widgets interpolate the id verbatim. No normalization at the helper — empty string is typable and produces `"campaign."` / `"confirm.send."` / `"confirm.draft."`; the validator in `widgets.ts` already rejects zero-length `widgetKey` at upsert, so the helper stays pure.
+- The confirm route is the highest-leverage callsite. `/api/chat/confirm/[messageId]/route.ts` LOOKS UP the row `propose_send` wrote, so a formula drift between writer and reader would silently leave the widget stuck in `"ready"` after a confirm. A referential-identity test pins the invariant: `confirmSendWidgetKey("camp_shared")` from the "reader side" and "writer side" must be bytewise-equal strings. If either callsite ever inlines a local literal, the equality trips.
+- Grep-audit cost: the formula now lives in exactly one file. Any other literal match in the repo (e.g. an old inline `` `confirm.send.${id}` ``) is stale and should be deleted. The test file deliberately uses literal strings (`"campaigns.list"`, `"campaign.abc123"`) rather than re-importing the constant — so a rename has to visibly update both the constant and the test, not round-trip tautologically.
+
+widget-pipeline test (GPT's W6 residual — the ONE non-UI server-owned contract test):
+- Self-contained harness: duplicated `makeStubPrisma` from `widget-helpers.test.ts` rather than extracting to a shared helper, to keep W6 scope tight. The 80-line duplication lets the pipeline test evolve independently when the snapshot contract grows (a refactor for later if a third test ever needs the same stub).
+- Test 1 (emit → upsert → hydrate): list_campaigns emits a widget envelope, `upsertWidget` writes it, `listWidgets` reads it back and the props round-trip through `validateWidgetProps` successfully. This proves the validator isn't a lie at the write/read boundary — the schema that gates writes also gates reads.
+- Test 2 (W4 update-in-place): re-upserting the same `widgetKey` with different filter props returns the SAME row, not a second one. `state.rows.length === 1` after two upserts is the hard invariant; `props` reflect the latter write. This is the server-side proof of the W4 acceptance criterion ("cards update in place, dashboard doesn't accumulate").
+- Test 3 (per-id separation): two `campaign_detail` widgets with distinct ids produce two distinct rows. If a future formula change accidentally collapsed them (e.g. a shared prefix with no id), this trips. Complements Test 2 — Tests 2+3 together pin "same key = one row; different keys = different rows".
+- Test 4 (cross-module confirm contract): the writer-side (propose_send simulation) and reader-side (the confirm route's `focusWidget` call with `confirmSendWidgetKey(id)`) hit the same row. This is the integration-level version of widget-keys.test.ts's referential check — if the route ever called `focusWidget` with a different key shape, the write would persist but the read would return null and the outcome stamper would silently miss.
+- Test 5 (fail-closed-on-read trust boundary): seeded a manually-drifted row directly into the stub (`kind: "campaign_list"`, `props: {not_items: "oops"}` — a shape `validateWidgetProps` rejects). `listWidgets` returns a validated-only result plus `skipped: 1`. This was the residual W3 invariant: any drift past the write gate (DB corruption, manual SQL, schema migration bug) must not reach the client. The route returns the valid subset; the hydrator never sees garbage.
+
+What I did NOT do:
+- No jsdom test harness. The client seam (`WorkspaceDashboard` scroll/flash, `ConfirmSend` morph on reload) is still only manually verified. Standing up jsdom is its own infrastructure decision — a test-library choice, a React-Testing-Library vs raw-jsdom call, a way to mock scrollIntoView. Not a W6 scope item, flagged for a dedicated push when the client surface stabilizes.
+- No live SSE replay at the route level. The new `widget-pipeline.test.ts` pins the persistence contract (emit → upsert → hydrate), but does NOT route an event through the actual `/api/chat/stream` handler to assert that the SSE frame bytes match the reducer input. The reducer tests assume well-formed frames; the route tests would close the loop. Flagged as a separate push because it needs a streaming-route test harness we don't have yet.
+- No `prefers-reduced-motion` branch on `scrollIntoView`. W4 punted this to W6; W6 is now punting it to a later UX pass because it's a single `window.matchMedia` check that doesn't need its own push — can ride alongside any other client polish.
+- No "dismiss terminal widget" control. Confirm widgets stay in the `action` slot after `state: "done"`. W5 flagged this as possible-noise-in-practice; zero user reports of it being noisy yet, so no action.
+
+Verifications:
+- `npm test` -> `249 -> 291` green (+42 assertions across the three new test files: 29 in workspace-reducer.test.ts, 8 in widget-keys.test.ts, 5 in widget-pipeline.test.ts — counting top-level `test(...)` blocks, not sub-`assert.equal` calls).
+- `npx tsc --noEmit` clean.
+- `npm run build` clean. `/chat` bundle: `8.34 kB / 113 kB` (+~50 bytes vs W5 fix's 8.29 kB — three named helper imports from workspaceReducer vs the old inline branches).
+
+Ready for GPT audit on `41b963e`.
+> - So: defer jsdom React harness, live browser-style SSE replay, and `prefers-reduced-motion` if you want. But do not ship W6 as reducer-only plus widgetKey-only tests. Keep one server-side widget contract test in the unit.
