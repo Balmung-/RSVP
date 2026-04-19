@@ -4464,3 +4464,54 @@ Per the roadmap's implementation order (P1 → P10 → P11 → P5), P10 adds Taq
 - No delivery webhook / inbound route — P12.
 
 Ready for audit.
+
+---
+
+## P11 shipped — WhatsApp channel seam + Taqnyat WhatsApp provider (commit `3988559`)
+
+Per the roadmap's explicit "do NOT cram this into `SmsProvider` forever" constraint, WhatsApp gets its own channel interface + adapter folder. The existing `whatsapp-twilio` `SmsProvider` alias is RETAINED for callers that haven't migrated — it works for session-text only and ignores template discipline, documented as a known limitation of that legacy path.
+
+**What shipped:**
+- `src/lib/providers/types.ts` — new channel types:
+  - `WhatsAppTextMessage { kind: "text", to, text }` — valid only inside the 24h session window; Meta's policy rejection bubbles up via the adapter's error string (we don't track session state here).
+  - `WhatsAppTemplateMessage { kind: "template", to, templateName, languageCode, variables? }` — required to start a business-initiated conversation.
+  - `WhatsAppMessage = text | template` discriminated union.
+  - `WhatsAppProvider { readonly name, send(msg): Promise<SendResult> }`.
+  - Media messages DEFERRED; adding a `WhatsAppMediaMessage` variant later is a non-breaking type extension.
+- `src/lib/providers/whatsapp/taqnyat.ts`:
+  - `taqnyatWhatsApp({ token, templateNamespace? })` returns the channel provider with `name: "taqnyat-whatsapp"`.
+  - Endpoint: `POST https://api.taqnyat.sa/wa/v2/messages/` with Bearer + JSON.
+  - Reuses `normalizeRecipient` imported from the SMS adapter (shared `+`/`00`-strip format per Taqnyat docs).
+  - `buildRequestBody(to, msg, templateNamespace?)` exported for direct unit coverage:
+    - text → Meta session-text shape (`messaging_product: "whatsapp"`, `recipient_type: "individual"`, `type: "text"`, `text: { body }`).
+    - template → Meta template shape with `name` + `language.code` + positional `body` parameters when `variables` is non-empty. `components` absent entirely when no variables (not an empty array).
+    - `namespace` included in `template` only when a non-empty namespace is passed.
+  - Response: primary identifier from Meta envelope `messages[0].id`, tolerant fallbacks (`messageId` / `requestId` / `id`); 2xx without any identifier is treated as FAILURE — we refuse to fabricate a providerId that delivery webhooks couldn't resolve downstream.
+  - Error classification: HTTP ≥500 retryable, 4xx not. Nested `error.message` from Meta's envelope surfaced in the error string.
+- `src/lib/providers/whatsapp/stub.ts`: dev/test stub returning a synthetic id. Does not enforce template/session rules — those live on Meta's side.
+- `src/lib/providers/index.ts`:
+  - New `getWhatsAppProvider()` reading `WHATSAPP_PROVIDER` (default: stub). `taqnyat` requires `TAQNYAT_WHATSAPP_TOKEN`; `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` is optional.
+  - New `_resetProvidersForTests()` clears the cached singletons so env-flipping tests don't get stale resolutions.
+
+**Tests (+16, 360 → 376):**
+- `tests/unit/taqnyat-whatsapp.test.ts`:
+  - buildRequestBody (4): session text shape, template without vars (no components array), template with vars (ordered BODY parameters), namespace only when non-empty.
+  - send transport (8): URL + Bearer + Content-Type, number normalization `+966 → 966`, Meta envelope id extraction, top-level `messageId` fallback, 400 non-retryable surfaces nested `error.message`, 500 retryable, 2xx-without-any-identifier rejected, `provider.name === "taqnyat-whatsapp"`.
+  - factory (3): default=stub when unset, `taqnyat` resolves with token set, missing `TAQNYAT_WHATSAPP_TOKEN` throws with env name in message (same `must()` pattern as email/SMS).
+  - type discipline (1): compile-time pin that the union discriminant survives refactors.
+
+**Verification:**
+- `npm test` → 376/376 pass
+- `npx tsc --noEmit` clean
+- `npm run build` clean
+- `/chat` bundle unchanged at 16.4 kB / 121 kB — no UI impact.
+
+**Not changed (per P11 constraint "respect Taqnyat/Meta conversation rules; do not pretend WhatsApp is plain SMS"):**
+- The legacy `whatsapp-twilio` `SmsProvider` alias in `getSmsProvider()` is left as-is. Migrating callers to `getWhatsAppProvider()` is out of scope — P13 (orchestration polish) is the natural place to sweep them.
+- No media upload/send path — deferred per the roadmap.
+- No delivery/inbound webhooks — P12.
+
+**Known limitation (documented, not a blocker):**
+- Session-window state isn't tracked client-side. A caller sending a `text` message outside the 24h window will get a non-retryable Meta policy error surfaced verbatim. Future work: track last-inbound-from-user per-recipient and pick template vs text automatically.
+
+Ready for audit.
