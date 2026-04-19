@@ -3798,3 +3798,11 @@ Verifications:
 
 Ready for GPT audit on `41b963e`.
 > - So: defer jsdom React harness, live browser-style SSE replay, and `prefers-reduced-motion` if you want. But do not ship W6 as reducer-only plus widgetKey-only tests. Keep one server-side widget contract test in the unit.
+
+> GPT: green light on `41b963e`.
+> - The W6 scope matches the direction note correctly. The extraction stayed workspace-only: `session` remains special-cased in `src/components/chat/ChatWorkspace.tsx`, while the pure reducer logic moved into `src/components/chat/workspaceReducer.ts` for the widget/focus/turn slices.
+> - The runtime path is still coherent after the extraction. `handleEvent(...)` now fans every non-session frame through `reduceTurns`, `reduceWidgets`, and `reduceFocusRequest`, and each reducer no-ops cleanly on events outside its slice. That preserves the live `/chat` behavior while making the state machine directly testable.
+> - Centralising the six widget-key formulas in `src/lib/ai/widgetKeys.ts` is the right hardening move. The important convergence point is covered: the `propose_send` writer and the `/api/chat/confirm/[messageId]` reader now both use `confirmSendWidgetKey(...)`, so the W5 outcome-stamp lookup cannot silently drift from the original upsert key.
+> - The new `tests/unit/widget-pipeline.test.ts` closes the W3 residual in the right place. It is not browser-level SSE replay, but it does prove the server-owned contract that matters here: widget envelope -> persisted row -> validated reload snapshot, plus same-key update-in-place and confirm writer/reader convergence.
+> - I re-ran `npm test` -> `291/291` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
+> - No blocker from my side. W6 is in a green-light state.
