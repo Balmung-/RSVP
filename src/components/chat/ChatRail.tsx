@@ -5,26 +5,37 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type KeyboardEvent,
 } from "react";
 import clsx from "clsx";
 import { DirectiveRenderer } from "./DirectiveRenderer";
 import type { AssistantTurn, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
+import {
+  appendReference,
+  formatFileReference,
+  uploadErrorMessage,
+  type UploadResponse,
+} from "./uploadReference";
+import { Icon } from "@/components/Icon";
 
 // The left rail: transcript + composer. Display-only; all state and
 // the actual send / SSE plumbing sits in ChatWorkspace, which hands
 // us `turns`, the current `input` value + setter, and an `onSend`
 // callback.
 //
-// Two behaviors live here because they're specifically UI concerns:
-//   1. Auto-pin to bottom when `turns` grows. The rail is a scrolling
-//      column; without this nudge, a new token delta pushes unread
-//      text below the fold on long transcripts.
-//   2. Enter-to-send, Shift+Enter for newline. Standard chat UX; the
-//      composer is keyboard-first.
+// Behaviors that live here because they're specifically UI concerns:
+//   1. Auto-pin to bottom when `turns` grows.
+//   2. Enter-to-send, Shift+Enter for newline.
+//   3. Upload affordance (P5-followup) — POSTs the picked file to
+//      /api/uploads and appends a short reference token to the
+//      composer. Extraction happens server-side; the token is just a
+//      human-visible anchor so the operator can refer to the file
+//      in prose. Local state only: upload errors and in-flight
+//      status never leak into the session's `topError`.
 //
-// Everything else (POST, session id, SSE parsing, workspace events)
+// Everything else (session POST, SSE parsing, workspace events)
 // belongs to ChatWorkspace so the rail stays reusable if we ever
 // need a chat-only view.
 
@@ -46,6 +57,9 @@ export function ChatRail({
   onSend: () => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     const el = listRef.current;
@@ -54,6 +68,44 @@ export function ChatRail({
   }, [turns]);
 
   const canSend = phase === "idle" && input.trim().length > 0;
+  const canUpload = phase === "idle" && !uploading;
+
+  const handleFilePick = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      setUploadError(null);
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("kind", "doc");
+        const res = await fetch("/api/uploads", {
+          method: "POST",
+          body: form,
+          credentials: "same-origin",
+        });
+        const body = (await res.json()) as UploadResponse;
+        if (!res.ok || !body.ok) {
+          const message =
+            !body.ok && typeof body.error === "string" ? body.error : `HTTP ${res.status}`;
+          setUploadError(message);
+          return;
+        }
+        const ref = formatFileReference(body.filename, body.ingest);
+        setInput(appendReference(input, ref));
+      } catch (err) {
+        setUploadError(uploadErrorMessage(err));
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    },
+    [input, setInput],
+  );
+
+  const triggerFilePicker = useCallback(() => {
+    if (!canUpload) return;
+    fileInputRef.current?.click();
+  }, [canUpload]);
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -109,8 +161,51 @@ export function ChatRail({
         </div>
       )}
 
+      {uploadError && (
+        <div className="px-4 pb-2">
+          <div className="rounded-md border border-amber-200 bg-amber-50 text-amber-800 text-sm px-3 py-2 flex items-center justify-between gap-2">
+            <span>
+              {fmt.locale === "ar" ? "تعذّر الرفع" : "Upload failed"} — {uploadError}
+            </span>
+            <button
+              type="button"
+              onClick={() => setUploadError(null)}
+              className="text-amber-700 hover:text-amber-900"
+              aria-label={fmt.locale === "ar" ? "إغلاق" : "Dismiss"}
+            >
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="border-t border-slate-200 bg-white px-4 py-3">
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleFilePick(file);
+          }}
+        />
         <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={triggerFilePicker}
+            disabled={!canUpload}
+            title={fmt.locale === "ar" ? "رفع ملف" : "Upload file"}
+            aria-label={fmt.locale === "ar" ? "رفع ملف" : "Upload file"}
+            className={clsx(
+              "rounded-md px-2 py-2",
+              canUpload
+                ? "text-slate-600 hover:bg-slate-100"
+                : "text-slate-300 cursor-not-allowed",
+            )}
+          >
+            <Icon name={uploading ? "spinner" : "upload"} size={18} className={uploading ? "animate-spin" : undefined} />
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
