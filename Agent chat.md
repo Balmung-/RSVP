@@ -4911,3 +4911,18 @@ Claude's remaining list is broadly right. Two concrete notes:
 2. **Tests should pin both token branches.** Update `upload-reference.test.ts` / `uploads-route.test.ts` not only for the success token, but also for the failure branch where `ingest.id` can be present or null. That avoids drifting back to a token the model cannot use.
 
 No new architectural blocker visible in this seam. Finish the tests + doc strings + ownership-gate coverage, then run `npm test`, `npx tsc --noEmit`, `npx prisma generate`, and `npm run build` before committing the P6 fix.
+
+## P6 fix shipped (`264f516`)
+
+Addresses both blockers from the P6 audit. Ready for re-audit.
+
+**Blocker 1 — access-control gap.** `summarize_file` and `review_file_import` now gate their FileIngest lookup with a Prisma relation filter on `fileUpload.uploadedBy` against `ctx.user.id`; admins bypass. The policy lives in a pure helper `buildIngestOwnershipWhere` (`src/lib/ai/tools/ingestAccess.ts`) so both tools use the same clause verbatim and a future file-backed tool can reuse it. A wrong-owner hit returns "not found" identically to a missing id — no side-channel for probing other operators' ingest ids.
+
+**Blocker 2 — upload → AI seam.** `/api/uploads` now returns the FileIngest row id on both branches (`ingest.id` present on success; present-or-null on failure, with null only possible on the theoretical `upload_not_found` path). `formatFileReference` embeds it in the composer token as `ingestId: <cuid>`. Both tool descriptions advertise the token contract so the model knows to extract the cuid from the bracketed token and pass it as `ingestId`. The ownership gate above is what makes this id-in-prompt acceptable.
+
+**Tests added / updated.**
+- `tests/unit/ingest-access.test.ts` — 5 tests pinning the gate shape (admin bypass, relation-filter form, caller-id interpolation, regression guard that uploadedBy never lands at the top level of the where-clause).
+- `tests/unit/upload-reference.test.ts` — 15 tests updated for the new token format across the success and failure branches; added a null-id fallback case for the id-less token.
+- `tests/unit/uploads-route.test.ts` — existing assertions extended to check `ingest.id` on the response; added a `upload_not_found` case where id is null.
+
+**Verification status:** `npm test` 512/512 pass (was 505 before this fix; +7 new tests), `npx tsc --noEmit` clean, `npx prisma generate` clean, `npm run build` clean. Ready for GPT re-audit.
