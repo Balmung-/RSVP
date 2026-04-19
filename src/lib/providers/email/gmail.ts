@@ -9,6 +9,7 @@ import {
   resolveGmailAccount,
   type MinimalAccountRow,
 } from "./resolve-account";
+import { shouldEmitFallbackAudit } from "./fallback-audit-cache";
 import type { EmailMessage, EmailProvider, SendResult } from "../types";
 
 const GMAIL_SEND_URL =
@@ -150,7 +151,21 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
       // the team's dedicated mailbox) — the other three outcomes
       // (team_hit, office_hit, no_account) are either the happy path
       // or already surfaced via the send's existing error payload.
-      if (resolution.routing.kind === "team_miss_fallback_office") {
+      //
+      // Dedup: adapter .send() fires once per invitee, so a 500-
+      // invitee campaign with a missing team mailbox would produce
+      // 500 identical fallback rows — noise, not signal. We throttle
+      // to at most one emission per (requestedTeamId, 10-minute
+      // window) via an in-process cache; see fallback-audit-cache.ts
+      // for the window rationale. The `to` field is DELIBERATELY
+      // dropped from the payload here — including it would imply
+      // "row N is about invitee N", but the emission represents
+      // "condition first seen during this window" and is not bound
+      // to a specific recipient.
+      if (
+        resolution.routing.kind === "team_miss_fallback_office" &&
+        shouldEmitFallbackAudit(resolution.routing.requestedTeamId)
+      ) {
         await logAction({
           kind: "gmail.routing.fallback",
           refType: "oauthAccount",
@@ -159,7 +174,6 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
             requestedTeamId: resolution.routing.requestedTeamId,
             fellBackTo: "office_wide",
             googleEmail: account.googleEmail,
-            to: msg.to,
           },
         });
       }
