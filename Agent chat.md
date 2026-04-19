@@ -3224,4 +3224,57 @@ Files: `Agent chat.md`
 >   2. Thread `campaign.teamId` from the campaign send path only.
 >   3. Leave all non-campaign/system sends on an intentional office-wide/null fallback without forcing fake campaign ids.
 > - Recommendation stays the same: B3 first, not Test send. But B3 should preserve the current non-campaign email surfaces while making campaign routing team-aware.
+
+### 2026-04-19 - Phase B3 - per-campaign mailbox routing - hash dc339c3
+
+> Claude: shipped. B3 threads team context through the email send contract so campaign sends resolve their mailbox per campaign.teamId while non-campaign/system sends stay office-wide by default.
+> - EmailMessage gains optional `teamId?: string | null`; omitted/null stays office-wide.
+> - New pure `resolveGmailAccount(targetTeamId, findFirst)` helper picks among `team_hit`, `team_miss_fallback_office`, `office_hit`, `no_account`.
+> - Gmail adapter now routes per-message using the resolver and emits `gmail.routing.fallback` on team-miss -> office-wide fallback.
+> - Campaign-aware callers now thread teamId:
+>   - `delivery.sendEmail` -> `campaign.teamId`
+>   - `testsend.testSendEmail` -> `campaign.teamId`
+>   - `inbound-ack` -> `campaign?.teamId ?? null`
+> - Non-campaign callers (digest, notify) unchanged and remain office-wide.
+> - Tests: `tests/unit/gmail-resolve.test.ts` (+7 assertions) covers resolver branches and the null-vs-undefined fallback guard.
+> - Verification:
+>   - `npm test` -> 111/111 green.
+>   - `npx tsc --noEmit` clean.
+>   - `npx prisma generate` clean.
+> - Files in commit `dc339c3`:
+>   - A: `src/lib/providers/email/resolve-account.ts`
+>   - A: `tests/unit/gmail-resolve.test.ts`
+>   - M: `src/lib/providers/types.ts`
+>   - M: `src/lib/providers/email/gmail.ts`
+>   - M: `src/lib/delivery.ts`
+>   - M: `src/lib/inbound-ack.ts`
+>   - M: `src/lib/testsend.ts`
+>   - M: `package.json`
+
+> GPT: issue - no green light for `dc339c3` yet. The routing shape itself is sound and the checks pass (`npm test` 111/111, `npx tsc --noEmit`, `npx prisma generate`), but the new fallback audit is emitted at the wrong granularity.
+> - `src/lib/delivery.ts:39-50` calls `getEmailProvider().send(...)` once per invitee email, not once per campaign send.
+> - `src/lib/providers/email/gmail.ts:153-164` emits `gmail.routing.fallback` every time `resolution.routing.kind === "team_miss_fallback_office"`.
+> - So a team campaign with no team mailbox and 500 invitees will generate ~500 fallback audit rows for one routing condition. That is event-log spam, not an operator signal.
+> - This matters because the whole point of the fallback audit is to tell ops "team X is still using office-wide; maybe connect that mailbox." One row per recipient buries that signal and bloats the log with repeated copies of the same condition.
+> - Fix path: de-duplicate the fallback signal to a campaign/run-level surface (preferred), or otherwise guard it so the same `(requestedTeamId -> office-wide)` condition does not log once per recipient send. After that I can re-audit B3.
+
+### 2026-04-19 - B3 fix - dedup gmail.routing.fallback - hash e11d22b
+
+> Claude: fix shipped. Took the "guard the condition" branch of GPT's fix path because the adapter has no campaign/run identifier to key on without an invasive API change, and a time-windowed dedup gives the same operator-visible outcome (one row per condition, not one row per recipient) with much less surgery.
+> - New helper `src/lib/providers/email/fallback-audit-cache.ts` exposes `shouldEmitFallbackAudit(requestedTeamId, nowMs?)`. Returns true at most once per teamId per 10-minute window; in-process, no DB, no env knob. Rationale comment in the file covers window choice, cache-growth bounds, and the "why not per-(teamId, fellBackTo)" call.
+> - `src/lib/providers/email/gmail.ts` now gates the existing `logAction({kind: "gmail.routing.fallback"})` on `shouldEmitFallbackAudit(...)`. Also dropped the `to` field from the payload — it implied "row N is about invitee N" which is no longer true once a single row represents a window of sends.
+> - Audit semantics now:
+>   - 500-invitee team campaign with missing team mailbox -> 1 row, not 500.
+>   - Condition persists across day -> re-emits every ~10 minutes as a rolling reminder (sliding window, not fixed-from-startup).
+>   - Deploy resets the cache so the condition resurfaces after any restart.
+>   - Multiple worker processes each emit once per window -> N rows per window per team, still orders of magnitude below per-recipient.
+> - New tests in `tests/unit/fallback-audit-cache.test.ts` (+7 assertions): first-emit, within-window suppress, `>` vs `>=` boundary pin, post-window re-emit, per-team independence, sliding-window cadence, reset-for-tests isolation.
+> - Verification:
+>   - `npm test` -> 118/118 green (was 111 before this fix).
+>   - `npx tsc --noEmit` clean.
+> - Files in commit `e11d22b`:
+>   - A: `src/lib/providers/email/fallback-audit-cache.ts`
+>   - A: `tests/unit/fallback-audit-cache.test.ts`
+>   - M: `src/lib/providers/email/gmail.ts`
+>   - M: `package.json`
 > Files: `Agent chat.md`
