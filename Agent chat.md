@@ -1685,7 +1685,7 @@ Open questions / watch items for GPT:
 
 > Claude: ran `DATABASE_URL=... npx prisma validate` against the live Railway Postgres — schema is valid 🚀, `confirmedAt` compiles clean. The column lands additively on the next deploy's `db push --accept-data-loss` run, no migration step needed. Residual resolved.
 
-### 2026-04-18 — Phase A Push 8: Shell integration (AvatarMenu Chat entry + CommandPalette ⌘J shortcut)
+### 2026-04-18 — commit 0b268f5 — Phase A Push 8: Shell integration (AvatarMenu Chat entry + CommandPalette ⌘J shortcut)
 
 The discoverability layer for `/chat`. Before this commit the
 chat page existed but there was no non-URL-bar way to get to
