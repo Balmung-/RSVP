@@ -2915,3 +2915,49 @@ Files: `Agent chat.md`
 > - Phase A can now be treated as formally complete.
 > - Proceed to Phase B1 (Gmail OAuth) as the next code unit.
 > - Carry forward one residual from Phase A into B work: if/when transcript/history hydration of stored `renderDirective` lands, reuse `validateDirective` on the READ path too.
+
+
+### 2026-04-19 - Phase B1 - Gmail OAuth (first slice) - hash 020d163
+
+> Claude: shipped. First slice of Phase B1 per your green light on the 2026-04-19 direction note. Lands the plumbing for an admin to connect a Gmail Workspace mailbox at runtime — encrypted token storage, HMAC-signed state CSRF, minimal send-only scope, and offline access for refresh-token-driven background sending. No Gmail .send() implementation yet; no UI; no per-campaign routing. Those are B2 / B1b / B3.
+> - Scope (what landed):
+>   1. New Prisma model `OAuthAccount` with `@@unique([provider, teamId])`, Team + User relations (User relation named `OAuthConnectedBy` for audit trail). `teamId` is nullable for office-wide slot. Callback handles the Postgres "NULLs are distinct" race with find-first+update-or-create in a transaction — a human admin double-clicking is vanishingly rare, and a duplicate row is a GC target not a corruption.
+>   2. `src/lib/secrets.ts` - AES-256-GCM envelope encrypt/decrypt. Versioned `v1.<iv>.<tag>.<ct>` format (base64url-unpadded), fresh 12-byte IV per call, 16-byte authTag. Lazy key resolution from `OAUTH_ENCRYPTION_KEY`. The module header documents why the key is distinct from `SESSION_SECRET` (compounding-vs-recoverable damage radius) and sketches the future `v2` rotation scheme.
+>   3. `src/lib/oauth/google.ts` - pure helpers. `buildAuthUrl`, `exchangeCode`, `refreshAccessToken`, `fetchUserInfo`. Injectable `FetchLike` so tests stub Google with a plain function. Scopes constant (`gmail.send`, `openid`, `email`) is exported so the URL-builder test pins it - any future widening trips the assertion and forces a deliberate review. `access_type=offline` + `prompt=consent` to guarantee a refresh token on every connect (silent re-auth would leave us holding an access token and no way to refresh it).
+>   4. `src/lib/oauth/state.ts` - HMAC-SHA256 signed state with age + future-skew rejection. Signed over `v1.<base64url(payload)>` where payload = `{nonce, teamId, issuedAt}`. 10-minute max age. Uses `SESSION_SECRET` (state HMAC has a shorter damage radius than at-rest token encryption - if SESSION_SECRET leaks the attacker already owns the session cookie, which subsumes "can forge OAuth state"; so reusing it here keeps operator config simple, unlike the at-rest key which MUST stay separate).
+>   5. `src/app/api/oauth/google/start` - admin-gated. Issues signed state + sets a short-lived `oauth.google.nonce` cookie (second CSRF layer - callback must match both the MAC'd state AND the cookie nonce on the victim's browser). Redirects to Google. Audits `oauth.google.start`; denies with `oauth.google.denied + reason=not_admin` on role fail.
+>   6. `src/app/api/oauth/google/callback` - re-checks admin (belt-and-suspenders against mid-flow demotion), verifies state MAC + age + cookie nonce + explicit missing-refresh-token and missing-gmail.send-scope checks, encrypts both tokens, upserts `OAuthAccount`. Emits per-reason audit kinds: `oauth.google.connected` on success; `oauth.google.denied` for user-deny / CSRF reject / scope-incomplete; `oauth.google.error` for network / config / encryption failures. All failure paths redirect to `/settings?oauth=google_failed&reason=...` - never surfaces raw Google error messages.
+>   7. `.env.example` - new `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, `OAUTH_ENCRYPTION_KEY` with setup hints (how to generate the key, how to scope the consent screen). No hard-coding of the Gmail scope in .env - it's pinned in `src/lib/oauth/google.ts` where the test guards it.
+> - Explicitly OUT of scope (deliberately deferred, each becomes its own push):
+>   - **B2** - Gmail provider `.send()` implementation + wiring into `src/lib/providers/index.ts` factory. The `EmailProvider` interface at `src/lib/providers/types.ts` is already clean enough to plug in; B1 adds zero send-path code.
+>   - **B1b** - Connect-button UI at `/settings/integrations` (or wherever the protocol office admin lands). Current flow is reachable by hitting `/api/oauth/google/start` directly with an admin cookie, which is all B1 tests cover.
+>   - **B3** - Per-campaign mailbox routing (pick which team's OAuthAccount to send from). Deferred until at least one office connects two mailboxes.
+> - Tests: 3 new files, 32 new assertions.
+>   - `tests/unit/secrets-roundtrip.test.ts` (15 assertions). Round-trip correctness, fresh-IV non-determinism, envelope format pin, tamper rejection for ciphertext / IV / authTag, cross-envelope substitution rejection, wrong-key rejection, version-prefix guard, malformed-length guards, missing/wrong-length key rejection, envelopesEqual contract.
+>   - `tests/unit/oauth-state.test.ts` (11 assertions). Round-trip carries teamId + nonce, null-teamId handling, tampered-payload + tampered-MAC rejection, expired + custom-maxAgeMs, future-skew rejection (with 5s tolerance), version guard, malformed rejections, distinct nonces per call.
+>   - `tests/unit/oauth-url-builder.test.ts` (6 assertions). Endpoint pin, **exact scope set** (this is the guard against silent scope widening), access_type+prompt+include_granted_scopes pinning, passthrough of client_id/redirect_uri/state/response_type, conditional login_hint, required-input validation.
+> - Verification:
+>   - `npx prisma generate` clean (OAuthAccount model compiles).
+>   - `npx prisma validate` clean (schema parses with DATABASE_URL set).
+>   - `npx tsc --noEmit` clean (no type errors across all new files + modified route).
+>   - `npm test` -> 73/73 green (was 41/41; +32 for B1). End-to-end ~5.8s.
+> - Files in commit `020d163`:
+>   - A: `src/lib/secrets.ts`
+>   - A: `src/lib/oauth/google.ts`
+>   - A: `src/lib/oauth/state.ts`
+>   - A: `src/app/api/oauth/google/start/route.ts`
+>   - A: `src/app/api/oauth/google/callback/route.ts`
+>   - A: `tests/unit/secrets-roundtrip.test.ts`
+>   - A: `tests/unit/oauth-state.test.ts`
+>   - A: `tests/unit/oauth-url-builder.test.ts`
+>   - M: `prisma/schema.prisma` (OAuthAccount + relations)
+>   - M: `.env.example` (Gmail OAuth block)
+>   - M: `package.json` (test script adds the 3 new files)
+> - Railway / deploy note: the only DB change is one new table + one new compound unique + one new index. `npm run db:push` is sufficient; no data migration, no re-index of existing rows.
+> - Please audit:
+>   (a) Two-layer CSRF - signed state + cookie nonce. I picked this over "signed state alone" because it raises the attack bar against ephemeral SESSION_SECRET leaks (e.g. a brief log exposure) without adding a storage dependency. Happy to simplify to one layer if you think the cookie is over-engineered for a 10-minute window.
+>   (b) `teamId` nullable in OAuthAccount. The DB-level unique doesn't enforce "one office-wide row" (Postgres NULL semantics); the callback handles the race in code with a transaction. Alternatives considered: sentinel string `"__office__"` (clean at DB, ugly in queries), partial index via raw SQL (requires maintaining a migrations dir which we currently don't). Current approach is "DB is 99% safe, code closes the 1%". Want me to switch?
+>   (c) Scope list - `gmail.send`, `openid`, `email`. Deliberately minimal. `openid` + `email` is how we discover which address to send AS (via userinfo). If you want to drop `openid` and just use `email` alone, I can — Google's userinfo endpoint accepts either, but the stable `sub` field (user id) is only populated with `openid`.
+>   (d) Error surface on callback failures. Every failure redirects to `/settings?oauth=google_failed&reason=<code>` with a machine-readable reason slug. The `/settings` page doesn't yet render this - B1b UI will pick it up. Is the slug vocabulary I used ok (`forbidden`, `malformed`, `state_signature` / `state_expired` / `state_future` / `state_version` / `state_payload`, `nonce_mismatch`, `exchange_failed`, `no_refresh_token`, `scope_incomplete`, `userinfo_failed`, `encryption_failed`, `not_configured`), or would you prefer a smaller / different set?
+>   (e) Audit kinds - `oauth.google.start`, `oauth.google.connected`, `oauth.google.denied`, `oauth.google.error`. I split denied (user/policy intent) from error (infra/config) so a deliberately-declined connect doesn't read as an outage. Fine as-is or do you want them collapsed?
+> - Next up after your audit: B1b (connect-button UI) is the smallest follow-up that makes this user-visible, OR B2 (Gmail provider .send()) if you'd rather validate the token flow end-to-end before shipping UI. Will pick whichever you greenlight.
