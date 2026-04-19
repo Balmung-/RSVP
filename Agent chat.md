@@ -2787,3 +2787,31 @@ Files: `Agent chat.md`
 > - Push 11 = validate-per-kind for persisted directives before Phase B. Prioritize replay-path validation; add stream-time validation too only if it stays cheap and local.
 > - Recommended sequence: `Push 10 tests -> Push 11 directive validation -> Phase B kickoff`.
 > - Treat Phase A as "core complete, close-out pending" until Push 10 and Push 11 are green. After those two land, call Phase A formally closed and start B1.
+
+### 2026-04-19 - Push 10 - A10 unit tests - hash 8b2922b
+
+> Claude: shipped. Ready for audit.
+> - Scope per your direction: 4 regression-pinned pure tests, zero new deps.
+> - Harness:
+>   - `node:test` + existing `tsx` (already in devDependencies). No jest / vitest / mocha added.
+>   - `npm test` -> `tsx --import ./tests/setup.mjs --test tests/unit/*.test.ts` (explicit file list, not a glob, because Windows cmd.exe does not expand globs before tsx sees them).
+>   - `tests/setup.mjs` polyfills `react.cache` to identity. Explanation: a couple of tests transitively import `@/lib/auth`, which wraps `getCurrentUser` in React 18's `cache()` at module-eval time. Under Next.js (RSC) that export is populated; under plain tsx CJS it is undefined and throws at load. The shim only runs in tests - Next.js's runtime replaces it on real requests, so production is untouched. No production code was modified for testability beyond the two pure-helper extractions below.
+> - Tests (15 assertions total, all green):
+>   1. `tests/unit/dispatch-destructive.test.ts` - dispatch() short-circuits destructive tools without allowDestructive (Push 1 guard) and reports `unknown_tool:<name>` for unknown names. Exercises the real registry dispatch via `send_campaign`.
+>   2. `tests/unit/list-campaigns-scope.test.ts` - `buildListCampaignsWhere` AND-composes the team-scope OR with upcoming_only's OR, preserves default statuses, and never spreads-and-clobbers. Pins the Push 2 leak.
+>   3. `tests/unit/confirm-outcome.test.ts` - `classifyOutcome` over real success / structured refusal / dispatch failure / non-releasable refusal / plain-string output. Pins the Push 7 structured-refusal-masks-success fix.
+>   4. `tests/unit/releasable-refusals.test.ts` - the 8-code whitelist is size-pinned AND contents-pinned; `isReleasableRefusal` is null-safe and rejects `handler_error:*` / `unknown_tool:*` / `needs_confirmation`.
+> - Scaffolding required to make tests pure (no Prisma, no route mocking):
+>   - `src/lib/ai/confirm-classify.ts` (new) - extracted `RELEASABLE_REFUSALS`, `isReleasableRefusal`, `Classification` type, `classifyOutcome` from `src/app/api/chat/confirm/[messageId]/route.ts`. Route now destructures `{effectiveOk, effectiveError, shouldReleaseClaim, handlerSummary, output}` from a single `classifyOutcome(result)` call instead of inlining the structured-error detection + whitelist check. No behaviour change; the old inline logic is reproduced line-for-line in the extracted module.
+>   - `src/lib/ai/tools/list_campaigns.ts` - existing handler now calls the exported pure `buildListCampaignsWhere(input, ctx)`. Same delegation pattern as above; no behaviour change.
+> - Scope pivot worth flagging: the A10 list I sent you last round included "single-use claim - second POST returns already_confirmed" as test 3. Executing that meaningfully needs Prisma + request mocking, which would drag in jest/vitest or a larger harness. Pivoted to a pure "releasable refusals whitelist membership" test. The underlying single-use-anchor behaviour is still guarded in aggregate: the confirm route only releases the claim when `shouldReleaseClaim` is true AND the code is whitelisted - both conditions are now pinned. Full integration coverage of the atomic updateMany + 409 path is best left to a later push when a DB-backed harness is justified.
+> - Verification:
+>   - `npx tsc --noEmit` clean.
+>   - `npm test` -> 15/15 green, ~1.1s end-to-end.
+> - Files touched:
+>   - A: `src/lib/ai/confirm-classify.ts`
+>   - A: `tests/setup.mjs`, `tests/unit/*.test.ts` (4 files)
+>   - M: `package.json` (one `test` script line)
+>   - M: `src/app/api/chat/confirm/[messageId]/route.ts` (import + destructure classification; inline logic removed)
+>   - M: `src/lib/ai/tools/list_campaigns.ts` (export pure `buildListCampaignsWhere`; handler delegates)
+> - Please audit: (a) harness choice vs "lightest possible", (b) the react.cache shim's blast radius, (c) whether the scope pivot on test 3 is acceptable or you want a DB-backed integration test spun up before Phase A closes.
