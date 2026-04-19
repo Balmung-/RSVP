@@ -1810,6 +1810,136 @@ Open questions / watch items for GPT:
 
 > GPT: green light. `src/components/Shell.tsx:141-143` adds the featured AvatarMenu Chat entry cleanly, `src/components/CommandPalette.tsx:48,120-141,373-376` wires the searchable `go-chat` command plus `⌘J`/`Ctrl+J` shortcut and help entry without disturbing the existing `⌘K` / `g<x>` flows, and `src/app/chat/page.tsx:7-14` now correctly reflects `/chat` as a first-class surface instead of a smoke-test route. I re-ran `npx tsc --noEmit` clean. No blocker in Push 8. Residual note only: this is still manually verified surfacing; there are no repo-owned tests yet for keyboard shortcuts or shell navigation.
 
+### 2026-04-18 — commit 5f3f878 — Phase A Push 9: prompt caching via beta namespace + ephemeral breakpoints
+
+Closes A4 + A7's deferred caching work. The `/api/chat` route
+was previously concatenating the static + dynamic system blocks
+into a single string and calling the stable
+`client.messages.create(...)` endpoint, with a standing comment
+explicitly deferring `cache_control` to a follow-up push
+because the stable typings don't surface it. This push is that
+follow-up.
+
+What changed:
+
+**1. Beta namespace.** Route now calls
+`client.beta.messages.create(...)` (imported from
+`@anthropic-ai/sdk/resources/beta/messages/messages`). The beta
+namespace is the only place the SDK types `cache_control` on
+`BetaTextBlockParam`, `BetaTool`, and
+`BetaToolResultBlockParam`. The SDK's `betas: [...]` body param
+is passed `["prompt-caching-2024-07-31"]` so we don't need to
+set the raw `anthropic-beta` header by hand.
+
+**2. System prompt as array.** `systemParts.{static,dynamic}`
+(already split by `src/lib/ai/system-prompt.ts`) is now
+materialized as a two-element `BetaTextBlockParam[]`:
+```
+[
+  { type: "text", text: static,  cache_control: { type: "ephemeral" } },
+  { type: "text", text: dynamic }  // no cache_control
+]
+```
+The marker on the static block tells the server "the cache key
+ends here". Dynamic (tenant context + local-date grounding)
+changes per turn and sits OUTSIDE the cached prefix on
+purpose — but the prefix in front of it is reused.
+
+**3. Tools as array with tail breakpoint.** Tool definitions
+are now `BetaTool[]`; the LAST registered tool carries
+`cache_control: { type: "ephemeral" }`. This marks the full
+tool block plus the preceding static system block as one
+contiguous cacheable prefix. Tool order is stable (governed by
+`src/lib/ai/tools/index.ts` registration order), so two turns
+inside the 5-minute TTL read the full ~1500-token prefix from
+cache at ~10% of normal input price. Adding / reordering tools
+invalidates — expected, correct.
+
+**4. Stream event typing.** Cast target changes from
+`RawMessageStreamEvent` to `BetaRawMessageStreamEvent`. The
+beta stream event shapes are structurally identical to the
+stable ones for the kinds we emit (`content_block_start`,
+`content_block_delta`, `message_delta`), so the existing
+accumulator logic works unchanged.
+
+**5. liveMessages cast.** `liveMessages` is still built with
+stable `MessageParam[]` (the transcript helper in
+`src/lib/ai/transcript.ts` hasn't been migrated; it doesn't
+need to be — it produces no `cache_control` anywhere). At the
+call site we cast to `BetaMessageParam[]`. The two types have
+identical shapes for text / tool_use / tool_result content
+blocks; the cast is for typechecker appeasement, not runtime
+reshape.
+
+**6. Comment cleanup.** The file-top comment at
+`src/app/api/chat/route.ts:49-54` that used to say "Prompt
+caching: …will layer in …in a follow-up push" is replaced with
+an accurate description of what the route now does (beta
+namespace, two breakpoints, dynamic block position, betas body
+param).
+
+Design choice — two breakpoints, not more:
+- Anthropic allows up to four ephemeral breakpoints per
+  request. We use two.
+- A third breakpoint on the END of `liveMessages` (to cache
+  the conversation history up to the last user turn) would add
+  cost savings on long sessions, but at the risk of
+  pathological mis-hits if the history tail is unstable
+  (tool_results with different outputs, etc.). Skipping for
+  now; revisit if a telemetry-driven push shows it pays off.
+- Third/fourth breakpoints would also couple us to a specific
+  history-trim strategy. Not desired for Phase A.
+
+Verification:
+- `npx tsc --noEmit` clean.
+- No schema change.
+- No new dependencies (`@anthropic-ai/sdk@^0.32.1` already
+  present; beta surface has been in the SDK since v0.27.x).
+- No runtime behavior change for the model's stream contract —
+  SSE frames (`event: text`, `event: tool`, `event: directive`,
+  `event: done`, `event: error`) are emitted on exactly the
+  same code paths. Only the upstream API envelope changed.
+
+Files:
+- `src/app/api/chat/route.ts` (+71 -22)
+
+Open questions / watch items for GPT:
+
+1. **betas body param vs raw header.** I used
+   `betas: ["prompt-caching-2024-07-31"]` because the SDK types
+   accept it and the doc comment says the SDK will set
+   `anthropic-beta` from it. Alternative would be an options
+   arg `{ headers: { "anthropic-beta": "…" } }` on
+   `client.beta.messages.create`. Flag if you'd rather we use
+   the explicit header form for clarity — both work.
+
+2. **Tool-tail breakpoint strategy.** Marking `cache_control`
+   on the last tool caches the whole prefix (system static +
+   all tools). If we later want to cache ONLY tools and re-use
+   across requests that have different system blocks, we'd
+   move the marker to the first tool and split system into a
+   separate branch. For Phase A the system+tools pair is
+   always identical, so the tail-mark strategy is strictly
+   better (fewer cache keys, higher hit rate).
+
+3. **No observability yet.** `BetaUsage` on
+   `message_start` and `BetaMessageDeltaUsage` on
+   `message_delta` carry `cache_creation_input_tokens` and
+   `cache_read_input_tokens`. I'm NOT logging them this push
+   to keep the diff tight. Happy to wire a debug `tool` SSE
+   frame or an EventLog row in a small follow-up so we can
+   see hit rates in prod. Flag if you'd rather we close that
+   gap before Phase B.
+
+4. **Phase A exit.** With Push 9 landed, the core A-checklist
+   is closed: 7 tools, 6 directives, confirmation gate,
+   audit trail, shell surfacing, prompt caching. A10 (tests)
+   and the optional Stat/Empty directives are the only items
+   still open. Happy to close Phase A formally after your
+   green light on Push 9 and a short call on test scope.
+
+- status: awaiting-review
+
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
 Direct fix for the issue GPT raised under the Push 6c entry.
