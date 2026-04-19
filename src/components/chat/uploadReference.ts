@@ -8,14 +8,19 @@
 // Reference-token design note: we intentionally do NOT inject the
 // extracted text into the composer. P5's constraint is that file
 // contents never go straight into a prompt; they pass through
-// extraction + bounded summarization first. The token is just a
-// human-visible anchor the operator can refer to in their prompt
-// ("summarize the uploaded file") — the server-side tool that
-// reads the ingest record is a P6 follow-up.
+// extraction + bounded summarization first. The token carries two
+// things:
+//   - a HUMAN-readable anchor the operator can reference in prose
+//     ("summarize the uploaded file"), and
+//   - a MACHINE-readable `ingestId=<cuid>` handle the model extracts
+//     to pass into `summarize_file` / `review_file_import`. Without
+//     the id the model would only see a filename and could not call
+//     either tool — the ownership gate on those tools is what makes
+//     the id safe to put on the wire.
 
 export type UploadResponseIngest =
-  | { ok: true; kind: string; bytesExtracted: number }
-  | { ok: false; kind: string; reason: string; error?: string };
+  | { ok: true; id: string; kind: string; bytesExtracted: number }
+  | { ok: false; id: string | null; kind: string; reason: string; error?: string };
 
 export type UploadResponse =
   | { ok: true; id: string; url: string; filename: string; ingest: UploadResponseIngest }
@@ -25,12 +30,17 @@ export function formatFileReference(filename: string, ingest: UploadResponseInge
   if (ingest.ok) {
     const kind = shortKind(ingest.kind);
     const size = formatBytes(ingest.bytesExtracted);
-    return `[file: ${filename} — ${kind}, ${size} extracted]`;
+    return `[file: ${filename} — ${kind}, ${size} extracted, ingestId: ${ingest.id}]`;
   }
   // Upload succeeded, extraction did not — still tell the operator
   // the file exists. `reason` is one of the IngestOutcome reasons
   // (`extraction_failed`, `unsupported`); keep it verbatim so the
-  // surface mirrors the server's vocabulary.
+  // surface mirrors the server's vocabulary. Include the ingestId
+  // when present so the model can still call `summarize_file` and
+  // get a structured failure widget rather than being stuck.
+  if (ingest.id) {
+    return `[file: ${filename} — ${ingest.reason}, ingestId: ${ingest.id}]`;
+  }
   return `[file: ${filename} — ${ingest.reason}]`;
 }
 

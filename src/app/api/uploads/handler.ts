@@ -28,8 +28,8 @@ export interface UploadsDeps {
 }
 
 export type UploadsIngestResult =
-  | { ok: true; kind: string; bytesExtracted: number }
-  | { ok: false; kind: string; reason: string; error?: string };
+  | { ok: true; id: string; kind: string; bytesExtracted: number }
+  | { ok: false; id: string | null; kind: string; reason: string; error?: string };
 
 export type UploadsResult =
   | {
@@ -85,10 +85,22 @@ export async function uploadsHandler(req: Request, deps: UploadsDeps): Promise<U
   // ingest.ok=false and can decide whether to retry or prompt the
   // operator for a different file.
   const outcome = await deps.extractFromUpload(saved.id);
+  // P6-fix — surface the FileIngest row id. Tools like `summarize_file`
+  // and `review_file_import` take an ingestId as input, and the chat
+  // upload affordance is the only place the operator sees it. Forward
+  // `outcome.id` for both branches so the reference token can include
+  // it; the "upload_not_found" branch is the one case where id is
+  // null, but that cannot happen here (we just stored the upload).
   const ingest: UploadsIngestResult = outcome.ok
-    ? { ok: true, kind: outcome.kind, bytesExtracted: outcome.bytesExtracted }
+    ? {
+        ok: true,
+        id: outcome.id,
+        kind: outcome.kind,
+        bytesExtracted: outcome.bytesExtracted,
+      }
     : {
         ok: false,
+        id: outcome.id,
         kind: outcome.kind,
         reason: outcome.reason,
         ...(outcome.error ? { error: outcome.error } : {}),

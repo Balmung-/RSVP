@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { fileDigestWidgetKey } from "../widgetKeys";
+import { buildIngestOwnershipWhere } from "./ingestAccess";
 import type { ToolDef, ToolResult } from "./types";
 import type { ToolWidget } from "./types";
 
@@ -142,7 +143,7 @@ export function buildSummarizeFileResult(
 export const summarizeFileTool: ToolDef<Input> = {
   name: "summarize_file",
   description:
-    "Summarise a file the operator has uploaded. Pass the ingest id returned by the upload route (or surfaced in a prior chat turn). Renders a file_digest workspace widget with filename, format, extracted size, and a bounded preview of the extracted text. For structured imports (CSV contacts / invitee lists), prefer review_file_import instead.",
+    "Summarise a file the operator has uploaded. The ingest id is surfaced in the user's composer as a bracketed token of the form `[file: <filename> — <kind>, <size> extracted, ingestId: <cuid>]` (or `[file: <filename> — <reason>, ingestId: <cuid>]` when extraction failed but the ingest row exists) — extract the cuid from there. Renders a file_digest workspace widget with filename, format, extracted size, and a bounded preview of the extracted text. For structured imports (CSV contacts / invitee lists), prefer review_file_import instead.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -166,9 +167,14 @@ export const summarizeFileTool: ToolDef<Input> = {
     }
     return { ingestId: r.ingestId.trim() };
   },
-  async handler(input): Promise<ToolResult> {
-    const ingest = await prisma.fileIngest.findUnique({
-      where: { id: input.ingestId },
+  async handler(input, ctx): Promise<ToolResult> {
+    // Ownership gate — non-admins can only read ingests tied to
+    // FileUpload rows they themselves uploaded. Admins see everything.
+    // Filtering at the Prisma level means a mismatched-owner lookup
+    // returns the same "not found" response as a genuinely-missing id,
+    // so the tool never leaks whether an id exists under another user.
+    const ingest = await prisma.fileIngest.findFirst({
+      where: buildIngestOwnershipWhere(input.ingestId, ctx),
       select: {
         id: true,
         fileUploadId: true,

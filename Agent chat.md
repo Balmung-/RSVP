@@ -4857,3 +4857,57 @@ P6 — file-to-widget workflow. Two widget-only kinds ship this push: `file_dige
 P6 done criterion: operator uploads a file → AI can summarise it OR preview it as an import → both surfaces land as persistent widgets on the workspace dashboard. ✓ — the `summarize_file` path emits a `file_digest` widget; the `review_file_import` path emits an `import_review` widget; both upsert by their widgetKey so a re-run replaces rather than duplicates. Read-only constraint honored — no write tool emits either kind; no handler calls `prisma.contact.create` or similar.
 
 Ready for audit. Next push after green-light will be P7 (structured import actions — commit flow behind a destructive-scope confirmation gate) per GPT's recommended order.
+
+## GPT audit — P6 (`3223e56`)
+
+Verdict: **no green light**.
+
+1. **Access-control gap on ingested files.** Both new tools load `FileIngest` by raw id with no ownership check:
+   - `src/lib/ai/tools/summarize_file.ts:170-183`
+   - `src/lib/ai/tools/review_file_import.ts:182-191`
+
+   But uploads are stored with `uploadedBy: me.id`:
+   - `src/app/api/uploads/handler.ts:75-81`
+   - `prisma/schema.prisma:279-286`
+
+   And tool context already carries the authenticated user:
+   - `src/lib/ai/ctx.ts:19-25`
+
+   As shipped, any authenticated chat user who learns an `ingestId` can read another operator's extracted file summary / import preview. That is a real trust-boundary bug, not just a missing polish pass.
+
+2. **The upload -> AI tool seam is not actually wired end-to-end.** The chat upload affordance appends only a human-readable token:
+   - `src/components/chat/ChatRail.tsx:81-94`
+   - `src/components/chat/uploadReference.ts:8-35`
+
+   `/api/uploads` returns:
+   - `id` = `FileUpload.id`
+   - `ingest` = status metadata only (`ok`, `kind`, `bytesExtracted` / failure reason)
+   - **not** the `FileIngest.id`
+   - see `src/app/api/uploads/handler.ts:97-105`
+
+   But both tools require `ingestId`, and `summarize_file`'s own schema text currently overstates the route contract:
+   - `src/lib/ai/tools/summarize_file.ts:145-155`
+   - `src/lib/ai/tools/review_file_import.ts:146-150`
+
+   So the claimed P6 flow ("operator uploads a file -> AI can summarise it OR preview it as an import") is not actually usable from the current chat upload surface. The model gets a pretty filename token, not a machine-resolvable ingest handle.
+
+**Verification status:** `npm test` 505/505 pass, `npx tsc --noEmit` clean, `npx prisma generate` clean, `npm run build` clean. These blockers are logic / security / product-flow issues, not compile failures.
+
+**Fix direction:**
+- Enforce file ownership (or an explicit admin policy) before either tool returns extracted content. The obvious seam is `FileIngest -> FileUpload.uploadedBy` against `ctx.user.id`.
+- Add a real server-resolvable file reference into the chat/upload flow. Either surface the actual `ingestId` safely to the runtime, or add a resolver step/tool so "the uploaded file" can be mapped to the right ingest row without relying on a human-readable token.
+
+## GPT direction checkpoint — P6 fix in progress
+
+I checked the in-progress diff, not just the summary. Direction is accepted.
+
+- The ownership gate is the right seam: `findFirst(...)` + relation filter on `fileUpload.uploadedBy`, with admin bypass, is enough for this fix.
+- Surfacing raw `ingestId` in the chat upload token is acceptable **for now** because the tool handlers now gate by ownership. That closes the earlier trust-boundary issue.
+- `removeWidget` / emitter / workspace flow are untouched, which is correct for this fix.
+
+Claude's remaining list is broadly right. Two concrete notes:
+
+1. **Mirror the ingest-id wording in both tool descriptions.** `summarize_file` was updated; `review_file_import` needs the same contract language so the model is told how to recover the id from the composer token.
+2. **Tests should pin both token branches.** Update `upload-reference.test.ts` / `uploads-route.test.ts` not only for the success token, but also for the failure branch where `ingest.id` can be present or null. That avoids drifting back to a token the model cannot use.
+
+No new architectural blocker visible in this seam. Finish the tests + doc strings + ownership-gate coverage, then run `npm test`, `npx tsc --noEmit`, `npx prisma generate`, and `npm run build` before committing the P6 fix.

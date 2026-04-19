@@ -126,6 +126,10 @@ test("uploads: happy path stores, extracts, returns ok + ingest fields", async (
     assert.equal(res.body.filename, "notes.txt");
     assert.equal(res.body.ingest.ok, true);
     if (res.body.ingest.ok) {
+      // P6-fix — id is surfaced so the composer token can carry
+      // `ingestId: <cuid>` and the model can resolve "the uploaded
+      // file" to a real FileIngest row.
+      assert.equal(res.body.ingest.id, "ingest_1");
       assert.equal(res.body.ingest.kind, "text_plain");
       assert.equal(res.body.ingest.bytesExtracted, 5);
     }
@@ -157,6 +161,12 @@ test("uploads: extraction failure returns 200 with ingest.ok=false + reason", as
     assert.equal(res.body.id, "up_abc");
     assert.equal(res.body.ingest.ok, false);
     if (!res.body.ingest.ok) {
+      // P6-fix — failure branch still carries the ingest id so the
+      // composer token can be `[file: … — extraction_failed,
+      // ingestId: <cuid>]` and summarize_file can render a
+      // structured failure widget rather than leaving the model
+      // stuck.
+      assert.equal(res.body.ingest.id, "ingest_1");
       assert.equal(res.body.ingest.kind, "pdf");
       assert.equal(res.body.ingest.reason, "extraction_failed");
       assert.equal(res.body.ingest.error, "corrupt pdf");
@@ -182,10 +192,41 @@ test("uploads: unsupported extraction reports ingest.ok=false with reason=unsupp
   if (res.status === 200) {
     assert.equal(res.body.ingest.ok, false);
     if (!res.body.ingest.ok) {
+      assert.equal(res.body.ingest.id, "ingest_2");
       assert.equal(res.body.ingest.kind, "unsupported");
       assert.equal(res.body.ingest.reason, "unsupported");
       // No error string on unsupported (it's a policy outcome, not a crash).
       assert.equal((res.body.ingest as { error?: string }).error, undefined);
+    }
+  }
+  assert.equal(stores.length, 1);
+  assert.equal(extracts.length, 1);
+});
+
+// --- upload_not_found: null id falls through ---------------------
+
+test("uploads: extraction reports upload_not_found → ingest.id is null on response", async () => {
+  // Path shouldn't occur in practice (we just stored the upload a
+  // moment before calling extract), but the IngestOutcome union
+  // allows id: null for this case so handler behavior must be
+  // pinned. The response shape stays consistent — failure branch
+  // with a nullable id — and the chat composer falls back to the
+  // id-less token format.
+  const { deps, stores, extracts } = makeDeps({
+    extractFromUpload: async (): Promise<IngestOutcome> => ({
+      ok: false,
+      id: null,
+      kind: "unsupported",
+      reason: "upload_not_found",
+    }),
+  });
+  const res = await uploadsHandler(makeReq(txtFile("ghost.txt", "x", "text/plain"), "doc"), deps);
+  assert.equal(res.status, 200);
+  if (res.status === 200) {
+    assert.equal(res.body.ingest.ok, false);
+    if (!res.body.ingest.ok) {
+      assert.equal(res.body.ingest.id, null);
+      assert.equal(res.body.ingest.reason, "upload_not_found");
     }
   }
   assert.equal(stores.length, 1);

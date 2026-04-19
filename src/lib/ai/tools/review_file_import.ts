@@ -5,6 +5,7 @@ import {
   type ReviewTarget,
 } from "@/lib/ingest/review";
 import { importReviewWidgetKey } from "../widgetKeys";
+import { buildIngestOwnershipWhere } from "./ingestAccess";
 import type { ToolDef, ToolResult, ToolWidget } from "./types";
 
 // P6 — review a file the assistant suspects is an importable list.
@@ -137,7 +138,7 @@ export function buildReviewFileImportResult(
 export const reviewFileImportTool: ToolDef<Input> = {
   name: "review_file_import",
   description:
-    "Parse an ingested file as a structured import preview (CSV / TSV). Auto-detects whether the file looks like contacts, invitees, or campaign metadata; pass `target` to override detection. Emits an import_review widget with columns, a sample of rows, and per-row match status against the current contact book. Returns a plain text note — no widget — when the file doesn't parse as a structured list.",
+    "Parse an ingested file as a structured import preview (CSV / TSV). The ingest id is surfaced in the user's composer as a bracketed token of the form `[file: <filename> — <kind>, <size> extracted, ingestId: <cuid>]` (or `[file: <filename> — <reason>, ingestId: <cuid>]` when extraction failed but the ingest row exists) — extract the cuid from there. Auto-detects whether the file looks like contacts, invitees, or campaign metadata; pass `target` to override detection. Emits an import_review widget with columns, a sample of rows, and per-row match status against the current contact book. Returns a plain text note — no widget — when the file doesn't parse as a structured list. For unstructured documents prefer summarize_file instead.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -178,9 +179,14 @@ export const reviewFileImportTool: ToolDef<Input> = {
     }
     return out;
   },
-  async handler(input): Promise<ToolResult> {
-    const ingest = await prisma.fileIngest.findUnique({
-      where: { id: input.ingestId },
+  async handler(input, ctx): Promise<ToolResult> {
+    // Ownership gate — same policy as summarize_file. Non-admins can
+    // only review ingests tied to FileUploads they uploaded. The
+    // relation filter at the Prisma level means a wrong-owner hit
+    // returns "not found" identically to a missing id — no side-
+    // channel for probing other operators' ingest ids.
+    const ingest = await prisma.fileIngest.findFirst({
+      where: buildIngestOwnershipWhere(input.ingestId, ctx),
       select: {
         id: true,
         fileUploadId: true,
