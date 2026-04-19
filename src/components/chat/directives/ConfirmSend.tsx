@@ -166,6 +166,51 @@ function deriveSendState(props: ConfirmSendProps): SendState {
   return { phase: "idle" };
 }
 
+// Pure predicate for whether the confirm/retry button should accept a
+// click. Exported so unit tests can cover the combinatorial matrix
+// without standing up jsdom + a full React render.
+//
+// Two "live" regimes, both require anchor + no blockers:
+//
+//   1. Initial confirm: phase === "idle", plus at least one message
+//      ready. Without `ready_messages > 0` the CTA would POST to a
+//      send the server guarantees to refuse via `no_ready_messages`
+//      — pointless round-trip.
+//   2. Retry after refusal: phase === "error", no new blockers have
+//      appeared, anchor is still valid. A persisted error (W5: the
+//      server writes `state: "error"` onto the widget row) can come
+//      back on reload with blockers present — that's the regression
+//      GPT flagged on 3e95ce4. `retry` must NOT be clickable in that
+//      case; the operator has to resolve the blocker or refresh the
+//      preview first. Otherwise the retry POST enters the same
+//      conditions that refused last time and is just noise.
+//
+// Everything else — sending (transient), sent (button hidden),
+// idle + blockers / no anchor / no messages — is disabled.
+export function isConfirmSendClickable(params: {
+  phase: SendState["phase"];
+  hasAnchor: boolean;
+  hasBlockers: boolean;
+  readyMessages: number;
+}): boolean {
+  if (
+    params.phase === "idle" &&
+    params.hasAnchor &&
+    !params.hasBlockers &&
+    params.readyMessages > 0
+  ) {
+    return true;
+  }
+  if (
+    params.phase === "error" &&
+    params.hasAnchor &&
+    !params.hasBlockers
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function ConfirmSend({
   props,
   fmt,
@@ -189,12 +234,23 @@ export function ConfirmSend({
   }, [props.state, props.error, props.summary, props.result?.email, props.result?.sms, props.result?.skipped, props.result?.failed]);
   const when = formatEventAt(props.event_at, fmt);
   const hasBlockers = props.blockers.length > 0;
-  // `canConfirm` now also requires a messageId — without one the
-  // POST has no authorization anchor, so the button has nowhere to
+  // `hasAnchor` gates the POST — without a messageId the confirm
+  // route has no authorization anchor and the button has nowhere to
   // go. See the file-top wiring comment.
   const hasAnchor = typeof messageId === "string" && messageId.length > 0;
-  const canConfirm =
-    !hasBlockers && props.ready_messages > 0 && hasAnchor && state.phase === "idle";
+  // Single source of truth for "should this button accept a click?".
+  // Used for BOTH disabled + style below so the two can't drift —
+  // GPT flagged a pre-helper version where the disabled predicate
+  // treated any `phase === "error"` as clickable but the style
+  // branch gated retry on `hasAnchor && !hasBlockers`. A persisted
+  // `state: "error"` widget could come back on reload with blockers
+  // present and the button would still POST.
+  const clickable = isConfirmSendClickable({
+    phase: state.phase,
+    hasAnchor,
+    hasBlockers,
+    readyMessages: props.ready_messages,
+  });
   const channelLabel =
     props.channel === "both" ? "email + SMS" : props.channel;
 
@@ -413,7 +469,7 @@ export function ConfirmSend({
             onClick={() => {
               void onConfirm();
             }}
-            disabled={!canConfirm && state.phase !== "error"}
+            disabled={!clickable}
             title={
               !hasAnchor
                 ? "Missing confirmation anchor"
@@ -425,13 +481,11 @@ export function ConfirmSend({
             }
             className={clsx(
               "rounded px-3 py-1.5 text-sm font-medium whitespace-nowrap",
-              canConfirm
+              clickable
                 ? "bg-amber-600 text-white hover:bg-amber-700"
-                : state.phase === "error" && hasAnchor && !hasBlockers
-                  ? "bg-amber-600 text-white hover:bg-amber-700"
-                  : state.phase === "sending"
-                    ? "bg-amber-200 text-amber-900 opacity-80 cursor-wait"
-                    : "bg-slate-100 text-slate-400 cursor-not-allowed",
+                : state.phase === "sending"
+                  ? "bg-amber-200 text-amber-900 opacity-80 cursor-wait"
+                  : "bg-slate-100 text-slate-400 cursor-not-allowed",
             )}
           >
             {state.phase === "sending"
