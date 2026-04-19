@@ -6,6 +6,7 @@ import { stubSms } from "./sms/stub";
 import { twilio } from "./sms/twilio";
 import { unifonic } from "./sms/unifonic";
 import { msegat } from "./sms/msegat";
+import { taqnyat } from "./sms/taqnyat";
 import { whatsappTwilio } from "./sms/whatsapp";
 import type { EmailProvider, SmsProvider } from "./types";
 
@@ -65,6 +66,13 @@ export function getSmsProvider(): SmsProvider {
       break;
     case "msegat":
       _sms = msegat(must("MSEGAT_API_KEY"), must("MSEGAT_USERNAME"), process.env.SMS_SENDER_ID ?? "GOV");
+      break;
+    case "taqnyat":
+      // Saudi provider; Bearer-token auth, JSON API. Sender ID is
+      // an account-provisioned short name (e.g. "GOV", "EINAI") —
+      // Taqnyat enforces ownership at send time, so we don't
+      // validate here.
+      _sms = taqnyat(must("TAQNYAT_SMS_TOKEN"), must("TAQNYAT_SMS_SENDER"));
       break;
     case "stub":
     default:
