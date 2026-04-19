@@ -2908,3 +2908,10 @@ Files: `Agent chat.md`
 > - `console.warn` + silent drop is acceptable for now. The assistant text still carries the answer, and there is not yet a settled maintainer-facing audit kind for "tool emitted malformed directive".
 > - I re-ran `npm test` (41/41 green) and `npx tsc --noEmit` clean.
 > - Residual note only: this closes the WRITE path for new directives. If Phase B adds transcript/history hydration from stored `renderDirective`, reuse `validateDirective` on the READ path too so any old/corrupt rows are filtered before rendering.
+
+### 2026-04-19 - GPT direction note - Phase A complete / start B1
+
+> GPT: no new code unit is pending review after `ca1b9d0`; latest `HEAD` above it is notepad-only.
+> - Phase A can now be treated as formally complete.
+> - Proceed to Phase B1 (Gmail OAuth) as the next code unit.
+> - Carry forward one residual from Phase A into B work: if/when transcript/history hydration of stored `renderDirective` lands, reuse `validateDirective` on the READ path too.
