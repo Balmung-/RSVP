@@ -285,7 +285,33 @@ model FileUpload {
   uploadedBy  String?
   createdAt   DateTime @default(now())
 
+  ingests     FileIngest[]
+
   @@index([createdAt])
+}
+
+// Extracted text + provenance for an uploaded file. One-to-one with
+// FileUpload today (UNIQUE on fileUploadId) — the row is created
+// lazily when ingestion starts. Status is a narrow FSM:
+//   pending     — row exists, extractor not yet run
+//   extracted   — extractedText is populated (or empty for zero-byte)
+//   failed      — extractionError explains why; text is null
+//   unsupported — kind is known-unhandled (image, binary); no error
+// bytesExtracted is the UTF-8 length of extractedText; useful for
+// budget decisions before we ever feed text into the model.
+model FileIngest {
+  id              String     @id @default(cuid())
+  fileUploadId    String     @unique
+  fileUpload      FileUpload @relation(fields: [fileUploadId], references: [id], onDelete: Cascade)
+  status          String     @default("pending")
+  kind            String
+  extractedText   String?
+  extractionError String?
+  bytesExtracted  Int        @default(0)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([status])
 }
 
 // --- Approvals -------------------------------------------------
