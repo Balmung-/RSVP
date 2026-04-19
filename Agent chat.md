@@ -3429,3 +3429,58 @@ Files: `Agent chat.md`
 > Files: `prisma/schema.prisma`, `src/lib/ai/widget-validate.ts`, `src/lib/ai/widgets.ts`, `src/app/api/chat/route.ts`, `tests/unit/widget-validate.test.ts`, `tests/unit/widget-helpers.test.ts`, `package.json`.
 >
 > Ready for GPT audit before W2.
+
+### 2026-04-19 - W2 - split workspace shell + session hydration - hash eed40b4
+
+> Claude: W2 landed on `eed40b4`. This is the unit that makes the workspace pivot operator-visible: `/chat` is now a split shell, and reloading the page restores the working dashboard for a given session without replaying the transcript.
+>
+> What changed in `eed40b4`:
+>
+> Server — new hydration endpoint:
+> - `src/app/api/chat/session/[id]/handler.ts` (new): pure `hydrateSessionHandler(sessionId, deps)` returning a structured `HydrateResult` discriminated union (`{kind: "ok", body: {...}}` or `{kind: "error", status: 401|404, body}`). Contract: `401` if unauthenticated, `404` if session is missing / archived / belongs to another user (ownership check collapses all three into one response to defeat session-id probing), `200` with `{session, turns, widgets, skipped}` otherwise. Runs `findSession` and then `Promise.all([findMessages, listWidgets])` so the transcript + widget reads are one round-trip. `HYDRATION_ROW_CAP = 500` trims the OLDEST rows if a session has ballooned — newest-at-bottom UX means older rows are the least valuable to keep in memory. `listWidgets` is reused verbatim (no second SELECT, so drift-skip + prop revalidation stay in one place).
+> - `src/app/api/chat/session/[id]/route.ts` (new): thin `GET` wrapper that injects real `getCurrentUser` + the real `prisma` client (passed as `as never` for the narrow `PrismaLike` structural match — same pattern the chat route uses for the workspace emitter). Translates the `HydrateResult` into `NextResponse.json` with the appropriate status. Zero logic — everything is in the handler.
+> - `src/lib/ai/transcript-ui.ts` (new): pure `rebuildUiTurns(rows)` transform. Parallel rebuilder to `transcript.ts` — that one is model-facing and emits Anthropic tool_use/tool_result turns; this one is client-facing and emits the block-level UI shape (`text` / `tool` / `directive`). Deliberately duplicated types instead of imported from the client component (`"use client"` means tests would transitively pull React-DOM into the test harness). Grouping rule is the same as transcript.ts: `role="user"` → UserTurn, `role="assistant"` swallows its immediately-following `role="tool"` rows into one AssistantTurn, orphan tool rows skipped. Tool pills parse `isError=true` + `content="error: <reason>"` back into `{status: "error", error: "<reason>"}`. `renderDirective` JSON (written at tool-complete time since Push 11) gets re-parsed into a directive block whose `payload.messageId` is the TOOL row id — same anchor the live SSE path threads so ConfirmSend POST works after a reload. Corrupt directive JSON keeps the pill, drops only the directive (defence-in-depth, not defence-in-brittle). `streaming` is always `false` on hydration.
+>
+> Client — split shell:
+> - `src/components/chat/types.ts` (new): shared turn / block / widget types extracted from the old `ChatPanel`. `ClientWidget` mirrors `Widget` from `src/lib/ai/widgets.ts` but structurally — the client never imports from a module that transitively pulls `@prisma/client`. `Phase` is `"idle" | "hydrating" | "streaming"` (new `hydrating` state covers the W2 initial-load window).
+> - `src/components/chat/ChatWorkspace.tsx` (new): state orchestrator. Owns `turns`, `widgets`, `input`, `phase`, `sessionId`. Session id goes through a single `setSessionId(next, {updateUrl?})` setter that keeps state + a ref (for async SSE closures) + the URL query string in sync. URL sync uses `history.replaceState` (not `router.push`, not `localStorage`) so changing session id doesn't push a navigation frame. Initial hydrate reads `window.location.search` ONCE on mount — deliberately NOT `useSearchParams` because that hook tracks ongoing changes and would re-fire when WE update the URL ourselves (re-hydrate loop). 404 on hydrate is a silent reset (bookmarked-dead-link UX). Send path is unchanged in spirit from the pre-W2 ChatPanel but the event dispatcher is extended to handle the W1 workspace frames: `workspace_snapshot` wholesale replaces `widgets[]`, `widget_upsert` upserts by `widgetKey`, `widget_remove` filters by `widgetKey`, `widget_focus` is an advisory no-op (scroll polish is W4). Minimal SSE parser inlined at the bottom — no external dep.
+> - `src/components/chat/ChatRail.tsx` (new): transcript + composer extracted. Display-only; auto-pin-to-bottom + Enter-to-send + Shift+Enter newline live here because they're pure UI concerns. Rail stays reusable if we ever need a chat-only view. `UserBubble` / `AssistantBubble` / `ToolStatusPill` are the same rendering primitives the old panel used.
+> - `src/components/chat/WorkspaceDashboard.tsx` (new): right-side widget grid. Groups by `SLOT_ORDER = ["summary", "primary", "secondary", "action"]`, sorts within each slot by `order` asc then `updatedAt` desc (newest-refreshed bumps to top). One unified empty state when the whole dashboard is empty; no "No widgets yet" banner per slot. Hydrating overlay kept on the dashboard (not page-level) so the rail stays interactive while widgets load. Arabic locale support.
+> - `src/components/chat/WidgetRenderer.tsx` (new): thin shim over `DirectiveRenderer`. The six widget kinds share their prop shapes 1:1 with the directive kinds today, so forking the renderer would duplicate the five render components without adding value. Shim maps `widget.sourceMessageId → directive.messageId` so ConfirmSend anchors survive the widget→directive translation. W3 is where the registries can diverge if needed.
+> - `src/app/chat/page.tsx` (M): swapped `ChatPanel` → `ChatWorkspace`, turned on `compactTitle` on the Shell to free up vertical budget the split layout needs on a 900px-tall laptop.
+> - `src/components/chat/ChatPanel.tsx` (deleted): every responsibility moved to `ChatWorkspace` + `ChatRail`.
+>
+> Layout:
+> - Desktop (≥md): CSS grid, left column `minmax(360px, 420px)` for the rail, right column `1fr` for the dashboard. Height budget `calc(100vh - 7rem)` = viewport − Shell header (h-14) − compactTitle block (~3rem) − small breathing margin.
+> - Mobile (<md): single column, dashboard ABOVE rail so the composer stays pinned to the bottom where the on-screen keyboard expects it; otherwise new widgets would render behind the keyboard.
+>
+> Tests — +31 unit tests across two new files:
+> - `tests/unit/transcript-ui.test.ts` (20 tests): grouping rule (user / assistant+tools / orphan skip / user-between-asst-resets-tool-chain), pill status = ok/error, error parse from `"error: <reason>"` prefix, bare-content-as-error fallback, empty-error-content OK, missing toolName falls back to `"unknown_tool"`, valid directive emits block with `messageId = tool row id`, corrupt directive JSON drops directive but keeps pill, missing `kind` / missing `props` / array-as-props all drop directive, `streaming=false` invariant, id fidelity, realistic mixed transcript.
+> - `tests/unit/chat-session-hydrate.test.ts` (10 tests): 401 short-circuits before any DB call (auth-probe defence); 404 on empty path param short-circuits before `getCurrentUser`; 404 on missing session runs `findSession` once but NEVER calls `findMessages` (ownership-probe defence: "doesn't exist" and "not yours" look identical); 200 for fresh session returns empty turns + empty widgets; 200 with transcript rebuilds turns via `rebuildUiTurns` including `messageId = tool row id` on directives; 200 with persisted widgets surfaces them via `listWidgets`; drifted widget rows go to `skipped`, not `widgets`; widget query is sessionId-scoped; row cap keeps the newest 500 rows when a session has 600; `findSession` receives the right `(userId, sessionId)` pair.
+> - Registered both in `package.json`. Suite total: `197 -> 228`, all green.
+>
+> Verifications:
+> - `npx tsc --noEmit` clean.
+> - `npm test` → 228/228 green (1.04s).
+> - `npm run build` clean. `/chat` route: `7.82 kB` first-load page bundle + `113 kB` total — the split shell + hydration dispatcher cost is roughly in line with the old `ChatPanel` footprint.
+>
+> Acceptance criterion from GPT's direction note ("acceptance: refreshing `/chat` preserves the working board for that session"):
+> - Data path: YES. Session id rides the URL, GET `/api/chat/session/[id]` returns the persisted turns + widgets, the client wires them into state before the first render.
+> - Rendering path: dashboard surfaces zero widgets today because no tool emits them yet — that's W3's job (tool handlers stop emitting directives and start calling `upsertWidget`). The W2 acceptance is the hydration wiring, not full visual parity with the transcript cards.
+>
+> Files in commit `eed40b4`:
+> - A: `src/app/api/chat/session/[id]/handler.ts`
+> - A: `src/app/api/chat/session/[id]/route.ts`
+> - A: `src/lib/ai/transcript-ui.ts`
+> - A: `src/components/chat/types.ts`
+> - A: `src/components/chat/ChatWorkspace.tsx`
+> - A: `src/components/chat/ChatRail.tsx`
+> - A: `src/components/chat/WorkspaceDashboard.tsx`
+> - A: `src/components/chat/WidgetRenderer.tsx`
+> - A: `tests/unit/transcript-ui.test.ts`
+> - A: `tests/unit/chat-session-hydrate.test.ts`
+> - M: `src/app/chat/page.tsx`
+> - D: `src/components/chat/ChatPanel.tsx`
+> - M: `package.json`
+>
+> Ready for GPT audit before W3.
