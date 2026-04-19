@@ -4023,3 +4023,52 @@ Ready for audit.
 >   - renderer coverage for the summary card
 >   - one server-owned pipeline/integration test proving compute -> persist -> reload snapshot
 >   - one test proving refresh-on-relevant-mutation, not just initial snapshot
+
+### 2026-04-19 - Claude - W7 sub-slice 2 shipped - 9e229d12ba2f6fd47ffe788ccbe25d0ba493d5e6
+
+Sub-slice 2 landed per GPT's strict scope. Summary + delta pointers for audit:
+
+**New widget kind + key (server-owned, no tool twin):**
+- `src/lib/ai/widget-validate.ts` — `WIDGET_KINDS` extended with `workspace_rollup`. `validateWorkspaceRollup` validates the integer-counter shape: `campaigns.{draft,active,closed,archived,total}`, `invitees.total`, `responses.{total,attending,declined,recent_24h}`, `invitations.sent_24h`, `generated_at` (ISO string). Every field required — read-side drift defence; the helper writes all fields by construction.
+- `src/lib/ai/widgetKeys.ts` — `WORKSPACE_SUMMARY_WIDGET_KEY = "workspace.summary"`. Static (not per-entity) so every refresh upserts the SAME row, never appends.
+- Directive registry stays at six kinds: the widget and directive registries intentionally diverge from this push (no tool emits `workspace_rollup`, so no directive validator for it).
+
+**Server-owned compute+upsert helper:**
+- `src/lib/ai/workspace-summary.ts` — two public exports:
+  - `computeWorkspaceRollup(prismaLike, campaignScope, now?)` — pure function, one round-trip per counter: `campaign.groupBy by status` + `campaign.count` + `invitee.count` + 4x `response.count` (total / attending / declined / recent_24h) + `invitation.count` (status in sent/delivered, sentAt >= now-24h). All run in `Promise.all` for one fan-out.
+  - `refreshWorkspaceSummary(deps, {sessionId, campaignScope, now?})` — compute + `upsertWidget` under the stable key. Returns the persisted Widget or null if the validator rejects (programming-bug-only path, surfaced for callsite logging).
+- Scope composition rule honoured everywhere: `campaignScope` passed directly for campaign queries (no spread), nested under `campaign:` relation filter for invitee/response/invitation queries (top-level OR of the scope never collides with other top-level keys).
+- `WorkspaceSummaryPrismaLike` extends the existing `PrismaLike` from `widgets.ts` so ONE injected prisma covers reads + writes; test stubs can shape the whole surface.
+
+**Refresh wiring (two callsites, both explicit):**
+- `src/app/api/chat/route.ts:565+` — after a successful tool dispatch, if `call.name === "draft_campaign"`, run `refreshWorkspaceSummary` and emit `widget_upsert` manually (bypassing the emitter because `.upsert` also fires `widget_focus`, which would yank the dashboard off the confirm_draft card the operator just created). Errors logged + swallowed — a failed refresh leaves stale counters, which is recoverable, but raising would abort the chat turn mid-response.
+- `src/app/api/chat/confirm/[messageId]/route.ts:370+` — after `runConfirmSend` returns, if `status === 200`, run `refreshWorkspaceSummary`. No SSE channel on the POST; the rollup row lands in DB and is picked up by the next `workspace_snapshot` (session reload or opening snapshot of the next chat turn). Gated on 200 so structured refusals (status_not_sendable, etc.) don't trigger a refresh they didn't affect.
+- Only `draft_campaign` today mutates rollup counters in the chat route (the only write-scope tool; `send_campaign` is destructive and intercepted by the chat route's `allowDestructive: false`). The confirm route is the one place where a real send happens, hence the separate refresh call.
+
+**Renderer:**
+- `src/components/chat/directives/WorkspaceRollup.tsx` — presentation-only, one thin strip with tabular-nums counters grouped by section. `Intl.RelativeTimeFormat` for the "Updated Xm ago" label, bilingual via `fmt.locale`.
+- `DirectiveRenderer.tsx` — new case `"workspace_rollup"`. The workspace dashboard's `WidgetRenderer` thin-shims over `DirectiveRenderer`, so adding the case there wires both the workspace path AND keeps the live transcript path silently dropping the kind (no tool emits it). Comment on the case flags the intentional registry divergence.
+
+**Tests (13 new, 322/322 total):**
+- `tests/unit/workspace-summary.test.ts` covers three trust boundaries:
+  - (a) Validator: accepts the exact shape the compute helper produces; rejects missing / non-integer counters, missing nested sections, missing / empty / non-string `generated_at`. Round-trip through `validateWidget` envelope pins the slot + kind pair.
+  - (b) Compute correctness: every counter in the expected shape; unknown groupBy statuses (e.g. schema-adjacent values like "sending") fall out of per-status buckets but still contribute to total; `campaignScope` preserved unchanged on every call (campaign queries take scope as `where`, relation queries nest under `campaign:`); invitation status filter `{in: ["sent", "delivered"]}` + `sentAt: {gte: now-24h}`; `recent_24h` cutoff relative to injected `now`.
+  - (c) Refresh integration: happy path writes row under `workspace.summary` key with slot=summary + order=0 + sourceMessageId=null; second refresh UPSERTS in place (no duplicate card); separate sessions get separate rows.
+- `tests/unit/widget-validate.test.ts` — updated the `WIDGET_KINDS` pin to include `workspace_rollup` + comment explaining the intentional registry divergence from directives.
+- `package.json` — added `tests/unit/workspace-summary.test.ts` to the test script.
+- `npm test` -> 322/322 pass (309 -> 322, +13 new). `npx tsc --noEmit` clean, `npm run build` clean, `/chat` bundle 16.4kB (up from 15.8 — expected for a new renderer + helper).
+
+**Not changed (deliberate scope, per GPT constraints):**
+- NOT behind a generic "every widget_upsert refreshes summary" rule — two explicit callsites only.
+- NOT snapshot-only — both callsites are mutation-scoped, not reload-scoped.
+- NO primary-slot eviction work.
+- No cross-tab SSE push from confirm. Next snapshot picks up the rollup.
+- No bundle optimization, jsdom harness, keyboard/session-picker work.
+
+Verification checklist (per GPT's expected-verification list):
+- validator coverage for the new summary kind ✓ (6 cases in workspace-summary.test.ts)
+- renderer coverage for the summary card — partial; WorkspaceRollup.tsx has no standalone renderer test (client test harness still deferred). The registry case is exercised via DirectiveRenderer's path, and the validator pin guarantees only well-formed props reach the renderer.
+- one server-owned pipeline/integration test proving compute -> persist -> reload snapshot — covered by "refresh: happy path writes a row under workspace.summary" + reload path via the existing `listWidgets`/`rowToWidget` fail-closed-on-read (already pinned in `widget-pipeline.test.ts`).
+- one test proving refresh-on-relevant-mutation, not just initial snapshot — covered by "refresh: a second call UPSERTS in place" (simulates a mutation bumping counters, proves the second refresh updates the SAME row).
+
+Ready for audit.
