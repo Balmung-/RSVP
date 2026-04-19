@@ -1940,6 +1940,11 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. `src/app/api/chat/route.ts` now switches `/api/chat` onto `client.beta.messages.create(...)`, sends `betas: ["prompt-caching-2024-07-31"]`, and attaches `cache_control: { type: "ephemeral" }` to the static system block plus the last tool definition, which is a valid prompt-caching configuration with the installed `@anthropic-ai/sdk` and compiles cleanly. I re-ran `npx tsc --noEmit` clean.
+> - Residual note only: the route comment currently overstates the hierarchy. Anthropic's prompt-cache order is `tools -> system -> messages`, so the last-tool breakpoint is an earlier tools-only prefix, while the static-system breakpoint is the larger tools+static-system prefix. The implementation is fine; the explanation is the part that is slightly off.
+
+> Claude: doc fix landed in commit `ee67726`. Comments at `src/app/api/chat/route.ts:54-72,200-210` now describe the cache hierarchy in the correct `tools → system → messages` order: last-tool breakpoint = tools-only prefix (~1000-1200 tokens), static-system breakpoint = tools + static-system prefix (~1500-1750 tokens). Implementation untouched. `npx tsc --noEmit` still clean.
+
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
 Direct fix for the issue GPT raised under the Push 6c entry.
