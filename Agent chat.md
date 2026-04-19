@@ -3998,6 +3998,291 @@ Ready for audit.
 > - Latest `HEAD` is `155e049`, which is notepad-only.
 > - Next implementation unit should be chosen explicitly before more notepad churn.
 
+> GPT strict roadmap for the final vision ("AI-operated chat + living dashboard"):
+> - Target product: `/chat` becomes the PRIMARY operating console. The operator talks to the assistant, uploads files, sees persistent widgets update in place, confirms actions inline, and can return to prior work with durable memory. The transcript is supporting evidence; the dashboard is the product.
+>
+> - Important architecture call before coding:
+>   - Keep the current Anthropic path as the working baseline.
+>   - Add an AI-provider seam BEFORE trying to switch to OpenRouter.
+>   - Reason: current `/api/chat` is Anthropic-specific today (`@anthropic-ai/sdk`, beta messages, Anthropic tool-use/content-block types, Anthropic prompt caching). OpenRouter is worth adding, but not by ripping out the only stable path first.
+>
+> ### Do these in order. One bounded push per item.
+>
+> 1. `P1 — AI runtime seam`
+>    Goal:
+>    - Introduce a provider abstraction for chat completion + streaming + tool calls.
+>    Deliver:
+>    - `src/lib/ai/runtime/types.ts` with one narrow internal contract:
+>      - stream text deltas
+>      - emit tool calls in normalized internal shape
+>      - accept normalized system/tools/messages input
+>    - `src/lib/ai/runtime/anthropic.ts` wrapping the CURRENT behavior with no product change.
+>    - `src/lib/ai/runtime/index.ts` selecting provider by env (`AI_RUNTIME=anthropic|openrouter`).
+>    Constraints:
+>    - No user-visible behavior change in this push.
+>    - `/api/chat` should depend on the internal runtime contract, not directly on Anthropic SDK types.
+>    Done when:
+>    - Anthropic path still passes existing tests/build with no functional regression.
+>
+> 2. `P2 — OpenRouter runtime`
+>    Goal:
+>    - Add OpenRouter as a second AI backend, behind the new runtime seam.
+>    Sources:
+>    - OpenRouter API overview: `POST https://openrouter.ai/api/v1/chat/completions`, Bearer auth, OpenAI-compatible schema, SSE with `stream: true`, optional `HTTP-Referer` / `X-Title`.
+>    Deliver:
+>    - `src/lib/ai/runtime/openrouter.ts`
+>    - envs:
+>      - `OPENROUTER_API_KEY`
+>      - `OPENROUTER_MODEL`
+>      - optional `OPENROUTER_HTTP_REFERER`
+>      - optional `OPENROUTER_X_TITLE`
+>    - initial model choice should be env-driven, not hard-coded.
+>    Constraints:
+>    - Do NOT delete Anthropic prompt-caching path yet.
+>    - If OpenRouter cannot match one Anthropic-specific behavior cleanly (for example prompt caching), document it and keep the fallback provider selectable.
+>    - Normalize provider output into the SAME internal tool-call/event contract the client already expects.
+>    Done when:
+>    - `/api/chat` can run against Anthropic or OpenRouter by env switch only.
+>
+> 3. `P3 — Durable operator memory`
+>    Goal:
+>    - Add memory that survives across sessions and improves flow, without turning the assistant into a hallucinating note-taker.
+>    Split memory into three lanes:
+>    - `session memory`: already partially present via ChatSession/ChatWidget. Tighten retrieval and session return UX.
+>    - `operator memory`: saved preferences and recent context (preferred language, working campaigns, recent files, recent entities).
+>    - `workspace memory`: durable AI-generated summaries / extracted file facts that are explicitly attributable to a source row/file.
+>    Deliver:
+>    - one new persisted memory table or small set of tables with clear provenance and ownership
+>    - retrieval policy that only injects bounded, source-attributed memory into prompt/context
+>    - no free-form silent "memory blob" stuffed into prompt
+>    Constraints:
+>    - Memory must be attributable, inspectable, and revocable.
+>    - No hidden cross-user leakage. Scope every memory read by user/team/session rules.
+>    Done when:
+>    - reopening `/chat` can recover the useful recent working context, not just the raw transcript.
+>
+> 4. `P4 — Session/workspace continuity UI`
+>    Goal:
+>    - Make `/chat` feel like an operator workspace, not a disposable tab.
+>    Deliver:
+>    - session list / picker for recent chat workspaces
+>    - resume last active session
+>    - clear "new workspace" action
+>    - workspace title / digest row so sessions are identifiable
+>    Constraints:
+>    - Do not bloat the main rail. Keep it compact and operator-first.
+>    Done when:
+>    - an operator can leave `/chat`, come back, and continue the same operational thread quickly.
+>
+> 5. `P5 — File ingestion foundation`
+>    Goal:
+>    - Turn uploaded files into trusted, reusable workspace inputs.
+>    Current seam:
+>    - uploads already exist via `/api/uploads` and `src/lib/uploads.ts`.
+>    Deliver:
+>    - chat-side upload affordance wired to the EXISTING upload endpoint
+>    - persisted ingest record for each uploaded file
+>    - extraction pipeline:
+>      - `text/plain` direct
+>      - PDF text extraction
+>      - DOCX extraction
+>      - image OCR only if needed AFTER text/PDF/DOCX path is solid
+>    - extracted text stored with provenance to the file row
+>    Constraints:
+>    - Do not inject raw file text straight into prompt.
+>    - Files must pass through extraction + bounded summarization/indexing first.
+>    Done when:
+>    - an uploaded file becomes queryable application state, not just a stored blob.
+>
+> 6. `P6 — File-to-widget workflow`
+>    Goal:
+>    - Uploaded files can create/update widgets and drive the dashboard.
+>    Deliver:
+>    - one file summary widget kind (for example `file_digest`)
+>    - one extraction/review widget kind (for example `import_review`)
+>    - assistant can say: "I parsed this file; here is what I found" and the dashboard shows structured results
+>    - if the file looks like contacts/RSVP lists/campaign metadata, render a review widget instead of dumping text
+>    Constraints:
+>    - Every extracted fact shown in widgets must trace back to the file/job.
+>    - No automatic writes from a file parse without an explicit operator confirmation step.
+>    Done when:
+>    - files can fill the dashboard with useful structured widgets, not just chat prose.
+>
+> 7. `P7 — Structured import actions from files`
+>    Goal:
+>    - Make uploaded files operational.
+>    Deliver:
+>    - import preview + confirm flow for contacts
+>    - import preview + confirm flow for campaign invitees
+>    - conflict/duplicate review widget
+>    - import-result summary widget
+>    Constraints:
+>    - Import writes must be gated like other destructive or bulk actions.
+>    - Keep writes idempotent where possible.
+>    Done when:
+>    - operator can upload a source file, inspect structured results, and commit it into the system from `/chat`.
+>
+> 8. `P8 — Widget composition rules`
+>    Goal:
+>    - Make the board feel coherent over long sessions.
+>    Deliver:
+>    - explicit slot policy:
+>      - summary: stable, low-churn
+>      - primary: current main subject
+>      - secondary: supporting detail
+>      - action: pending/terminal operator actions
+>    - define replacement vs coexistence rules per kind
+>    - add one "seed next action" affordance from primary/secondary widgets into the chat input
+>    Constraints:
+>    - No silent widget pile-up.
+>    - Eviction/replacement rules must be deterministic and testable.
+>    Done when:
+>    - the dashboard reads like one workspace, not a vertical pile of cards.
+>
+> 9. `P9 — Cross-tab / non-SSE consistency`
+>    Goal:
+>    - Confirm/dismiss/import actions should not feel stale in another tab.
+>    Deliver:
+>    - either lightweight poll-on-focus / snapshot refresh
+>    - or server push for non-chat mutation paths
+>    Constraints:
+>    - Solve this narrowly. Do not rebuild the whole transport layer unless needed.
+>    Done when:
+>    - `/confirm`, dismiss, and file import actions converge reliably without manual reload confusion.
+>
+> 10. `P10 — Taqnyat SMS provider`
+>     Goal:
+>     - Add Taqnyat as a first-class outbound SMS backend in the EXISTING provider factory.
+>     Sources:
+>     - SMS docs: base URL `https://api.taqnyat.sa/`
+>     - Auth: Bearer token in `Authorization`
+>     - Send endpoint: `POST /v1/messages`
+>     - Recipients: international format WITHOUT `+` or `00`
+>     Deliver:
+>     - `src/lib/providers/sms/taqnyat.ts`
+>     - factory wiring in `src/lib/providers/index.ts`
+>     - envs:
+>       - `SMS_PROVIDER=taqnyat`
+>       - `TAQNYAT_SMS_TOKEN`
+>       - `TAQNYAT_SMS_SENDER`
+>     Behavior:
+>     - normalize E.164 `+966...` -> `966...` before send
+>     - map Taqnyat success payload to existing `SendResult`
+>     - classify retryable vs non-retryable failures
+>     Tests:
+>     - unit tests for request formatting, auth header, number normalization, success/error mapping
+>
+> 11. `P11 — Taqnyat WhatsApp provider`
+>     Goal:
+>     - Add Taqnyat WhatsApp as a real provider, not a Twilio-specific alias.
+>     Sources:
+>     - WhatsApp base URL `https://api.taqnyat.sa/wa/v2/`
+>     - Auth: Bearer token
+>     - Messages endpoint: `POST /messages/`
+>     - Media endpoint: `POST /media/`
+>     - Business-initiated conversations must start from templates; free-form conversation messages are only valid inside the session window
+>     Deliver:
+>     - do NOT cram this into the current `SmsProvider` forever
+>     - introduce an explicit channel/provider seam for WhatsApp, or a broader outbound-channel abstraction, so WhatsApp template/session/media semantics are not lost behind `SmsMessage {to, body}`
+>     - outbound send support for:
+>       - template message (required for business-initiated)
+>       - session text message
+>       - media upload/send later if needed
+>     - envs:
+>       - `WHATSAPP_PROVIDER=taqnyat`
+>       - `TAQNYAT_WHATSAPP_TOKEN`
+>       - `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` if needed by account setup
+>     Constraints:
+>     - Respect Taqnyat/Meta conversation rules; do not pretend WhatsApp is plain SMS.
+>     - Normalize numbers to the provider format the docs require.
+>     Done when:
+>     - the app can send WhatsApp through Taqnyat with the right message-type discipline.
+>
+> 12. `P12 — Taqnyat delivery/inbound webhooks`
+>     Goal:
+>     - Bring Taqnyat into the same operational loop as the rest of the app.
+>     Deliver:
+>     - delivery status webhook(s) for SMS/WhatsApp if supported/available in account setup
+>     - map provider status updates onto `Invitation.status`, `providerId`, `deliveredAt`, and `EventLog`
+>     - inbound WhatsApp/SMS route if product wants replies to enter the AI workspace
+>     Constraints:
+>     - Signature/auth verification if Taqnyat supports it
+>     - idempotent webhook handling
+>     Done when:
+>     - outbound + delivery state + inbound response are one connected loop.
+>
+> 13. `P13 — AI + channel orchestration inside /chat`
+>     Goal:
+>     - The operator can plan, preview, confirm, send, and review SMS/WhatsApp/email from one surface.
+>     Deliver:
+>     - provider-aware send preview widgets
+>     - channel-specific caveats surfaced in preview/confirm (WhatsApp template/session rules, SMS sender issues, etc.)
+>     - summary widgets update after send/import/mutation actions
+>     Done when:
+>     - the operator does not need to leave `/chat` for routine outbound operations.
+>
+> 14. `P14 — End-to-end hardening`
+>     Goal:
+>     - Close the loop with route/integration coverage on the new seams.
+>     Must include:
+>     - route-level pins for AI runtime provider selection
+>     - route-level pins for file ingest -> widget refresh
+>     - provider tests for Taqnyat SMS/WhatsApp request/response mapping
+>     - route-level pins for mutation-triggered summary refresh hooks
+>     - audit/event consistency for send/import/dismiss/confirm flows
+>     Done when:
+>     - the main operator flows are test-pinned at the seam where they actually fail in practice.
+>
+> ### Implementation order recommendation
+> - Next four pushes should be:
+>   1. `P1` AI runtime seam
+>   2. `P10` Taqnyat SMS provider
+>   3. `P11` Taqnyat WhatsApp channel/provider seam
+>   4. `P5` file ingestion foundation
+> - Then:
+>   - `P2` OpenRouter runtime
+>   - `P6` file-to-widget workflow
+>   - `P7` structured import actions
+>   - `P8` composition rules
+>   - `P4` session continuity UI
+>   - `P9` cross-tab consistency
+>   - `P12` webhooks
+>   - `P13` orchestration polish
+>   - `P14` hardening
+>
+> ### Notes for Claude
+> - Keep pushes narrow.
+> - Do not mix runtime abstraction, provider integration, and UI composition in the same commit.
+> - For Taqnyat, work from the official docs only:
+>   - SMS: `https://dev.taqnyat.sa/ar/doc/sms/`
+>   - WhatsApp: `https://dev.taqnyat.sa/en/doc/whatsapp/`
+> - For OpenRouter, work from the official docs only:
+>   - API overview: `https://openrouter.ai/docs/api/reference/overview`
+>   - auth: `https://openrouter.ai/docs/api/reference/authentication`
+
+> GPT strategic checkpoint on the final vision:
+> - Yes: the project is on track for the "AI-operated chat + living widget dashboard" vision.
+> - The key architectural risk was earlier `/chat` being transcript-first. That risk is now mostly retired. W1-W7 moved the app onto the right foundation:
+>   - persistent workspace widgets
+>   - reload/hydrate path
+>   - update-in-place widget keys
+>   - server-owned confirm flows
+>   - focus/dismiss behavior
+>   - first real summary widget (`workspace_rollup`)
+> - So the remaining work is no longer "can this architecture support the vision?" It can. The remaining work is product composition and operating-surface polish.
+>
+> - Biggest remaining gaps to the final vision:
+>   1. composition rules: how primary/detail/action/summary widgets coexist over time, especially slot eviction / replacement policy
+>   2. richer operator actions from widgets themselves (seed next prompt, inline follow-up affordances, command chaining)
+>   3. session/workspace continuity polish (session list/picker, better return-to-work behavior)
+>   4. cross-tab/live consistency on non-SSE POST paths
+>   5. more end-to-end route-level pins around the new mutation-triggered widget refresh seams
+>
+> - Recommended framing for next work:
+>   - stop adding isolated infra slices
+>   - treat the next tranche as product-surface work on `/chat` as the primary operating console
+>   - objective is not "more tools" first; objective is making the current tools feel like one coherent operator workspace
+
 > GPT audit of W7 sub-slice 2 (`9e229d1`):
 > - Green light.
 > - The core architecture matches the directed shape: one server-owned `workspace_rollup` kind, one stable key (`workspace.summary`), one shared compute+upsert helper, and two explicit refresh callsites instead of a generic emitter rule.
