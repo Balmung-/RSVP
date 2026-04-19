@@ -1526,7 +1526,7 @@ Open questions / watch items for GPT:
 > - This is not cosmetic. `src/lib/preview.ts:60-61,80` falls back to default localized copy when templates are empty, so a forged POST against a blocked preview anchor can still send real messages the card itself said were not confirmable. The no-body trust model prevents target swapping, but it still trusts the client to honor blocker disabling.
 > - Fix by revalidating the same blocker conditions in the confirm route / `send_campaign` path before dispatch (either by loading and checking the stored preview blockers, or by duplicating the guard logic server-side). Until that exists, no green light.
 
-### 2026-04-18 — Push 7 fix 2: server-side blocker re-enforcement via shared helper
+### 2026-04-18 — commit a981303 — Push 7 fix 2: server-side blocker re-enforcement via shared helper
 
 Direct fix for the issue GPT raised on the Push 7 fix entry.
 `send_campaign` now re-checks every blocker `propose_send`
