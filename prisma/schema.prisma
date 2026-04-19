@@ -431,6 +431,7 @@ model ChatSession {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
   messages   ChatMessage[]
+  widgets    ChatWidget[]
 
   @@index([userId, updatedAt])
   @@index([userId, archivedAt])
@@ -474,7 +475,91 @@ model ChatMessage {
   confirmedAt      DateTime?
   createdAt        DateTime    @default(now())
 
+  // Widgets whose `sourceMessageId` points at this row. SetNull on
+  // the FK so deleting a message doesn't cascade through the
+  // workspace — the widget survives with a dangling source, which
+  // is the operator-friendly behavior (a stale tool invocation
+  // shouldn't wipe the dashboard state built from it).
+  sourcedWidgets   ChatWidget[]
+
   @@index([sessionId, createdAt])
+}
+
+// A ChatWidget is a persisted piece of workspace UI state tied to a
+// ChatSession. The current /chat surface renders directives inline
+// inside assistant turns — i.e. the UI disappears into the
+// transcript and has to be "replayed" every load. W1 of the workspace
+// pivot moves the high-value surfaces (campaign list, contact table,
+// confirm cards, etc.) onto a side-by-side dashboard whose state
+// persists across reloads and is updated in-place by follow-up
+// tools rather than re-appended per turn.
+//
+// Why its own table (not a JSON blob on ChatSession):
+//   - We query by (sessionId, slot) and upsert by (sessionId,
+//     widgetKey). Both are cheap with per-row indexes; both are
+//     painful with a single opaque JSON column where every update
+//     is read-modify-write on the whole dashboard.
+//   - Per-row timestamps let the client sort / highlight recent
+//     changes without a separate activity feed.
+//   - Cascade semantics on delete mean archiving / wiping a session
+//     wipes its dashboard with zero manual cleanup.
+//
+// `widgetKey` is a CALLER-CHOSEN stable identifier that defines
+// upsert semantics within a session — e.g. `list_campaigns` tool
+// writes to `widgetKey="campaign_list:active"` so re-asking updates
+// the existing widget instead of appending a second copy. The key
+// is unique WITHIN a session; two sessions can both own a widget
+// called "campaign_list:active" without collision.
+//
+// `kind` is the renderer discriminator, validated against a closed
+// registry at the persistence boundary (see
+// `src/lib/ai/widget-validate.ts`) so a rogue tool can't store a
+// malformed shape the client then renders. Same trust model as
+// `ChatMessage.renderDirective`.
+//
+// `slot` is one of `summary | primary | secondary | action` — the
+// four dashboard regions W2 introduces. Stored as a string (rather
+// than a Prisma enum) so adding a fifth slot doesn't require a
+// migration; the validator is the gate.
+//
+// `props` is a JSON blob (stored as a string to match the
+// ChatMessage.renderDirective convention + keep SQLite
+// compatibility). Validated at the widget boundary — never trusted
+// blindly on read.
+//
+// `order` is a small integer used to order widgets WITHIN a slot.
+// Default 0; callers set it explicitly when fanning out multiple
+// widgets to the same slot.
+//
+// `sourceMessageId` points at the tool ChatMessage row that
+// produced this widget (when applicable). Optional + SetNull so
+// the widget survives a deleted message; useful for the client UI
+// to link back to the originating turn without blocking DELETE.
+model ChatWidget {
+  id               String       @id @default(cuid())
+  sessionId        String
+  session          ChatSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  widgetKey        String
+  kind             String
+  slot             String
+  // JSON payload matching the kind's declared props shape. Always
+  // passed through `validateWidget(...)` before write AND again on
+  // read to defend against schema drift.
+  props            String
+  order            Int          @default(0)
+  // Optional link to the tool message that produced this widget.
+  sourceMessageId  String?
+  sourceMessage    ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  // Upsert contract: (sessionId, widgetKey) is the stable identity
+  // callers target. A second write to the same key UPDATES in place;
+  // a remove() by the same key wipes exactly that widget.
+  @@unique([sessionId, widgetKey])
+  // Listing by (sessionId, slot, order) is the dashboard render
+  // path; add an index so it stays O(log n) on hot sessions.
+  @@index([sessionId, slot, order])
 }
 
 // --- Identity --------------------------------------------------

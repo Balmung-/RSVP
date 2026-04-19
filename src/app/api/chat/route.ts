@@ -25,21 +25,45 @@ import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { listTools, dispatch } from "@/lib/ai/tools";
 import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 import { validateDirective } from "@/lib/ai/directive-validate";
+import { createWorkspaceEmitter } from "@/lib/ai/widgets";
 
 // The chat endpoint. Accepts a POST body `{ sessionId?, message }`,
 // authenticates via the usual session cookie, then opens a
-// Server-Sent Events stream. The stream carries three kinds of
-// frames:
+// Server-Sent Events stream. The stream carries these frame kinds:
 //
 //   event: session  — one-shot at the start, carries the canonical
 //                     session id so the client can persist it on a
 //                     new conversation.
+//   event: workspace_snapshot — one-shot right after `session`. Ships
+//                     the authoritative list of persisted widgets
+//                     for this session so a reload recovers the
+//                     dashboard without replaying the transcript.
+//                     Shape: `{ widgets: Widget[], skipped: number }`.
+//                     `skipped` counts rows that failed revalidation
+//                     on read (drift defence); normal is 0.
+//   event: widget_upsert — emitted when a tool calls the workspace
+//                     emitter's `.upsert(...)`. Shape is the full
+//                     `Widget` object (widgetKey, kind, slot, props,
+//                     order, sourceMessageId, createdAt, updatedAt).
+//                     Client replaces any existing widget with the
+//                     same widgetKey. Not emitted in W1 (no tool
+//                     callers yet); the frame contract is fixed now
+//                     so W3 is a pure code-move.
+//   event: widget_remove — emitted when `.remove(widgetKey)` hit a
+//                     row. Shape: `{ widgetKey }`. Client removes
+//                     the widget with that key from local state.
+//   event: widget_focus — optional. Emitted when `.focus(widgetKey)`
+//                     resolves a known widget. Shape: `{ widgetKey }`.
+//                     Purely advisory; client scrolls / highlights.
 //   event: text     — incremental assistant text delta. Concatenate
 //                     on the client.
 //   event: directive — a typed render payload emitted by a tool
 //                     handler. Shape is `{ kind, props }`; the
 //                     client matches `kind` against a fixed
-//                     component registry and drops unknowns.
+//                     component registry and drops unknowns. Kept
+//                     as the current UI contract; W3 migrates each
+//                     directive kind to a widget and the directive
+//                     emit is eventually removed.
 //   event: tool     — lifecycle frame around tool dispatch
 //                     (`{name, status:"running|ok|error", ...}`).
 //                     Purely advisory for the UI.
@@ -267,6 +291,29 @@ export async function POST(req: Request) {
 
       try {
         send("session", { id: sessionId });
+
+        // Workspace state goes out BEFORE the first model turn so
+        // the client can paint the dashboard skeleton while the
+        // first text delta is still a network hop away. A brand-new
+        // session gets `{ widgets: [], skipped: 0 }` and the client
+        // treats that as "clear any stale board state and start
+        // fresh" — the emit is authoritative, empty is a valid
+        // value, not an omission.
+        //
+        // `prisma` is injected via the dep interface the widgets
+        // module expects; the narrow `PrismaLike` shape matches
+        // `prisma.chatWidget.{findMany,upsert,deleteMany,findUnique}`
+        // from @prisma/client's generated types by structural
+        // compat. The `as never` is a typed-pass-through the TS
+        // compiler needs because the generated Prisma argument
+        // types carry many optional fields (`select`, `include`,
+        // `distinct`) that `PrismaLike` deliberately leaves out.
+        const workspace = createWorkspaceEmitter(
+          { prismaLike: prisma as never },
+          sessionId!,
+          send,
+        );
+        await workspace.snapshot();
 
         for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter += 1) {
           // One round-trip to Anthropic. We stream the response so
