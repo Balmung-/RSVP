@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import type { ClientWidget, Phase } from "./types";
+import type { ClientWidget, FocusRequest, Phase } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 import { WidgetRenderer } from "./WidgetRenderer";
 
@@ -42,15 +42,48 @@ const SLOT_ORDER: ReadonlyArray<ClientWidget["slot"]> = [
   "action",
 ];
 
+const FLASH_MS = 1200;
+
 export function WorkspaceDashboard({
   widgets,
   fmt,
   phase,
+  focusRequest,
 }: {
   widgets: ClientWidget[];
   fmt: FormatContext;
   phase: Phase;
+  focusRequest: FocusRequest | null;
 }) {
+  // W4 focus plumbing. Each rendered widget registers its DOM node
+  // via a ref-callback keyed by widgetKey. When `focusRequest`
+  // changes (seq bumps per emit), we scroll the matching node into
+  // view and flash a ring for FLASH_MS to call attention. The
+  // ring is driven by state (not a CSS animation class) so repeat
+  // focus on the same key re-applies without needing a DOM remount
+  // trick.
+  const widgetRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const [flashedKey, setFlashedKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focusRequest) return;
+    const el = widgetRefs.current.get(focusRequest.widgetKey);
+    if (!el) return;
+    // `block: "center"` pulls the card into the middle of the
+    // viewport rather than sticking it to the top or bottom edge.
+    // `behavior: "smooth"` matches the rest of the app's scroll
+    // motion (see ChatRail auto-pin). Supported in all Evergreen
+    // browsers the admin console targets.
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    setFlashedKey(focusRequest.widgetKey);
+    const timer = window.setTimeout(() => {
+      setFlashedKey((current) =>
+        current === focusRequest.widgetKey ? null : current,
+      );
+    }, FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [focusRequest]);
+
   // Group + sort. Stable: same input always produces the same
   // ordering, so React can reconcile on widgetKey without reshuffles.
   const bySlot = useMemo(() => {
@@ -101,7 +134,18 @@ export function WorkspaceDashboard({
             return (
               <SlotSection key={slot} slot={slot} locale={fmt.locale}>
                 {items.map((w) => (
-                  <div key={w.widgetKey} className="min-w-0">
+                  <div
+                    key={w.widgetKey}
+                    ref={(el) => {
+                      if (el) widgetRefs.current.set(w.widgetKey, el);
+                      else widgetRefs.current.delete(w.widgetKey);
+                    }}
+                    className={clsx(
+                      "min-w-0 rounded-xl transition-shadow duration-500 ease-glide",
+                      flashedKey === w.widgetKey &&
+                        "ring-2 ring-ink-300 shadow-lift",
+                    )}
+                  >
                     <WidgetRenderer widget={w} fmt={fmt} />
                   </div>
                 ))}

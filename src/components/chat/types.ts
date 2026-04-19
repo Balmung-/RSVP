@@ -65,3 +65,13 @@ export type ClientWidget = {
   createdAt: string;
   updatedAt: string;
 };
+
+// ---- focus request ----
+//
+// W4: the server emits `widget_focus` after every `widget_upsert` so
+// the dashboard can scroll the refreshed widget into view. The same
+// widget key may re-fire focus many times in a session — refining a
+// filter twice should pull attention back twice. `seq` monotonically
+// increments so React's effect dependency sees a new value even when
+// `widgetKey` is unchanged. `null` means "no pending focus".
+export type FocusRequest = { widgetKey: string; seq: number };

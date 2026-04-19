@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnyDirective } from "./DirectiveRenderer";
 import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
-import type { ClientWidget, Phase, Turn } from "./types";
+import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 
 // The split-workspace orchestrator for /chat (W2).
@@ -45,12 +45,21 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [topError, setTopError] = useState<string | null>(null);
   const [sessionId, setSessionIdState] = useState<string | null>(null);
+  // W4: pending focus request from the latest `widget_focus` frame.
+  // The seq counter below bumps every time so React's effect in
+  // WorkspaceDashboard fires even when the same widgetKey is focused
+  // twice in a row (refining a filter twice should re-focus twice).
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
 
   // Latest sessionId for use inside async SSE callbacks. Keeping a
   // mirror ref avoids the closure-over-state stale-value trap when
   // the send() callback kicks off a fetch that outlives a re-render.
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Monotonic counter for focus requests. Ref (not state) — the
+  // value only matters as an effect-dep tiebreaker, so re-rendering
+  // just to increment it would be wasted work.
+  const focusSeqRef = useRef(0);
 
   // Single setter that keeps state, ref, and URL in sync. The URL
   // update is optional — some callers (initial hydrate fetch,
@@ -214,6 +223,8 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           setSessionId,
           setTurns,
           setWidgets,
+          setFocusRequest,
+          focusSeqRef,
         });
       });
       // Belt-and-braces: if the stream ended without `done`, clear
@@ -265,7 +276,12 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
         />
       </div>
       <div className="md:order-2 order-1 min-h-0 bg-ink-50">
-        <WorkspaceDashboard widgets={widgets} fmt={fmt} phase={phase} />
+        <WorkspaceDashboard
+          widgets={widgets}
+          fmt={fmt}
+          phase={phase}
+          focusRequest={focusRequest}
+        />
       </div>
     </div>
   );
@@ -345,11 +361,20 @@ type EventDeps = {
   setSessionId: (id: string | null, opts?: { updateUrl?: boolean }) => void;
   setTurns: React.Dispatch<React.SetStateAction<Turn[]>>;
   setWidgets: React.Dispatch<React.SetStateAction<ClientWidget[]>>;
+  setFocusRequest: React.Dispatch<React.SetStateAction<FocusRequest | null>>;
+  focusSeqRef: React.MutableRefObject<number>;
 };
 
 function handleEvent(ev: SseEvent, deps: EventDeps): void {
   const data = parseJson(ev.data);
-  const { assistantId, setSessionId, setTurns, setWidgets } = deps;
+  const {
+    assistantId,
+    setSessionId,
+    setTurns,
+    setWidgets,
+    setFocusRequest,
+    focusSeqRef,
+  } = deps;
 
   if (ev.event === "session") {
     const obj = data as { id?: string } | null;
@@ -394,10 +419,20 @@ function handleEvent(ev: SseEvent, deps: EventDeps): void {
   }
 
   if (ev.event === "widget_focus") {
-    // Advisory only in W2. The acceptance criterion for focus is
-    // "the client knows which widget to scroll to"; implementing
-    // the actual scroll is a W4 polish once we have multiple
-    // widgets in the wild. Safe no-op until then.
+    // W4: translate the server's "scroll to this widget" signal
+    // into state the dashboard can react to. Bump `seq` so the
+    // effect fires even when the key repeats — refining a filter
+    // twice in a row should pull attention back twice. The server
+    // always sends widget_upsert BEFORE widget_focus, so by the
+    // time the focus effect runs after this setState commits, the
+    // target widget's ref has already been populated. Focus for a
+    // ghost key (e.g. a stale client missed the upsert) no-ops
+    // safely — the ref map simply won't find a target.
+    const obj = data as { widgetKey?: string } | null;
+    if (!obj || typeof obj.widgetKey !== "string") return;
+    const widgetKey: string = obj.widgetKey;
+    focusSeqRef.current += 1;
+    setFocusRequest({ widgetKey, seq: focusSeqRef.current });
     return;
   }
 

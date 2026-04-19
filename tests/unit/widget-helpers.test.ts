@@ -574,7 +574,12 @@ test("emitter.snapshot: ships the current widget list with skipped count", async
   assert.equal(payload.skipped, 1);
 });
 
-test("emitter.upsert: emits widget_upsert on successful write", async () => {
+test("emitter.upsert: emits widget_upsert then widget_focus on successful write (W4)", async () => {
+  // W4 couples upsert with focus: every successful write is
+  // immediately followed by a `widget_focus` frame so the client can
+  // scroll the refreshed widget into view. Order matters — the
+  // client applies upsert first (so the target exists in state)
+  // before the focus handler dispatches scroll/highlight.
   const { prismaLike } = makeStubPrisma();
   const { events, send } = captureSends();
   const emitter = createWorkspaceEmitter({ prismaLike }, "s-1", send);
@@ -585,14 +590,16 @@ test("emitter.upsert: emits widget_upsert on successful write", async () => {
     props: validCampaignListProps,
   });
   assert.ok(widget);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   assert.equal(events[0].event, "widget_upsert");
-  const payload = events[0].data as { widgetKey: string; kind: string };
-  assert.equal(payload.widgetKey, "x");
-  assert.equal(payload.kind, "campaign_list");
+  const upsertPayload = events[0].data as { widgetKey: string; kind: string };
+  assert.equal(upsertPayload.widgetKey, "x");
+  assert.equal(upsertPayload.kind, "campaign_list");
+  assert.equal(events[1].event, "widget_focus");
+  assert.deepEqual(events[1].data, { widgetKey: "x" });
 });
 
-test("emitter.upsert: does NOT emit on validation failure", async () => {
+test("emitter.upsert: does NOT emit either frame on validation failure", async () => {
   const { prismaLike } = makeStubPrisma();
   const { events, send } = captureSends();
   const emitter = createWorkspaceEmitter({ prismaLike }, "s-1", send);
@@ -603,9 +610,37 @@ test("emitter.upsert: does NOT emit on validation failure", async () => {
     props: {},
   });
   assert.equal(result, null);
-  // No emit — the client never hears about a write that didn't
-  // happen.
+  // No upsert frame, no focus frame — the client never hears about
+  // a write that didn't happen.
   assert.equal(events.length, 0);
+});
+
+test("emitter.upsert: re-upserting the same widgetKey re-fires focus each time (W4)", async () => {
+  // The client uses the stream of `widget_focus` frames as the
+  // authoritative "operator just touched this widget" signal. If the
+  // same key is upserted twice, the dashboard should pull attention
+  // to it BOTH times — not just the first.
+  const { prismaLike } = makeStubPrisma();
+  const { events, send } = captureSends();
+  const emitter = createWorkspaceEmitter({ prismaLike }, "s-1", send);
+  await emitter.upsert({
+    widgetKey: "stable",
+    kind: "campaign_list",
+    slot: "primary",
+    props: validCampaignListProps,
+  });
+  await emitter.upsert({
+    widgetKey: "stable",
+    kind: "campaign_list",
+    slot: "primary",
+    props: validCampaignListProps,
+  });
+  // 2 upserts × (upsert + focus) = 4 frames, in strict order.
+  assert.equal(events.length, 4);
+  assert.equal(events[0].event, "widget_upsert");
+  assert.equal(events[1].event, "widget_focus");
+  assert.equal(events[2].event, "widget_upsert");
+  assert.equal(events[3].event, "widget_focus");
 });
 
 test("emitter.remove: emits widget_remove only when a row went away", async () => {

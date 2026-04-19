@@ -365,7 +365,18 @@ export function createWorkspaceEmitter(
     },
     async upsert(input) {
       const widget = await upsertWidget(deps, { ...input, sessionId });
-      if (widget) send("widget_upsert", widget);
+      if (widget) {
+        send("widget_upsert", widget);
+        // W4 — an upsert IS the moment the operator's attention
+        // should follow. The six migrated tools all ship on a direct
+        // operator intent ("list campaigns", "show contacts",
+        // "propose send"), so focusing the freshly-written widget
+        // gives the dashboard a living-surface feel: refined filters
+        // update the same card AND pull it back into view. We emit
+        // focus directly (no second findUnique) because we just
+        // persisted the row and know it exists.
+        send("widget_focus", { widgetKey: widget.widgetKey });
+      }
       return widget;
     },
     async remove(widgetKey) {
