@@ -1,14 +1,12 @@
 import { prisma } from "./db";
-import { dedupKey, normalizeEmail, normalizePhone, parseContactsText } from "./contact";
+import { dedupKey, normalizeEmail, normalizePhone } from "./contact";
 import { sendEmail, sendSms } from "./delivery";
 import { newRsvpToken } from "./tokens";
 import { isUniqueViolation } from "./prisma-errors";
 import { DELIVERED_OK_STATUSES } from "./statuses";
 import { mapConcurrent } from "./concurrency";
+import { runImport } from "./importPlanner";
 import type { Prisma } from "@prisma/client";
-
-const COUNTRY = (process.env.DEFAULT_COUNTRY ?? "SA") as "SA";
-const MAX_IMPORT_ROWS = 10_000;
 
 export type ImportRow = {
   full_name?: string;
@@ -25,6 +23,11 @@ export type ImportRow = {
   notes?: string;
 };
 
+// Preserves the admin-UI return shape, including the now-empty
+// `warnings` array (the planner doesn't carry per-row warnings —
+// the UI never surfaced them on the import page beyond the existing
+// counters, so the array is kept for structural backwards-compat
+// rather than populated).
 export type ImportReport = {
   total: number;
   created: number;
@@ -35,88 +38,28 @@ export type ImportReport = {
   warnings: Array<{ row: number; reason: string }>;
 };
 
-export async function importInvitees(campaignId: string, text: string): Promise<ImportReport> {
-  const rowsAll = parseContactsText(text) as ImportRow[];
-  const capped = rowsAll.length > MAX_IMPORT_ROWS;
-  const rows = capped ? rowsAll.slice(0, MAX_IMPORT_ROWS) : rowsAll;
-
-  const report: ImportReport = {
-    total: rowsAll.length,
-    created: 0,
-    duplicatesWithin: 0,
-    duplicatesExisting: 0,
-    invalid: 0,
-    capped,
+// Thin wrapper over the shared planner — same rationale as
+// `importContacts` in contacts.ts. Delegating here guarantees that
+// the admin-upload path and the `commit_import` chat tool produce
+// identical counters for the same input text + campaign, which is
+// the whole point of the planner extraction.
+export async function importInvitees(
+  campaignId: string,
+  text: string,
+): Promise<ImportReport> {
+  const r = await runImport(
+    { target: "invitees", text, campaignId },
+    "commit",
+  );
+  return {
+    total: r.total,
+    created: r.created,
+    duplicatesWithin: r.duplicatesWithin,
+    duplicatesExisting: r.duplicatesExisting,
+    invalid: r.invalid,
+    capped: r.capped,
     warnings: [],
   };
-
-  const seen = new Set<string>();
-  const batch: Prisma.InviteeCreateManyInput[] = [];
-
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const fullName = (r.full_name || r.name || "").trim().slice(0, 200);
-    const email = normalizeEmail(r.email);
-    const phone = normalizePhone(r.phone || r.mobile || "", COUNTRY);
-    if (!fullName) {
-      report.invalid++;
-      report.warnings.push({ row: i + 2, reason: "missing name" });
-      continue;
-    }
-    if (!email && !phone) {
-      report.invalid++;
-      report.warnings.push({ row: i + 2, reason: "no email or phone" });
-      continue;
-    }
-    const key = dedupKey(email, phone);
-    if (seen.has(key)) {
-      report.duplicatesWithin++;
-      continue;
-    }
-    seen.add(key);
-
-    batch.push({
-      campaignId,
-      fullName,
-      title: (r.title || "").trim().slice(0, 100) || null,
-      organization: (r.organization || r.org || "").trim().slice(0, 200) || null,
-      email,
-      phoneE164: phone,
-      locale: (r.locale || "").trim().toLowerCase().slice(0, 5) || null,
-      tags: (r.tags || "").trim().slice(0, 500) || null,
-      notes: (r.notes || "").trim().slice(0, 2000) || null,
-      guestsAllowed: clampInt(r.guests, 0, 20, 0),
-      dedupKey: key,
-      rsvpToken: newRsvpToken(),
-    });
-  }
-
-  if (batch.length > 0) {
-    const existing = await prisma.invitee.findMany({
-      where: { campaignId, dedupKey: { in: batch.map((b) => b.dedupKey) } },
-      select: { dedupKey: true },
-    });
-    const existingKeys = new Set(existing.map((e) => e.dedupKey));
-    const fresh = batch.filter((b) => !existingKeys.has(b.dedupKey));
-    report.duplicatesExisting = batch.length - fresh.length;
-
-    if (fresh.length > 0) {
-      const res = await prisma.invitee.createMany({ data: fresh });
-      report.created = res.count;
-    }
-  }
-
-  await prisma.eventLog.create({
-    data: { kind: "import.completed", refType: "campaign", refId: campaignId, data: JSON.stringify(report) },
-  });
-
-  return report;
-}
-
-function clampInt(s: string | undefined, min: number, max: number, def: number) {
-  const n = Number(s);
-  if (!Number.isFinite(n)) return def;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 // Bulk version of campaignStats for list views. Computes total /

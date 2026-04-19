@@ -1,6 +1,7 @@
 import { prisma } from "./db";
 import { dedupKey, normalizeEmail, normalizePhone } from "./contact";
 import { isUniqueViolation } from "./prisma-errors";
+import { runImport } from "./importPlanner";
 import type { Contact, Prisma } from "@prisma/client";
 
 export const VIP_TIERS = ["royal", "minister", "vip", "standard"] as const;
@@ -223,4 +224,61 @@ export async function vipWatch(campaignScope: Prisma.CampaignWhereInput = {}) {
 
 export function isArchived(c: Contact): boolean {
   return !!c.archivedAt;
+}
+
+// P7 — bulk import counterpart to `importInvitees` in campaigns.ts.
+// Thin wrapper over the shared full-file planner in
+// `src/lib/importPlanner.ts`. That planner is the single source of
+// truth for the row pipeline (parse → normalise → within-file dedupe
+// → existing-DB dedupe → createMany + audit), so the admin-UI import
+// flow AND the chat `commit_import` tool emit byte-for-byte
+// identical counters and trigger the same EventLog entry. The
+// previous inline implementation forked this logic per-caller, which
+// would have reopened the preview/commit drift gap `propose_import`
+// is there to close.
+//
+// The public return shape (ContactImportReport) is preserved for
+// backwards compatibility with the admin page; the planner's richer
+// report is mapped down to the fields the UI already renders.
+export type ContactImportRow = {
+  full_name?: string;
+  name?: string;
+  title?: string;
+  organization?: string;
+  org?: string;
+  email?: string;
+  phone?: string;
+  mobile?: string;
+  locale?: string;
+  tags?: string;
+  notes?: string;
+  tier?: string;
+  vip_tier?: string;
+};
+
+export type ContactImportReport = {
+  total: number;
+  created: number;
+  duplicatesWithin: number;
+  duplicatesExisting: number;
+  invalid: number;
+  capped: boolean;
+};
+
+export async function importContacts(
+  text: string,
+  createdBy?: string | null,
+): Promise<ContactImportReport> {
+  const r = await runImport(
+    { target: "contacts", text, createdBy: createdBy ?? null },
+    "commit",
+  );
+  return {
+    total: r.total,
+    created: r.created,
+    duplicatesWithin: r.duplicatesWithin,
+    duplicatesExisting: r.duplicatesExisting,
+    invalid: r.invalid,
+    capped: r.capped,
+  };
 }

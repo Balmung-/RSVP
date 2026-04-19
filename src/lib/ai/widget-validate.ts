@@ -70,6 +70,14 @@ export const WIDGET_KINDS = [
   //                       this kind is STRICTLY read-only in P6.
   "file_digest",
   "import_review",
+  // P7 — action-slot confirmation for a structured import. The
+  // operator sees the expected-writes counters, clicks confirm, and
+  // the destructive `commit_import` tool runs on the server with
+  // `allowDestructive: true`. Widget morphs through the same
+  // `ready` | `blocked` | `submitting` | `done` | `error` state
+  // machine that `confirm_send` uses; `done` carries the actual
+  // create/skip/invalid counters.
+  "confirm_import",
 ] as const;
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
@@ -557,6 +565,95 @@ function validateImportReview(p: Record<string, unknown>): boolean {
   return true;
 }
 
+// P7 — `confirm_import` prop shape.
+//
+// Emitted by `propose_import` after it re-reviews an ingested file and
+// decides what a commit would do. The widget sits in the `action`
+// slot of the workspace dashboard and morphs through the same state
+// machine `confirm_send` uses (`ready` / `blocked` / `submitting` /
+// `done` / `error`). The destructive write itself is the
+// `commit_import` tool, which the confirm route dispatches with
+// `allowDestructive: true` after atomically claiming the anchor.
+//
+// Two target modes are currently supported:
+//   - "contacts"  — writes to the global Contact table, no campaign
+//                   required.
+//   - "invitees"  — writes to Campaign.invitees for a specific
+//                   campaign_id; that id is required on the props.
+//
+// `campaign_metadata` is read-only in P7 (preview only — see
+// `import_review`) because a metadata commit would be a mutation
+// against a Campaign row, which is already handled by the
+// `draft_campaign` tool and doesn't belong in the import flow.
+//
+// `expected` mirrors the shape of what `propose_import` computed over
+// the review sample — "if you click confirm, these are the row
+// counters you'll see". `result` on `done` reports what commit_import
+// ACTUALLY did; shapes are intentionally close but not identical
+// (commit can surface `duplicatesInFile` / `errors` that the preview
+// pass cannot know about).
+const IMPORT_COMMIT_TARGETS = ["contacts", "invitees"] as const;
+
+function validateImportExpected(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  for (const k of ["newRows", "existingSkipped", "conflicts", "invalid"]) {
+    if (!isFiniteInteger(v[k])) return false;
+    if ((v[k] as number) < 0) return false;
+  }
+  return true;
+}
+
+function validateImportResult(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  for (const k of [
+    "created",
+    "existingSkipped",
+    "duplicatesInFile",
+    "invalid",
+    "errors",
+  ]) {
+    if (!isFiniteInteger(v[k])) return false;
+    if ((v[k] as number) < 0) return false;
+  }
+  return true;
+}
+
+function validateConfirmImport(p: Record<string, unknown>): boolean {
+  if (!isNonEmptyString(p.fileUploadId)) return false;
+  if (!isNonEmptyString(p.ingestId)) return false;
+  if (!isNonEmptyString(p.filename)) return false;
+  if (!isOneOf(p.target, IMPORT_COMMIT_TARGETS)) return false;
+  // campaign_id is required when target is "invitees" (an invitee row
+  // must belong to some campaign) and null otherwise (contacts are
+  // global). Reject the crossed-wires combinations rather than
+  // letting the commit handler discover them mid-write.
+  if (p.target === "invitees") {
+    if (!isNonEmptyString(p.campaign_id)) return false;
+  } else {
+    if (p.campaign_id !== null) return false;
+  }
+  if (!isStringArray(p.columns)) return false;
+  if (!isFiniteInteger(p.sampledRows)) return false;
+  if ((p.sampledRows as number) < 0) return false;
+  if (!isFiniteInteger(p.totalRows)) return false;
+  if ((p.totalRows as number) < 0) return false;
+  if (!validateImportExpected(p.expected)) return false;
+  if (!isStringArray(p.blockers)) return false;
+  if (!isOneOf(p.state, CONFIRM_STATES)) return false;
+  if (p.state === "done") {
+    if (!validateImportResult(p.result)) return false;
+    if ("error" in p && p.error !== undefined) return false;
+  } else if (p.state === "error") {
+    if (!isNonEmptyString(p.error)) return false;
+    if ("result" in p && p.result !== undefined) return false;
+  } else {
+    if ("result" in p && p.result !== undefined) return false;
+    if ("error" in p && p.error !== undefined) return false;
+  }
+  if (!optional(p, "summary", isString)) return false;
+  return true;
+}
+
 // Kind -> prop-shape validator. Extending this requires: (1) add to
 // WIDGET_KINDS, (2) add validator here, (3) add renderer in the
 // workspace dashboard registry. Skipping any one of the three should
@@ -572,6 +669,7 @@ const PROP_VALIDATORS: Record<WidgetKind, (p: Record<string, unknown>) => boolea
     workspace_rollup: validateWorkspaceRollup,
     file_digest: validateFileDigest,
     import_review: validateImportReview,
+    confirm_import: validateConfirmImport,
   };
 
 // ---- public entry point ----
@@ -702,6 +800,12 @@ export function isTerminalConfirmWidget(
     // landed a terminal state. `ready` / `blocked` / `submitting`
     // are pre-action — dismissing those would throw away an unused
     // authorization anchor and confuse the operator.
+    return props.state === "done" || props.state === "error";
+  }
+  if (kind === "confirm_import") {
+    // P7 — same post-commit policy as confirm_send. Pre-terminal
+    // dismiss would throw away the single-use anchor before the
+    // operator ever actioned it.
     return props.state === "done" || props.state === "error";
   }
   return false;

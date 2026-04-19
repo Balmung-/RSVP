@@ -55,6 +55,56 @@ export function isReleasableRefusal(code: string | null | undefined): boolean {
   return typeof code === "string" && RELEASABLE_REFUSALS.has(code);
 }
 
+// P7 — releasable-refusal whitelist for the import confirm flow.
+//
+// Parallel to `RELEASABLE_REFUSALS` above. Every code in this set is
+// a guard inside `commit_import` that returns BEFORE the planner
+// runs its `createMany` — none of them could have committed partial
+// state, so it's safe to release the single-use anchor and let the
+// operator retry.
+//
+// Sourced from the refusal surface of `src/lib/ai/tools/commit_import.ts`:
+//   - `forbidden`                  — editor role gate failed
+//   - `not_found`                  — ingest not under operator scope
+//   - `campaign_not_found`         — invitees campaign not in scope
+//   - `no_campaign_for_invitees`   — invitees target missing campaign_id
+//   - `file_not_extracted`         — ingest has no extracted text
+//   - `nothing_to_commit`          — planner found zero committable rows
+//
+// NOT included (intentionally): dispatch-layer errors (handler_error:*,
+// needs_confirmation) keep the claim like on the send path. And any
+// refusal emitted by a future planner-inside-transaction code path
+// would NOT belong here without verifying it returns before the write
+// — same discipline as the send whitelist.
+export const RELEASABLE_IMPORT_REFUSALS = new Set([
+  "forbidden",
+  "not_found",
+  "campaign_not_found",
+  "no_campaign_for_invitees",
+  "file_not_extracted",
+  "nothing_to_commit",
+]);
+
+export function isReleasableImportRefusal(
+  code: string | null | undefined,
+): boolean {
+  return typeof code === "string" && RELEASABLE_IMPORT_REFUSALS.has(code);
+}
+
+// Overload of classifyOutcome that uses the import whitelist instead
+// of the send whitelist. The rest of the classification logic is
+// identical — only `shouldReleaseClaim` differs. We could parameterise
+// classifyOutcome itself on the whitelist, but a second named entry
+// point keeps the two confirm flows honest: each flow imports its
+// matching classifier and there's no way to accidentally release on a
+// whitelist that doesn't apply to its handler's refusal surface.
+export function classifyImportOutcome(result: DispatchResult): Classification {
+  const base = classifyOutcome(result);
+  const shouldReleaseClaim =
+    !base.effectiveOk && isReleasableImportRefusal(base.structuredError);
+  return { ...base, shouldReleaseClaim };
+}
+
 export type Classification = {
   // True only when the handler reached a real send path. A
   // structured refusal (handler returned `output.error`) is false

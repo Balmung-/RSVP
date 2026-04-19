@@ -8,6 +8,8 @@ import { proposeSendTool } from "./propose_send";
 import { sendCampaignTool } from "./send_campaign";
 import { summarizeFileTool } from "./summarize_file";
 import { reviewFileImportTool } from "./review_file_import";
+import { proposeImportTool } from "./propose_import";
+import { commitImportTool } from "./commit_import";
 
 // The AI tool registry. Tools self-register by being pushed into
 // `tools` below (one file per tool, imported here). For the scaffold
@@ -45,6 +47,8 @@ export const tools: ToolDef[] = [
   sendCampaignTool as unknown as ToolDef,
   summarizeFileTool as unknown as ToolDef,
   reviewFileImportTool as unknown as ToolDef,
+  proposeImportTool as unknown as ToolDef,
+  commitImportTool as unknown as ToolDef,
 ];
 
 export function getTool(name: string): ToolDef | undefined {

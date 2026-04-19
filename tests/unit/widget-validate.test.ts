@@ -268,7 +268,12 @@ test("validateWidget: WIDGET_KINDS matches the shipped dashboard + rollup kinds"
   //
   // P6 adds `file_digest` + `import_review` — widget-only file ingest
   // surfaces, also no directive twin. The directive registry stays at
-  // six; this set now stands at nine.
+  // six; this set stood at nine after P6.
+  //
+  // P7 adds `confirm_import` — destructive-action confirmation card
+  // emitted by `propose_import`, mirror of `confirm_send`. It has a
+  // renderer (ConfirmImport) so the directive registry widens too;
+  // widget registry stands at ten.
   assert.deepEqual(
     [...WIDGET_KINDS].sort(),
     [
@@ -276,6 +281,7 @@ test("validateWidget: WIDGET_KINDS matches the shipped dashboard + rollup kinds"
       "campaign_card",
       "campaign_list",
       "confirm_draft",
+      "confirm_import",
       "confirm_send",
       "contact_table",
       "file_digest",

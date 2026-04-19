@@ -73,3 +73,21 @@ export function importReviewWidgetKey(
 ): string {
   return `import.review.${target}.${ingestId}`;
 }
+
+// P7 — commit-confirmation card. Like `confirm_send`, it's entity-
+// scoped so a second propose_import for the same (target, ingest)
+// pair upserts the SAME action card rather than stacking duplicates.
+// Target is part of the key because a single file can power a
+// contacts import AND a per-campaign invitees import in flight at
+// the same time — two targets, two separate confirmation anchors.
+//
+// `campaign_metadata` is intentionally excluded from this seam:
+// metadata imports stay read-only in P7 (the `draft_campaign` tool
+// is the authorised write path for Campaign rows). The type union
+// pins that contract at the compiler.
+export function confirmImportWidgetKey(
+  target: "contacts" | "invitees",
+  ingestId: string,
+): string {
+  return `confirm.import.${target}.${ingestId}`;
+}

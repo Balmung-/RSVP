@@ -28,6 +28,10 @@ import {
   ImportReview,
   type ImportReviewProps,
 } from "./directives/ImportReview";
+import {
+  ConfirmImport,
+  type ConfirmImportProps,
+} from "./directives/ConfirmImport";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -145,6 +149,20 @@ export function DirectiveRenderer({
         <ImportReview
           props={directive.props as unknown as ImportReviewProps}
           fmt={fmt}
+        />
+      );
+    case "confirm_import":
+      // P7 — emitted by `propose_import`. Action-slot widget that
+      // morphs through `ready` / `blocked` / `submitting` / `done` /
+      // `error` around a POST to `/api/chat/confirm/<messageId>`
+      // (which re-dispatches `commit_import` with
+      // `allowDestructive: true`). No directive twin — the persisted
+      // widget is the single source of truth for the confirm flow.
+      return (
+        <ConfirmImport
+          props={directive.props as unknown as ConfirmImportProps}
+          fmt={fmt}
+          messageId={directive.messageId}
         />
       );
     default:

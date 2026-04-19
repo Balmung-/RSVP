@@ -6,100 +6,122 @@ import { logAction } from "@/lib/audit";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { dispatch } from "@/lib/ai/tools";
 import { runConfirmSend } from "@/lib/ai/confirm-flow";
+import { runConfirmImport } from "@/lib/ai/confirm-import-flow";
 import { focusWidget, upsertWidget } from "@/lib/ai/widgets";
-import { confirmSendWidgetKey } from "@/lib/ai/widgetKeys";
+import {
+  confirmSendWidgetKey,
+  confirmImportWidgetKey,
+} from "@/lib/ai/widgetKeys";
 import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
 
 // The confirmation endpoint for destructive AI actions.
 //
-// Flow:
-//   1. During a chat turn, the model calls `propose_send`. The tool
-//      handler computes the preview and emits a `confirm_send`
-//      directive; the chat route persists the tool row AND threads
-//      that row's id into the directive envelope as `messageId`.
-//   2. <ConfirmSend/> renders with the messageId and a button that
-//      POSTs here.
-//   3. We atomically claim the anchor row (`confirmedAt: null` →
-//      now), then re-dispatch `send_campaign` with
+// Two destructive flows share this route: `send_campaign` (anchored
+// by `propose_send`) and `commit_import` (anchored by `propose_import`).
+// The route branches on `row.toolName` after the common pre-claim
+// pre-checks (wrong_tool / anchor_was_error / corrupt_input /
+// already_confirmed) and hands off to the matching pure-core flow
+// (`runConfirmSend` or `runConfirmImport`).
+//
+// Flow (generic):
+//   1. During a chat turn, the model calls a propose_* tool. The tool
+//      handler computes the preview and emits the matching
+//      `confirm_send` / `confirm_import` widget; the chat route
+//      persists the tool row AND threads that row's id into the
+//      directive envelope as `messageId`.
+//   2. The widget renders with the messageId and a button that POSTs
+//      here.
+//   3. We atomically claim the anchor row (`confirmedAt: null` → now),
+//      then re-dispatch the destructive tool with
 //      `allowDestructive: true`, using the input stored on that
 //      messageId row (never the client's POST body — see "trust
 //      model" below).
 //   4. On success we persist the summary as a new role="assistant"
-//      ChatMessage so the transcript stays coherent; audit
-//      `ai.confirm.send_campaign`. The client morphs the card
+//      ChatMessage so the transcript stays coherent; audit under
+//      `ai.confirm.<destructiveTool>`. The client morphs the card
 //      in place from the JSON response.
-//   5. On a structured-refusal path (status_not_sendable /
-//      send_in_flight / forbidden / not_found — all of which
-//      refuse BEFORE any send fan-out), we release the claim so
-//      the operator can retry. On a dispatch-throw or a real send,
-//      the claim stays — retrying would either re-send partial
-//      state (bad) or duplicate a completed send (worse).
+//   5. On a structured-refusal path whose code is on the flow's
+//      releasable whitelist (every one of which refuses BEFORE the
+//      real write begins), we release the claim so the operator can
+//      retry. On a dispatch-throw or a refusal inside the write path,
+//      the claim stays — retrying would either re-send / re-write
+//      partial state or duplicate a completed action.
 //
 // Trust model — why the POST takes no body:
 //   - The operator's click authorizes EXECUTING the proposal, not
-//     redefining it. The campaign_id / channel / only_unsent were
-//     the ones the model resolved, persisted, and rendered in the
-//     card the operator read. Accepting them again from the client
-//     would open a swap-the-target attack: click "Send" on preview A,
-//     intercept the POST, swap to campaign B in the body, and the
-//     route would happily send B. Reading straight from the stored
-//     toolInput closes that.
-//   - messageId in the URL is the authorization anchor: ownership
-//     is enforced via a session-join (see the `where` below), not
-//     via a separately-supplied user id.
+//     redefining it. The preview the model resolved, persisted, and
+//     rendered is what gets committed. Accepting new body fields
+//     would open swap-the-target attacks.
+//   - messageId in the URL is the authorization anchor: ownership is
+//     enforced via a session-join (see the `where` below), not via a
+//     separately-supplied user id.
 //
-// Idempotency — why the anchor is single-use (Push 7 fix):
+// Idempotency — single-use anchor:
 //   - Without a server-side gate, a repeat POST against the same
 //     messageId (retry after transient error, browser back/forward,
 //     forged request, or a future client that rehydrates stale
-//     directives) would re-dispatch `send_campaign` and really re-
-//     send. The ConfirmSend "button hidden after success" is local
+//     directives) would re-dispatch the destructive tool and really
+//     re-execute. The widget "button hidden after success" is local
 //     React state only and cannot defend against this.
 //   - The atomic claim via
 //     `updateMany({where: {id, confirmedAt: null}, data: {confirmedAt: now}})`
 //     is race-safe: two concurrent clicks see ONE winner (count=1)
 //     and ONE loser (count=0 → already_confirmed audit + 409).
-//   - On a refusal-that-did-not-send, we release the claim. Only
-//     the four `send_campaign` handler refusals
-//     (forbidden / not_found / status_not_sendable / send_in_flight)
-//     qualify — every one of those returns BEFORE the sendCampaign
-//     fan-out in src/lib/campaigns.ts begins touching providers.
-//     Dispatch-throws (`result.ok === false`) do NOT release: a
-//     throw inside sendCampaign could have left partial state.
-//
-// Success vs structured-refusal — why we inspect tool output (Push 7 fix):
-//   - `dispatch` returns `{ok: true, result: {output: {...}}}` for
-//     ANY path the handler reaches (including
-//     `return {output: {error: "status_not_sendable", ...}}`).
-//     Naively treating `result.ok === true` as HTTP success would
-//     land a structured refusal in the emerald "Sent" UI state and
-//     in the audit log as `ok: true` — a lie in both surfaces.
-//   - We inspect the output for an `error` field and flip the
-//     effective outcome (HTTP contract, audit, persisted
-//     `isError`) to failure in that case. Dispatch-layer failures
-//     (`result.ok === false`) are also failures. Everything else
-//     is a real success.
+//   - Release is whitelisted per-flow: see
+//     `RELEASABLE_REFUSALS` (send) and `RELEASABLE_IMPORT_REFUSALS`
+//     (import) in `src/lib/ai/confirm-classify.ts` for the rationale
+//     on which refusal codes qualify.
 //
 // Audit shape:
-//   - `ai.confirm.send_campaign` on attempted dispatch. `data.ok`
+//   - `ai.confirm.<destructiveTool>` on attempted dispatch. `data.ok`
 //     reflects the EFFECTIVE outcome (not just whether dispatch
 //     returned), so a structured refusal records `ok: false` with
 //     the handler's error as `data.error`.
-//   - `ai.denied.send_campaign` on pre-dispatch denials at this
-//     route layer (stale id, wrong tool, corrupt input, anchor was
-//     itself an error, anchor already confirmed). These are
-//     things the dispatcher never sees, so they need a separate
-//     audit kind.
+//   - `ai.denied.<destructiveTool>` on pre-dispatch denials at this
+//     route layer (stale id, corrupt input, anchor was itself an
+//     error, anchor already confirmed). These are things the
+//     dispatcher never sees, so they need a separate audit kind.
+//   - `ai.denied.confirm` is the catch-all for the wrong_tool case
+//     where `row.toolName` isn't a known proposal anchor — we don't
+//     know which destructive tool the attempt was targeting, so the
+//     per-tool kinds don't apply.
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+// Per-anchor config table. Keyed by the proposal tool name stored on
+// the ChatMessage row. Adding a new destructive flow (e.g. a future
+// propose_archive) requires: (1) a new entry here, (2) a new pure-core
+// flow module + its ConfirmPort bindings in the branch below, (3) the
+// matching widget kind in `widget-validate.ts::WIDGET_KINDS`. Keeping
+// the map typed as a closed literal is what lets TypeScript catch a
+// "we added the flow but forgot to wire up audit kinds" regression.
+type AnchorConfig = {
+  destructiveTool: "send_campaign" | "commit_import";
+  confirmAuditKind: "ai.confirm.send_campaign" | "ai.confirm.commit_import";
+  deniedAuditKind: "ai.denied.send_campaign" | "ai.denied.commit_import";
+};
+
+const ANCHOR_MAP: Record<string, AnchorConfig> = {
+  propose_send: {
+    destructiveTool: "send_campaign",
+    confirmAuditKind: "ai.confirm.send_campaign",
+    deniedAuditKind: "ai.denied.send_campaign",
+  },
+  propose_import: {
+    destructiveTool: "commit_import",
+    confirmAuditKind: "ai.confirm.commit_import",
+    deniedAuditKind: "ai.denied.commit_import",
+  },
+};
+
 // The destructive-action core — claim, dispatch, classify, release,
 // audit, persist, respond — lives in `src/lib/ai/confirm-flow.ts`
-// behind a dependency-injectable port. The route below handles auth,
-// rate limiting, row lookup, pre-claim pre-checks (wrong_tool /
-// anchor_was_error / corrupt_input), and then hands off to
-// runConfirmSend. See `tests/unit/confirm-single-use.test.ts` and
+// (send) and `src/lib/ai/confirm-import-flow.ts` (import) behind
+// dependency-injectable ports. The route below handles auth, rate
+// limiting, row lookup, pre-claim pre-checks (wrong_tool /
+// anchor_was_error / corrupt_input), and then hands off to the
+// matching runner. See `tests/unit/confirm-single-use.test.ts` and
 // `tests/unit/confirm-outcome.test.ts` for the regression coverage
 // that extraction enables.
 
@@ -159,12 +181,17 @@ export async function POST(
     );
   }
 
-  // Only propose_send rows are valid confirmation anchors. Future
-  // destructive previews (e.g. propose_archive) will add their own
-  // allow-list entry here.
-  if (row.toolName !== "propose_send") {
+  // Only known proposal tools are valid confirmation anchors. The
+  // ANCHOR_MAP entry also decides which audit kinds (and below,
+  // which pure-core runner) this request routes through.
+  const anchorConfig = row.toolName ? ANCHOR_MAP[row.toolName] : undefined;
+  if (!anchorConfig) {
+    // We don't know which destructive tool the attempt targeted, so
+    // the per-tool denied kind doesn't apply. Use the generic
+    // `ai.denied.confirm` so these events stay greppable but don't
+    // pollute the per-tool stream.
     await logAction({
-      kind: "ai.denied.send_campaign",
+      kind: "ai.denied.confirm",
       refType: "ChatSession",
       refId: row.sessionId,
       actorId: me.id,
@@ -181,14 +208,14 @@ export async function POST(
     );
   }
 
-  // If the anchor row ITSELF was an error (e.g. propose_send
-  // returned `forbidden` or `not_found`), there's no coherent
-  // destructive action to confirm — something likely went wrong on
-  // the UI side letting the button render at all. Refuse loudly
-  // rather than re-dispatching blind.
+  // If the anchor row ITSELF was an error (e.g. propose_send /
+  // propose_import returned `forbidden` or `not_found`), there's no
+  // coherent destructive action to confirm — something likely went
+  // wrong on the UI side letting the button render at all. Refuse
+  // loudly rather than re-dispatching blind.
   if (row.isError) {
     await logAction({
-      kind: "ai.denied.send_campaign",
+      kind: anchorConfig.deniedAuditKind,
       refType: "ChatSession",
       refId: row.sessionId,
       actorId: me.id,
@@ -203,14 +230,14 @@ export async function POST(
   // Fast-path already_confirmed — skip toolInput parse + buildToolCtx
   // when we already know the anchor is taken. Not race-safe on its
   // own (two parallel reads can both see confirmedAt=null); the
-  // atomic claim inside runConfirmSend is the real guard. This
+  // atomic claim inside each runConfirm* is the real guard. This
   // exists purely so the common "refreshed the tab, clicked again"
   // case returns 409 without doing the relatively expensive input
-  // parse and ctx build. runConfirmSend repeats the same check for
-  // defense-in-depth; the single-use test pins the check there.
+  // parse and ctx build. runConfirm* repeats the same check for
+  // defense-in-depth; the single-use tests pin the check there.
   if (row.confirmedAt) {
     await logAction({
-      kind: "ai.denied.send_campaign",
+      kind: anchorConfig.deniedAuditKind,
       refType: "ChatSession",
       refId: row.sessionId,
       actorId: me.id,
@@ -227,17 +254,20 @@ export async function POST(
     );
   }
 
-  // Recover the propose_send input. Its shape is a SUPERSET-compatible
-  // pass-through for send_campaign (both tools accept campaign_id +
-  // optional channel + optional only_unsent), so we forward verbatim
-  // and let send_campaign's validate() reject anything unexpected.
+  // Recover the stored proposal input. For propose_send it's a
+  // SUPERSET-compatible pass-through for send_campaign (campaign_id,
+  // channel, only_unsent); for propose_import it's the same
+  // {ingestId, target, campaign_id?} shape commit_import's validate()
+  // expects. Either way the destructive tool's validate() rejects
+  // anything unexpected, so a forged / drifted toolInput fails
+  // cleanly in dispatch rather than landing a bad write.
   let parsedInput: unknown = {};
   if (row.toolInput) {
     try {
       parsedInput = JSON.parse(row.toolInput);
     } catch {
       await logAction({
-        kind: "ai.denied.send_campaign",
+        kind: anchorConfig.deniedAuditKind,
         refType: "ChatSession",
         refId: row.sessionId,
         actorId: me.id,
@@ -252,138 +282,221 @@ export async function POST(
 
   const ctx = await buildToolCtx(me);
 
-  // Hand off to the testable flow core. Ports wire prisma, dispatch,
-  // and the audit logger behind a dependency-injection boundary so
-  // the single-use claim contract is covered by unit tests without
-  // a DB harness (see `tests/unit/confirm-single-use.test.ts`).
-  //
-  // Binding notes:
-  //   - `claim` MUST preserve the `confirmedAt: null` predicate —
-  //     that's the atomic-claim contract documented on ConfirmPort.
-  //   - `dispatchSend` closes over `allowDestructive: true`; that
-  //     flag is ONLY ever set here, never in the chat route.
-  //   - `auditConfirm` / `auditDenied` both write to `logAction`
-  //     with the same refType/refId/actorId — different kinds so
-  //     the audit stream can be sliced by intent vs denial.
-  const { status, body } = await runConfirmSend(
-    { id: row.id, sessionId: row.sessionId, confirmedAt: row.confirmedAt },
-    messageId,
-    parsedInput,
-    ctx,
-    {
-      claim: () =>
-        prisma.chatMessage.updateMany({
-          where: { id: row.id, confirmedAt: null },
-          data: { confirmedAt: new Date() },
-        }),
-      release: async () => {
-        await prisma.chatMessage.updateMany({
-          where: { id: row.id },
-          data: { confirmedAt: null },
-        });
+  // Branch on toolName — the pure-core flow, its outcome shape, its
+  // releasable-refusals whitelist, and its widget key formula all
+  // differ between send and import. The port seam hides those
+  // differences from the flows themselves; the route is where the
+  // two shapes visibly diverge.
+  let status: number;
+  let body: Record<string, unknown>;
+  if (row.toolName === "propose_send") {
+    ({ status, body } = await runConfirmSend(
+      { id: row.id, sessionId: row.sessionId, confirmedAt: row.confirmedAt },
+      messageId,
+      parsedInput,
+      ctx,
+      {
+        claim: () =>
+          prisma.chatMessage.updateMany({
+            where: { id: row.id, confirmedAt: null },
+            data: { confirmedAt: new Date() },
+          }),
+        release: async () => {
+          await prisma.chatMessage.updateMany({
+            where: { id: row.id },
+            data: { confirmedAt: null },
+          });
+        },
+        dispatchSend: (input, c) =>
+          dispatch("send_campaign", input, c, { allowDestructive: true }),
+        persistTranscript: async ({ sessionId, content, isError }) => {
+          await prisma.chatMessage.create({
+            data: { sessionId, role: "assistant", content, isError },
+          });
+        },
+        auditConfirm: ({ sessionId, data }) =>
+          logAction({
+            kind: anchorConfig.confirmAuditKind,
+            refType: "ChatSession",
+            refId: sessionId,
+            actorId: me.id,
+            data,
+          }),
+        auditDenied: ({ sessionId, data }) =>
+          logAction({
+            kind: anchorConfig.deniedAuditKind,
+            refType: "ChatSession",
+            refId: sessionId,
+            actorId: me.id,
+            data,
+          }),
+        // W5 — write the post-dispatch terminal state onto the
+        // `confirm.send.${campaign_id}` widget row. We recover the
+        // campaign id from the same stored toolInput the dispatcher
+        // uses, so the widget key agrees with the one propose_send
+        // emitted. A missing campaign_id (shouldn't happen —
+        // propose_send requires it) leaves the widget untouched.
+        markConfirmSendOutcome: async (outcome) => {
+          const campaignId =
+            parsedInput &&
+            typeof parsedInput === "object" &&
+            !Array.isArray(parsedInput) &&
+            typeof (parsedInput as Record<string, unknown>).campaign_id ===
+              "string"
+              ? ((parsedInput as Record<string, unknown>).campaign_id as string)
+              : null;
+          if (!campaignId) return;
+          const widgetKey = confirmSendWidgetKey(campaignId);
+          const existing = await focusWidget(
+            { prismaLike: prisma },
+            row.sessionId,
+            widgetKey,
+          );
+          if (!existing) return;
+          const nextProps: Record<string, unknown> = { ...existing.props };
+          delete nextProps.result;
+          delete nextProps.error;
+          delete nextProps.summary;
+          nextProps.state = outcome.state;
+          if (outcome.state === "done") {
+            nextProps.result = outcome.result;
+          } else {
+            nextProps.error = outcome.error;
+          }
+          if (outcome.summary) nextProps.summary = outcome.summary;
+          await upsertWidget(
+            { prismaLike: prisma },
+            {
+              sessionId: row.sessionId,
+              widgetKey: existing.widgetKey,
+              kind: existing.kind,
+              slot: existing.slot,
+              props: nextProps,
+              order: existing.order,
+              sourceMessageId: existing.sourceMessageId,
+            },
+          );
+        },
       },
-      dispatchSend: (input, c) =>
-        dispatch("send_campaign", input, c, { allowDestructive: true }),
-      persistTranscript: async ({ sessionId, content, isError }) => {
-        // Persist as a plain assistant text turn. Why not role="tool"?
-        // Because rebuildMessages groups trailing role="tool" rows
-        // into the PRECEDING assistant turn's tool_use blocks (see
-        // src/lib/ai/transcript.ts) — and no assistant turn here
-        // actually called send_campaign. A tool row would fabricate
-        // a tool_use the model never made and derail replay.
-        await prisma.chatMessage.create({
-          data: { sessionId, role: "assistant", content, isError },
-        });
+    ));
+  } else {
+    // propose_import — the only other entry in ANCHOR_MAP right now.
+    // Narrowed by the `anchorConfig.destructiveTool === "commit_import"`
+    // invariant; any future entry would need its own branch (and
+    // runConfirm* module).
+    ({ status, body } = await runConfirmImport(
+      { id: row.id, sessionId: row.sessionId, confirmedAt: row.confirmedAt },
+      messageId,
+      parsedInput,
+      ctx,
+      {
+        claim: () =>
+          prisma.chatMessage.updateMany({
+            where: { id: row.id, confirmedAt: null },
+            data: { confirmedAt: new Date() },
+          }),
+        release: async () => {
+          await prisma.chatMessage.updateMany({
+            where: { id: row.id },
+            data: { confirmedAt: null },
+          });
+        },
+        dispatchCommit: (input, c) =>
+          dispatch("commit_import", input, c, { allowDestructive: true }),
+        persistTranscript: async ({ sessionId, content, isError }) => {
+          await prisma.chatMessage.create({
+            data: { sessionId, role: "assistant", content, isError },
+          });
+        },
+        auditConfirm: ({ sessionId, data }) =>
+          logAction({
+            kind: anchorConfig.confirmAuditKind,
+            refType: "ChatSession",
+            refId: sessionId,
+            actorId: me.id,
+            data,
+          }),
+        auditDenied: ({ sessionId, data }) =>
+          logAction({
+            kind: anchorConfig.deniedAuditKind,
+            refType: "ChatSession",
+            refId: sessionId,
+            actorId: me.id,
+            data,
+          }),
+        // Terminal-state writer for the confirm_import widget. Key
+        // formula is `confirm.import.<target>.<ingestId>` — we pull
+        // target + ingestId off the same parsedInput the dispatcher
+        // forwards to commit_import, so the widget key agrees with
+        // the one propose_import emitted. A missing / malformed pair
+        // (shouldn't happen — both tools' validators reject it)
+        // leaves the widget untouched; the operator sees the pre-
+        // action state on next reload and the single-use anchor
+        // prevents a second commit.
+        markConfirmImportOutcome: async (outcome) => {
+          const rec =
+            parsedInput &&
+            typeof parsedInput === "object" &&
+            !Array.isArray(parsedInput)
+              ? (parsedInput as Record<string, unknown>)
+              : null;
+          if (!rec) return;
+          const target = rec.target;
+          const ingestId = rec.ingestId;
+          if (
+            (target !== "contacts" && target !== "invitees") ||
+            typeof ingestId !== "string" ||
+            ingestId.length === 0
+          ) {
+            return;
+          }
+          const widgetKey = confirmImportWidgetKey(target, ingestId);
+          const existing = await focusWidget(
+            { prismaLike: prisma },
+            row.sessionId,
+            widgetKey,
+          );
+          if (!existing) return;
+          const nextProps: Record<string, unknown> = { ...existing.props };
+          delete nextProps.result;
+          delete nextProps.error;
+          delete nextProps.summary;
+          nextProps.state = outcome.state;
+          if (outcome.state === "done") {
+            nextProps.result = outcome.result;
+          } else {
+            nextProps.error = outcome.error;
+          }
+          if (outcome.summary) nextProps.summary = outcome.summary;
+          await upsertWidget(
+            { prismaLike: prisma },
+            {
+              sessionId: row.sessionId,
+              widgetKey: existing.widgetKey,
+              kind: existing.kind,
+              slot: existing.slot,
+              props: nextProps,
+              order: existing.order,
+              sourceMessageId: existing.sourceMessageId,
+            },
+          );
+        },
       },
-      auditConfirm: ({ sessionId, data }) =>
-        logAction({
-          kind: "ai.confirm.send_campaign",
-          refType: "ChatSession",
-          refId: sessionId,
-          actorId: me.id,
-          data,
-        }),
-      auditDenied: ({ sessionId, data }) =>
-        logAction({
-          kind: "ai.denied.send_campaign",
-          refType: "ChatSession",
-          refId: sessionId,
-          actorId: me.id,
-          data,
-        }),
-      // W5 — write the post-dispatch terminal state onto the
-      // `confirm.send.${campaign_id}` widget row. We recover the
-      // campaign id from the same stored toolInput the dispatcher
-      // uses, so the widget key agrees with the one propose_send
-      // emitted. A missing campaign_id (shouldn't happen — propose_send
-      // requires it) leaves the widget untouched; the next reload
-      // will show the pre-action preview, and the already-confirmed
-      // anchor keeps the button from rendering a second send.
-      markConfirmSendOutcome: async (outcome) => {
-        const campaignId =
-          parsedInput &&
-          typeof parsedInput === "object" &&
-          !Array.isArray(parsedInput) &&
-          typeof (parsedInput as Record<string, unknown>).campaign_id ===
-            "string"
-            ? ((parsedInput as Record<string, unknown>).campaign_id as string)
-            : null;
-        if (!campaignId) return;
-        const widgetKey = confirmSendWidgetKey(campaignId);
-        const existing = await focusWidget(
-          { prismaLike: prisma },
-          row.sessionId,
-          widgetKey,
-        );
-        if (!existing) return;
-        // Merge the outcome into the existing props. We strip any
-        // pre-terminal `result`/`error` first (defence in depth: the
-        // validator already rejects stale terminal fields on
-        // pre-terminal states, but a future migration could leave
-        // junk in the DB). Then layer in the new state + matching
-        // outcome fields.
-        const nextProps: Record<string, unknown> = { ...existing.props };
-        delete nextProps.result;
-        delete nextProps.error;
-        delete nextProps.summary;
-        nextProps.state = outcome.state;
-        if (outcome.state === "done") {
-          nextProps.result = outcome.result;
-        } else {
-          nextProps.error = outcome.error;
-        }
-        if (outcome.summary) nextProps.summary = outcome.summary;
-        await upsertWidget(
-          { prismaLike: prisma },
-          {
-            sessionId: row.sessionId,
-            widgetKey: existing.widgetKey,
-            kind: existing.kind,
-            slot: existing.slot,
-            props: nextProps,
-            order: existing.order,
-            sourceMessageId: existing.sourceMessageId,
-          },
-        );
-      },
-    },
-  );
+    ));
+  }
 
-  // W7 — refresh the workspace rollup after a successful send. The
-  // rollup's `invitations.sent_24h` counter is send-sensitive, so the
-  // confirm route is one of the two callsites that must invoke the
-  // refresh helper (the other is the chat route after
-  // `draft_campaign`). No SSE channel here — the row lands in the DB
-  // and the next `workspace_snapshot` (session reload or next chat
-  // turn) picks it up. Errors are swallowed by design: the operator
-  // already got their outcome in `body`, and a stale rollup surfaces
-  // in a later snapshot once the next mutation refreshes.
-  //
-  // Gated on HTTP 200 so we only refresh on the true-success path.
-  // Structured refusals (status_not_sendable, forbidden, etc.) land
-  // as 400 with `body.ok: false` and don't move the send counters;
-  // dispatch-throws keep the anchor claimed and don't run the audit
-  // either, so refreshing there would be wasted work.
+  // W7 — refresh the workspace rollup after a successful destructive
+  // action. Both flows move counters the rollup tracks: a send moves
+  // `invitations.sent_24h`; an import moves `invitees.total` (or
+  // creates Contact rows for the operator's contact book). Gated on
+  // HTTP 200 so we only refresh on the true-success path —
+  // structured refusals (blockers, forbidden, etc.) land as 400 with
+  // `body.ok: false` and don't move counters; dispatch-throws keep
+  // the anchor claimed and also don't refresh (wasted work, and the
+  // next real action will refresh anyway). Errors are swallowed by
+  // design: the operator already got their outcome in `body`, and a
+  // stale rollup surfaces in a later snapshot once the next mutation
+  // refreshes.
   if (status === 200) {
     try {
       await refreshWorkspaceSummary(
