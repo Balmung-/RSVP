@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { buildAuthUrl } from "@/lib/oauth/google";
 import { signState } from "@/lib/oauth/state";
@@ -43,6 +44,22 @@ export const runtime = "nodejs";
 const NONCE_COOKIE = "oauth.google.nonce";
 const NONCE_COOKIE_MAX_AGE_S = 10 * 60; // matches signed-state MAX_AGE_MS
 
+function baseUrl(): string {
+  return (
+    process.env.APP_BASE_URL ??
+    process.env.NEXT_PUBLIC_APP_URL ??
+    "http://localhost:3000"
+  );
+}
+
+function redirectFailed(reason: string) {
+  // Match the callback's error-redirect convention so /settings UI
+  // (B1b) can render a single consistent "last OAuth attempt failed:
+  // <reason>" surface regardless of which side of the flow blew up.
+  const target = `/settings?oauth=google_failed&reason=${encodeURIComponent(reason)}`;
+  return NextResponse.redirect(new URL(target, baseUrl()), 303);
+}
+
 export async function GET(req: Request) {
   const user = await getCurrentUser();
   if (!user) {
@@ -77,6 +94,34 @@ export async function GET(req: Request) {
   // Optional login hint lets an admin with multiple Google accounts
   // pre-select the right chooser entry. Purely UX — no security role.
   const loginHint = url.searchParams.get("hint") ?? undefined;
+
+  // Validate teamId BEFORE signing state. Two reasons this has to
+  // happen here rather than in the callback:
+  //   (1) Signed state is the contract the callback trusts. If we
+  //       signed "teamId=XYZ" now and validated only on callback,
+  //       the callback would either have to throw raw 500s on FK
+  //       violations (bad) or re-do work (ugly). Validating up front
+  //       means by the time state is signed, the teamId is known to
+  //       point at a real row.
+  //   (2) Belt-and-suspenders: the callback STILL catches persistence
+  //       errors and maps them to a handled reason — see `team_gone`
+  //       there — because a team can be deleted in the 10-minute
+  //       window between /start and /callback. We just don't want to
+  //       rely on the callback's catch as the FIRST line of defense.
+  if (teamId) {
+    const team = await prisma.team.findUnique({
+      where: { id: teamId },
+      select: { id: true },
+    });
+    if (!team) {
+      await logAction({
+        kind: "oauth.google.denied",
+        data: { reason: "invalid_team", userId: user.id, teamId },
+        actorId: user.id,
+      });
+      return redirectFailed("invalid_team");
+    }
+  }
 
   const { state, nonce } = signState({ teamId });
   const authUrl = buildAuthUrl({

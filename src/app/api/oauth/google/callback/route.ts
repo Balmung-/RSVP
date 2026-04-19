@@ -262,37 +262,70 @@ export async function GET(req: Request) {
   // concurrent admin clicks on the same connect button are rare in
   // practice (one human), and a leftover duplicate row is a harmless
   // GC target rather than a corruption.
-  await prisma.$transaction(async (tx) => {
-    const existing = await tx.oAuthAccount.findFirst({
-      where: { provider: "google", teamId: teamId },
+  //
+  // The try/catch is the SECOND line of defence for the team-binding
+  // path. `/start` already validates that `teamId` points at a live
+  // team before signing state, but a team can be deleted by an admin
+  // in the 10-minute window between /start and /callback. The FK on
+  // OAuthAccount.teamId -> Team.id would surface that as a raw throw
+  // and the user would see a 500 with no audit row. Catching here
+  // turns it into a handled `team_gone` reason, keeping the error
+  // taxonomy closed.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const existing = await tx.oAuthAccount.findFirst({
+        where: { provider: "google", teamId: teamId },
+      });
+      if (existing) {
+        await tx.oAuthAccount.update({
+          where: { id: existing.id },
+          data: {
+            googleEmail: info.email,
+            accessTokenEnc,
+            refreshTokenEnc,
+            tokenExpiresAt,
+            scopes: tokens.scope,
+            connectedByUserId: user.id,
+          },
+        });
+      } else {
+        await tx.oAuthAccount.create({
+          data: {
+            provider: "google",
+            teamId: teamId,
+            googleEmail: info.email,
+            accessTokenEnc,
+            refreshTokenEnc,
+            tokenExpiresAt,
+            scopes: tokens.scope,
+            connectedByUserId: user.id,
+          },
+        });
+      }
     });
-    if (existing) {
-      await tx.oAuthAccount.update({
-        where: { id: existing.id },
-        data: {
-          googleEmail: info.email,
-          accessTokenEnc,
-          refreshTokenEnc,
-          tokenExpiresAt,
-          scopes: tokens.scope,
-          connectedByUserId: user.id,
-        },
-      });
-    } else {
-      await tx.oAuthAccount.create({
-        data: {
-          provider: "google",
-          teamId: teamId,
-          googleEmail: info.email,
-          accessTokenEnc,
-          refreshTokenEnc,
-          tokenExpiresAt,
-          scopes: tokens.scope,
-          connectedByUserId: user.id,
-        },
-      });
-    }
-  });
+  } catch (e) {
+    // Distinguish "team disappeared mid-flow" (FK violation on
+    // teamId) from any other Prisma / DB failure. Prisma wraps FK
+    // violations as P2003; record-not-found as P2025. We treat
+    // either one as `team_gone` when a teamId was in play, else
+    // fall back to a generic persist_failed.
+    const code = (e as { code?: string } | null)?.code;
+    const isFkMiss = code === "P2003" || code === "P2025";
+    const reason = teamId && isFkMiss ? "team_gone" : "persist_failed";
+    clearNonceCookie();
+    await logAction({
+      kind: "oauth.google.error",
+      data: {
+        reason,
+        message: String(e).slice(0, 300),
+        code: code ?? null,
+        userId: user.id,
+        teamId,
+      },
+      actorId: user.id,
+    });
+    return redirectWith(SETTINGS_ERR(reason));
+  }
 
   clearNonceCookie();
   await logAction({
