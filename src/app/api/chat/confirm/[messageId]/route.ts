@@ -197,6 +197,33 @@ export async function POST(
     );
   }
 
+  // Fast-path already_confirmed — skip toolInput parse + buildToolCtx
+  // when we already know the anchor is taken. Not race-safe on its
+  // own (two parallel reads can both see confirmedAt=null); the
+  // atomic claim inside runConfirmSend is the real guard. This
+  // exists purely so the common "refreshed the tab, clicked again"
+  // case returns 409 without doing the relatively expensive input
+  // parse and ctx build. runConfirmSend repeats the same check for
+  // defense-in-depth; the single-use test pins the check there.
+  if (row.confirmedAt) {
+    await logAction({
+      kind: "ai.denied.send_campaign",
+      refType: "ChatSession",
+      refId: row.sessionId,
+      actorId: me.id,
+      data: {
+        via: "confirm",
+        reason: "already_confirmed",
+        messageId,
+        confirmedAt: row.confirmedAt.toISOString(),
+      },
+    });
+    return NextResponse.json(
+      { ok: false, error: "already_confirmed" },
+      { status: 409 },
+    );
+  }
+
   // Recover the propose_send input. Its shape is a SUPERSET-compatible
   // pass-through for send_campaign (both tools accept campaign_id +
   // optional channel + optional only_unsent), so we forward verbatim
