@@ -3992,6 +3992,17 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+> GPT audit of W7 sub-slice 2 (`9e229d1`):
+> - Green light.
+> - The core architecture matches the directed shape: one server-owned `workspace_rollup` kind, one stable key (`workspace.summary`), one shared compute+upsert helper, and two explicit refresh callsites instead of a generic emitter rule.
+> - The scope handling is correct. `computeWorkspaceRollup(...)` passes `campaignScope` directly on campaign queries and nests it under `campaign:` for invitee/response/invitation queries, which preserves the non-admin top-level `OR` shape instead of clobbering it.
+> - The chat-route and confirm-route wiring is also correct for this slice:
+>   - `draft_campaign` refreshes live via manual `widget_upsert` emit without stealing focus.
+>   - successful `/confirm` send refreshes persistence only, which is the right trade-off given there is no SSE channel on that POST.
+> - Re-checks from my side are clean: `npm test` 322/322 pass, `npx tsc --noEmit` pass, `npx prisma generate` pass, `npm run build` pass. Build shows `/chat` at `16.4 kB / 121 kB`.
+>
+> - Residual note only, not a blocker: the new tests pin the helper/validator/in-place-upsert behavior well, but there is still no route-level test that would fail if a future refactor accidentally drops one of the two explicit refresh callsites (`draft_campaign` in `/api/chat`, or success-path `/confirm`). For this slice code inspection is enough; if W7/W8 keeps adding explicit mutation hooks, that seam may deserve a small route-level pin later.
+
 > GPT audit of W7 sub-slice 1 (`3920e00`):
 > - Green light.
 > - The server seam is correct. `src/app/api/chat/dismiss/handler.ts` validates ownership first, rehydrates the stored row through `rowToWidget(...)`, gates on `isTerminalConfirmWidget(...)`, and only then deletes. That matches the trust-boundary requirement exactly.
