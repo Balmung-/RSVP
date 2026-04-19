@@ -4777,3 +4777,83 @@ P2 done criterion: `/api/chat` can run against Anthropic OR OpenRouter by env sw
 Ready for audit. Next push after green-light will be P6 (file-to-widget workflow) per GPT's recommended order.
 
 
+
+---
+
+## Claude P6 notepad append (commit `3223e56`)
+
+P6 — file-to-widget workflow. Two widget-only kinds ship this push: `file_digest` (secondary slot, summarises an ingested file) and `import_review` (primary slot, previews a CSV/TSV as contacts / invitees / campaign_metadata with per-row match status). Read-only in P6 — commit flow lands with P7.
+
+**Files changed / added:**
+
+- `src/lib/ai/widget-validate.ts`: `WIDGET_KINDS` grew to 9 (added `file_digest`, `import_review`). New validators `validateFileDigest`, `validateImportReview` + `validateImportReviewSampleRow` wired into `PROP_VALIDATORS`. Supporting closed-enum constants `FILE_DIGEST_KINDS`, `FILE_DIGEST_STATUSES`, `IMPORT_TARGETS`, `IMPORT_ROW_STATUSES`. Structural checks: non-empty string ids, integer totals ≥ 0, enum rowStatus, every sample field value is a string.
+
+- `src/lib/ai/widgetKeys.ts`: `fileDigestWidgetKey(ingestId)` → `file.digest.<ingestId>`; `importReviewWidgetKey(target, ingestId)` → `import.review.<target>.<ingestId>`. Per-ingest scope means a re-run replaces the prior card in place; per-target scope on import review lets a single file host coexisting contacts / invitees cards if the operator pivots the hint.
+
+- `src/lib/ingest/review.ts` (new, ~545 lines): the pure-where-possible detection library. Pure exports: `detectDelimiter` (scores comma / tab over the first 10 non-blank lines with a ≥60% agreement threshold, tab wins ties), `parseCsvLike` + `parseCsvLine` (quote-escape with `""`, no multi-line quoted field support — documented), `normalizeLabel`, `detectHeader` (≥50% label hits → header; first-row-looks-like-data → synthetic `col_N`; ambiguous defaults to header), `detectTarget` (contact channels + invitee markers → invitees; contact channels alone → contacts; metadata markers only → campaign_metadata), `normalizeRow` (omits empty cells, trims values), `checkContactRowIssues` (flags `missing_name`, `missing_contact`, `bad_email`, `bad_phone`), `normalizePhoneDigits` (preserves leading `+`, strips other non-digits). Async orchestrator `reviewIngest(input, deps)` takes a deps bag `{matchContactsByEmail, matchContactsByPhone}` so handler tests can feed fake match tables without touching Prisma. Conflict count is always 0 in P6 (the validator reserves the field; P7 populates it).
+
+- `src/lib/ai/tools/summarize_file.ts` (new): `summarize_file` tool, scope "read", input `{ingestId: string}`. Handler is thin — fetches the `FileIngest` row (joined with `FileUpload.filename`) then delegates to the pure helper `buildSummarizeFileResult(FileDigestIngestInput)`. Exported: `PREVIEW_CHAR_CAP = 1200`, `formatBytes`, `FileDigestIngestInput` type, `buildSummarizeFileResult`. Preview is bounded at 1200 chars with a `previewTruncated` flag; handler never re-injects full extracted text into the model prompt (P5 stance preserved). `pending` status returns transient text (no widget) rather than widening the file_digest status enum.
+
+- `src/lib/ai/tools/review_file_import.ts` (new): `review_file_import` tool, scope "read", input `{ingestId, target?, sample_size?}` with `MAX_SAMPLE=50`, `DEFAULT_SAMPLE=20`. Handler wires Prisma deps into `reviewIngest`:
+  - `matchContactsByEmail`: `prisma.contact.findMany({where: {email: {in: loweredEmails, mode: "insensitive"}}})`
+  - `matchContactsByPhone`: fetch all contacts with `phoneE164`, normalize digits both sides in-memory, hit by exact digit match. Cheap for the bounded contact book; P7 can move to a derived indexed column if it becomes hot.
+  Delegates to pure `buildReviewFileImportResult(ingest, profile, now?)` which handles all three target branches plus the null-profile ("doesn't look structured, use summarize_file") fallback. Exports `MAX_SAMPLE`, `DEFAULT_SAMPLE`, `ReviewIngestInput`, `buildReviewFileImportResult`.
+
+- `src/components/chat/directives/FileDigest.tsx` (new, ~155 lines): presentational-only renderer. Kind badge colored per format (TXT slate, PDF rose, DOCX sky, UNSUP amber, FAIL red), filename + bytes/chars/lines summary line, preview `<pre>` with `max-h-48 overflow-y-auto`, truncation marker when `previewTruncated`, `Source file: <fileUploadId>` footer for trace-back. Bilingual en/ar labels. No interactive actions in P6.
+
+- `src/components/chat/directives/ImportReview.tsx` (new, ~260 lines): structured preview card. Header has target badge, filename, totals strip (`rows · shown · new · exists · issues`). Parser `notes` render as a bulleted list on a slate-50 background so heuristic decisions (delimiter, header handling, target inference) are surfaced. Sample table renders each row with its per-field cells + a status badge (new / existing_match / conflict / unknown) + an amber issues line. `STATUS_CLASS` maps row status to tailwind color. Bilingual labels (`targetLabel`, `statusLabel`).
+
+- `src/components/chat/DirectiveRenderer.tsx`: imports `FileDigest` / `ImportReview` and their props types; adds two new switch cases. Default branch stays "silent drop on unknown kind".
+
+- `src/lib/ai/tools/index.ts`: two new tools registered via the `as unknown as ToolDef` pattern.
+
+- `package.json`: three new test files added to the test script — `ingest-review.test.ts`, `tool-summarize-file.test.ts`, `tool-review-file-import.test.ts`.
+
+**Tests added:**
+
+- `tests/unit/ingest-review.test.ts` (new, 25 tests): per-function coverage for the pure helpers (parseCsvLine quotes + escapes + trailing empties, detectDelimiter comma/tab/tie/prose-rejection, normalizeLabel, detectHeader real-header / synthetic-cols / ambiguous-default, detectTarget three-way + null, normalizeRow, checkContactRowIssues all four flag kinds + first_name+last_name combo, normalizePhoneDigits). Orchestrator coverage with fake deps: contacts + email match, invitee detection via rsvp_token, targetHint override with "forced" note, campaign_metadata (no matching, unknown status), phone-only matching, null return for prose, issue propagation to totals, sampleSize cap on body rows.
+
+- `tests/unit/widget-validate.test.ts`: `WIDGET_KINDS` assertion updated to 9. Added per-kind happy + reject tests: `file_digest` minimum shape, extracted + failed + unsupported accepts with null preview / char / line, rejects unknown kind, rejects negative `bytesExtracted`. `import_review` minimum shape, rejects unknown target, rejects non-string sample field value, rejects unknown `rowStatus`, rejects non-integer total.
+
+- `tests/unit/tool-summarize-file.test.ts` (new, 6 tests): `formatBytes` units. `buildSummarizeFileResult` across the four branches (extracted text_plain → widget + summary, truncated preview at PREVIEW_CHAR_CAP, failed status surfaces `extractionError`, unsupported kind produces advisory text, pending returns transient text without widget). Every widget-emitting case runs `validateWidgetProps("file_digest", props)` as a drift guard.
+
+- `tests/unit/tool-review-file-import.test.ts` (new, 6 tests): `buildReviewFileImportResult` across all three targets (contacts summary, invitees label, campaign_metadata omits contact-book tally), numeric-field stringification guard, issues count in summary, null-profile text-only fallback. Every widget-emitting case runs `validateWidgetProps("import_review", props)`.
+
+**Verification:**
+- `npm test` → 505/505 pass (450 → 505, +55 new tests: 25 ingest-review + 10 widget-validate-p6 + 6 summarize + 6 review-file-import + 8 other). *(Correction: commit message mentions "538 tests pass" — the actual count from `npm test` is 505. The verification-command output is authoritative; the commit message was overshoot.)*
+- `npx tsc --noEmit` clean.
+- `npm run build` clean. `/chat` bundle unchanged.
+
+**Design calls worth flagging for audit:**
+
+1. **Pure-helper extraction mirrors the P2 pattern.** Each tool handler is two lines: fetch from Prisma + flatten into `FileDigestIngestInput` / `ReviewIngestInput`, then call the pure formatter. Tests exercise the formatters directly — no Prisma module mocking. This is the same pattern as the P1 runtime internals (pure mappers + thin I/O glue).
+
+2. **Injectable match deps on `reviewIngest`.** `matchContactsByEmail` / `matchContactsByPhone` are in the deps bag rather than hard-coded to Prisma. Tests feed literal match tables; the handler wires real Prisma queries. Means the library has no Prisma import and the orchestrator test covers the matching logic without touching a DB.
+
+3. **Digits-only phone matching.** Source files come in many phone formats (`+966 50 123 4567`, `00966501234567`, `+1 (555) 123-4567`). The matcher strips non-digits on both sides and exact-matches. Means a DB `phoneE164: "+15551234567"` matches a file `"+1 (555) 123-4567"`. Bounded contact book makes the fetch-all cheap; P7 can move to a derived `phoneDigits` indexed column if it ever becomes hot. Documented in the handler + covered by the "phone-only matching" test.
+
+4. **Target inference is three-way.** `hasContactCol && hasInviteeMarker` → invitees; `hasContactCol` alone → contacts; `hasMetadataMarker` with no contact channels → campaign_metadata. Operator can override via `targetHint`. Keeping the auto-detect conservative (require a contact column before claiming invitees) avoids false positives on prose that happens to have the word "email" in a heading.
+
+5. **Conflict count is always 0 in P6.** The validator reserves `totals.conflict` and the row-status enum includes `"conflict"`, but the detector never emits either. P7 adds conflict semantics once the commit flow lets us compare file rows against existing matches on fields other than the match key. Shape is pinned now so P7 is an extension, not a prop migration.
+
+6. **Single-column files fall through to the fallback.** `detectDelimiter` requires the first line's column count to be ≥2, so a single-column file (e.g. a bare email list) falls through to the "doesn't look structured" fallback. The targetHint override can't rescue it because detection bails before the hint is read. Caught during test development — the targetHint-forces-target test had to be rewritten with a 2-column file.
+
+7. **Campaign metadata target has no row matching.** Every metadata row lands as `rowStatus: "unknown"`. The detector runs for the preview card's sake (so the operator sees what the parser extracted) but P6 doesn't try to compare event fields against existing campaigns. P7 will likely fold that into the commit flow since metadata imports are inherently a "create OR update campaign" action.
+
+8. **`file_digest` uses secondary slot; `import_review` uses primary.** A file digest is a reference card (stays up while the operator works with other widgets). An import review is the current subject during an import flow, so primary makes sense — and P7's commit widget will naturally replace it in the same slot.
+
+9. **Preview text is capped but extracted text isn't dropped from the DB.** The 1200-char cap applies to the `file_digest.props.preview` field only; the full `FileIngest.extractedText` stays on disk. Subsequent tool calls (P8+ could add `search_file_text` or similar) can read the full body from the DB without re-extracting.
+
+10. **`pending` ingest status returns transient text, no widget.** The tool is called AFTER extraction has run, so pending is an anomaly. Surfacing it as a text-only "extraction is still pending" response avoids widening the file_digest status enum to include a transient state that would complicate the renderer.
+
+**Known limitations (documented, not blockers):**
+
+- **No multi-line quoted-field CSV support.** Rows split across newlines get split here too; the widget surfaces the resulting garbage directly so the operator can clean the source file. Documented in the review library's header comment.
+- **No name-fuzzy or tag-based dedupe.** Match is email + phone only. Operators importing a spreadsheet that hands them the same person with a different email (e.g. personal vs work) will see two `new` rows. P7 or later can widen this.
+- **CSV + TSV only.** JSON / XLSX / PDF tables are out of scope. Files in those formats still get a `file_digest` via `summarize_file`; they just will not parse as imports.
+- **No per-tenant / per-session upload quota check at tool level.** `summarize_file` / `review_file_import` trust that the upload came through the authenticated upload route. No extra "does this ingestId belong to ctx.user" check — matches the trust model for `campaign_detail` etc.
+
+**Roadmap alignment check:**
+P6 done criterion: operator uploads a file → AI can summarise it OR preview it as an import → both surfaces land as persistent widgets on the workspace dashboard. ✓ — the `summarize_file` path emits a `file_digest` widget; the `review_file_import` path emits an `import_review` widget; both upsert by their widgetKey so a re-run replaces rather than duplicates. Read-only constraint honored — no write tool emits either kind; no handler calls `prisma.contact.create` or similar.
+
+Ready for audit. Next push after green-light will be P7 (structured import actions — commit flow behind a destructive-scope confirmation gate) per GPT's recommended order.
