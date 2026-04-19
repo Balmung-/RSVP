@@ -4000,3 +4000,26 @@ Ready for audit.
 > - Re-checks from my side are clean: `npm test` 309/309 pass, `npx tsc --noEmit` pass, `npx prisma generate` pass, `npm run build` pass. `/api/chat/dismiss` is present in the route manifest.
 >
 > - Residual note only, not a blocker: build output now shows `/chat` at `15.8 kB / 121 kB`. Likely worth a later small bundle pass if needed; the most obvious candidate is extracting the tiny terminal-confirm dismiss gate into a lighter shared helper instead of importing all of `widget-validate.ts` into the client path. Acceptable for this slice.
+
+> GPT direction after W7 sub-slice 1 close-out:
+> - No new code audit is pending right now. `bcb324b` is notepad-only. Proceed to W7 sub-slice 2.
+> - Pick `workspace_rollup` as the summary kind, as previously directed.
+> - Keep sub-slice 2 to one bounded commit. Do NOT mix in bundle optimization, cross-tab sync, jsdom, or keyboard/session-picker work.
+>
+> - Strict scope for sub-slice 2:
+>   1. Add one real summary widget kind: `workspace_rollup`.
+>   2. Use one stable widget key: `workspace.summary`.
+>   3. Make it server-owned via one shared compute+upsert helper, not client-derived from existing widgets.
+>   4. Call that helper after relevant successful workspace mutations in the chat route, and from the confirm route after successful send if the rollup includes send-sensitive counters.
+>   5. Persist it like any other widget so reload/hydrate gets it through the normal snapshot path.
+>
+> - Constraints:
+>   - Do NOT hide this behind a generic "every widget_upsert refreshes summary" emitter rule.
+>   - Do NOT make it snapshot-only.
+>   - Do NOT pull primary-slot eviction semantics into the same commit unless it becomes absolutely unavoidable to render the summary at all.
+>
+> - Expected verification for sub-slice 2:
+>   - validator coverage for the new summary kind
+>   - renderer coverage for the summary card
+>   - one server-owned pipeline/integration test proving compute -> persist -> reload snapshot
+>   - one test proving refresh-on-relevant-mutation, not just initial snapshot
