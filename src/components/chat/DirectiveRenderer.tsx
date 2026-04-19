@@ -23,6 +23,11 @@ import {
   WorkspaceRollup,
   type WorkspaceRollupProps,
 } from "./directives/WorkspaceRollup";
+import { FileDigest, type FileDigestProps } from "./directives/FileDigest";
+import {
+  ImportReview,
+  type ImportReviewProps,
+} from "./directives/ImportReview";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -118,6 +123,27 @@ export function DirectiveRenderer({
       return (
         <WorkspaceRollup
           props={directive.props as unknown as WorkspaceRollupProps}
+          fmt={fmt}
+        />
+      );
+    case "file_digest":
+      // P6 — emitted by `summarize_file`. Widget-only kind; no
+      // directive twin. Lives in the `secondary` slot on the
+      // workspace dashboard.
+      return (
+        <FileDigest
+          props={directive.props as unknown as FileDigestProps}
+          fmt={fmt}
+        />
+      );
+    case "import_review":
+      // P6 — emitted by `review_file_import`. Widget-only kind.
+      // Lives in the `primary` slot — an import review is the main
+      // subject during an import flow, and P7's commit widget will
+      // supersede it in the same slot.
+      return (
+        <ImportReview
+          props={directive.props as unknown as ImportReviewProps}
           fmt={fmt}
         />
       );

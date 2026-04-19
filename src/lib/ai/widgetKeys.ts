@@ -46,3 +46,30 @@ export function confirmSendWidgetKey(campaignId: string): string {
 export function confirmDraftWidgetKey(campaignId: string): string {
   return `confirm.draft.${campaignId}`;
 }
+
+// P6 — file ingest workspace surfaces. Keys are derived from the
+// FileIngest row id (stable across re-extractions because the
+// orchestrator upserts on fileUploadId). A second call to
+// `summarize_file` with the same ingest replaces the same digest
+// card; a second call to `review_file_import` for the same target
+// replaces the same review.
+//
+// Separate helpers because the two widgets can coexist on the
+// dashboard — the digest in `secondary` (quick reference), the
+// review in `primary` (main subject during an import). If a future
+// reshuffling wants both in the same slot, the replacement rules
+// live in the reducer, not in the key — keys are identity, not
+// layout.
+export function fileDigestWidgetKey(ingestId: string): string {
+  return `file.digest.${ingestId}`;
+}
+
+// Target-scoped key so the same file can have a `contacts` review
+// AND a separate `invitees` review coexisting. Most uploads pick one
+// target; this is belt-and-braces for operators who explicitly pivot.
+export function importReviewWidgetKey(
+  target: "contacts" | "invitees" | "campaign_metadata",
+  ingestId: string,
+): string {
+  return `import.review.${target}.${ingestId}`;
+}

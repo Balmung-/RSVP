@@ -265,6 +265,10 @@ test("validateWidget: WIDGET_KINDS matches the shipped dashboard + rollup kinds"
   // the widget registry because it's persisted like every other
   // widget, but the directive-validate registry stays at six; the
   // two sets deliberately diverge from this push onward.
+  //
+  // P6 adds `file_digest` + `import_review` — widget-only file ingest
+  // surfaces, also no directive twin. The directive registry stays at
+  // six; this set now stands at nine.
   assert.deepEqual(
     [...WIDGET_KINDS].sort(),
     [
@@ -274,6 +278,8 @@ test("validateWidget: WIDGET_KINDS matches the shipped dashboard + rollup kinds"
       "confirm_draft",
       "confirm_send",
       "contact_table",
+      "file_digest",
+      "import_review",
       "workspace_rollup",
     ],
   );
@@ -792,6 +798,266 @@ test("validateWidget: confirm_draft — rejects non-done state", () => {
       `state=${state} must reject`,
     );
   }
+});
+
+// ---- P6 — file_digest ----
+
+test("validateWidget: file_digest minimum shape passes", () => {
+  const out = validateWidget({
+    widgetKey: "file.digest.ing-1",
+    kind: "file_digest",
+    slot: "secondary",
+    props: {
+      fileUploadId: "upload_1",
+      ingestId: "ing_1",
+      filename: "guest-list.txt",
+      kind: "text_plain",
+      status: "extracted",
+      bytesExtracted: 1024,
+      preview: "first line\nsecond line",
+      charCount: 20,
+      lineCount: 2,
+      extractedAt: "2026-04-19T10:00:00Z",
+      extractionError: null,
+      previewTruncated: false,
+    },
+  });
+  assert.ok(out);
+});
+
+test("validateWidget: file_digest accepts null preview / char / line on failed", () => {
+  const out = validateWidget({
+    widgetKey: "file.digest.ing-2",
+    kind: "file_digest",
+    slot: "secondary",
+    props: {
+      fileUploadId: "upload_2",
+      ingestId: "ing_2",
+      filename: "broken.pdf",
+      kind: "pdf",
+      status: "failed",
+      bytesExtracted: 0,
+      preview: null,
+      charCount: null,
+      lineCount: null,
+      extractedAt: "2026-04-19T10:00:00Z",
+      extractionError: "pdf parse error",
+    },
+  });
+  assert.ok(out);
+});
+
+test("validateWidget: file_digest rejects unknown kind", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "file.digest.ing-3",
+      kind: "file_digest",
+      slot: "secondary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        kind: "xlsx" as unknown as "pdf",
+        status: "extracted",
+        bytesExtracted: 0,
+        preview: null,
+        charCount: null,
+        lineCount: null,
+        extractedAt: "2026-04-19T00:00:00Z",
+        extractionError: null,
+      },
+    }),
+    null,
+  );
+});
+
+test("validateWidget: file_digest rejects negative bytesExtracted", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "file.digest.ing-4",
+      kind: "file_digest",
+      slot: "secondary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        kind: "text_plain",
+        status: "extracted",
+        bytesExtracted: -1,
+        preview: null,
+        charCount: null,
+        lineCount: null,
+        extractedAt: "2026-04-19T00:00:00Z",
+        extractionError: null,
+      },
+    }),
+    null,
+  );
+});
+
+// ---- P6 — import_review ----
+
+test("validateWidget: import_review minimum shape passes", () => {
+  const out = validateWidget({
+    widgetKey: "import.review.contacts.ing-1",
+    kind: "import_review",
+    slot: "primary",
+    props: {
+      fileUploadId: "upload_1",
+      ingestId: "ing_1",
+      filename: "royal-guests.csv",
+      target: "contacts",
+      columns: ["name", "email"],
+      sample: [
+        {
+          fields: { name: "Alice", email: "a@x.com" },
+          rowStatus: "new",
+        },
+        {
+          fields: { name: "Bob", email: "b@x.com" },
+          rowStatus: "existing_match",
+          matchId: "contact_bob",
+        },
+      ],
+      totals: {
+        rows: 2,
+        sampled: 2,
+        new: 1,
+        existing_match: 1,
+        conflict: 0,
+        with_issues: 0,
+      },
+      detectedAt: "2026-04-19T10:00:00Z",
+      notes: ["Detected CSV format.", "Auto-detected target: contacts."],
+    },
+  });
+  assert.ok(out);
+});
+
+test("validateWidget: import_review rejects unknown target", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "import.review.rooms.ing-1",
+      kind: "import_review",
+      slot: "primary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        target: "rooms" as unknown as "contacts",
+        columns: [],
+        sample: [],
+        totals: {
+          rows: 0,
+          sampled: 0,
+          new: 0,
+          existing_match: 0,
+          conflict: 0,
+          with_issues: 0,
+        },
+        detectedAt: "2026-04-19T00:00:00Z",
+        notes: [],
+      },
+    }),
+    null,
+  );
+});
+
+test("validateWidget: import_review rejects non-string sample field value", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "import.review.contacts.ing-1",
+      kind: "import_review",
+      slot: "primary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        target: "contacts",
+        columns: ["count"],
+        sample: [
+          {
+            fields: { count: 42 as unknown as string },
+            rowStatus: "new",
+          },
+        ],
+        totals: {
+          rows: 1,
+          sampled: 1,
+          new: 1,
+          existing_match: 0,
+          conflict: 0,
+          with_issues: 0,
+        },
+        detectedAt: "2026-04-19T00:00:00Z",
+        notes: [],
+      },
+    }),
+    null,
+  );
+});
+
+test("validateWidget: import_review rejects unknown rowStatus", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "import.review.contacts.ing-1",
+      kind: "import_review",
+      slot: "primary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        target: "contacts",
+        columns: ["name"],
+        sample: [
+          {
+            fields: { name: "Alice" },
+            rowStatus: "flagged" as unknown as "new",
+          },
+        ],
+        totals: {
+          rows: 1,
+          sampled: 1,
+          new: 0,
+          existing_match: 0,
+          conflict: 0,
+          with_issues: 0,
+        },
+        detectedAt: "2026-04-19T00:00:00Z",
+        notes: [],
+      },
+    }),
+    null,
+  );
+});
+
+test("validateWidget: import_review rejects non-integer total", () => {
+  assert.equal(
+    validateWidget({
+      widgetKey: "import.review.contacts.ing-1",
+      kind: "import_review",
+      slot: "primary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        target: "contacts",
+        columns: [],
+        sample: [],
+        totals: {
+          rows: 1.5,
+          sampled: 0,
+          new: 0,
+          existing_match: 0,
+          conflict: 0,
+          with_issues: 0,
+        },
+        detectedAt: "2026-04-19T00:00:00Z",
+        notes: [],
+      },
+    }),
+    null,
+  );
 });
 
 // ---- identity preservation on pass ----

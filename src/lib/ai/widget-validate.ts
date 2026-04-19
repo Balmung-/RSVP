@@ -58,6 +58,18 @@ export const WIDGET_KINDS = [
   // is how the validator accepts rollup writes while every OTHER
   // producer path for the same kind stays firmly rejected.
   "workspace_rollup",
+  // P6 — file ingest surfaces. Both are widget-only (no directive twin):
+  //   `file_digest`     — per-file summary card the assistant emits after
+  //                       reading an ingested file. Upserts per-ingestId
+  //                       so re-summarising replaces the prior card.
+  //   `import_review`   — structured preview of a file the assistant
+  //                       thinks is an importable list (contacts / invitees
+  //                       / campaign metadata). The card renders the
+  //                       detection + sample rows; the actual import
+  //                       commit is gated behind P7's confirm flow, so
+  //                       this kind is STRICTLY read-only in P6.
+  "file_digest",
+  "import_review",
 ] as const;
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
@@ -429,6 +441,122 @@ function validateWorkspaceRollup(p: Record<string, unknown>): boolean {
   return true;
 }
 
+// P6 — `file_digest` prop shape.
+//
+// Emitted by `summarize_file` after the assistant has read an ingested
+// file. The card is per-ingest (upserts on a key derived from ingestId)
+// so re-summarising the same file replaces its card in place.
+//
+// Trace-back: `fileUploadId` + `ingestId` are REQUIRED on every row.
+// P6 constraint: "every extracted fact shown in widgets must trace back
+// to the file/job". The renderer uses `fileUploadId` to link back to
+// the raw upload (P7+ may add a "download original" action).
+//
+// `preview` carries a bounded prefix of the extracted text (capped at
+// the tool-handler boundary, not here — validator accepts any string
+// that fits within MAX_PROPS_JSON_BYTES). Null when extraction failed
+// or kind=unsupported. The card renders `preview` as a short excerpt
+// WITH a visible marker that it's truncated; the full text is never
+// piped into the composer.
+const FILE_DIGEST_KINDS = [
+  "text_plain",
+  "pdf",
+  "docx",
+  "unsupported",
+  "failed",
+] as const;
+
+const FILE_DIGEST_STATUSES = ["extracted", "failed", "unsupported"] as const;
+
+function validateFileDigest(p: Record<string, unknown>): boolean {
+  if (!isNonEmptyString(p.fileUploadId)) return false;
+  if (!isNonEmptyString(p.ingestId)) return false;
+  if (!isNonEmptyString(p.filename)) return false;
+  if (!isOneOf(p.kind, FILE_DIGEST_KINDS)) return false;
+  if (!isOneOf(p.status, FILE_DIGEST_STATUSES)) return false;
+  if (!isFiniteInteger(p.bytesExtracted)) return false;
+  if (p.bytesExtracted < 0) return false;
+  if (!isStringOrNull(p.preview)) return false;
+  if (p.charCount !== null && !isFiniteInteger(p.charCount)) return false;
+  if (p.lineCount !== null && !isFiniteInteger(p.lineCount)) return false;
+  if (!isNonEmptyString(p.extractedAt)) return false;
+  if (!isStringOrNull(p.extractionError)) return false;
+  if (!optional(p, "previewTruncated", isBoolean)) return false;
+  return true;
+}
+
+// P6 — `import_review` prop shape.
+//
+// Emitted by `review_file_import` when the ingested file parses as a
+// recognisable importable list. P6 scope: read-only preview of what
+// would be imported, rendered so the operator can spot obvious issues
+// before the P7 commit flow lands.
+//
+// `target` is one of three recognised import destinations. Adding a
+// new destination requires a validator tweak + a renderer case + a
+// detector case in `src/lib/ingest/review.ts`.
+//
+// `totals` carries the full-file counters; `sample` is the first N
+// rows the detector examined (bounded in the tool handler so the prop
+// blob stays well under MAX_PROPS_JSON_BYTES even for large files).
+//
+// `rowStatus` on each sample row:
+//   "new"              — no match in the target collection today
+//   "existing_match"   — exact match found (email / phone / id)
+//   "conflict"         — match found but fields disagree
+//   "unknown"          — detector didn't try to match (P6 default for
+//                        non-contacts targets)
+const IMPORT_TARGETS = ["contacts", "invitees", "campaign_metadata"] as const;
+const IMPORT_ROW_STATUSES = [
+  "new",
+  "existing_match",
+  "conflict",
+  "unknown",
+] as const;
+
+function validateImportReviewSampleRow(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  if (!isPlainObject(v.fields)) return false;
+  for (const k of Object.keys(v.fields)) {
+    if (typeof v.fields[k] !== "string") return false;
+  }
+  if (!isOneOf(v.rowStatus, IMPORT_ROW_STATUSES)) return false;
+  if ("matchId" in v && v.matchId !== undefined) {
+    if (!isStringOrNull(v.matchId)) return false;
+  }
+  if ("issues" in v && v.issues !== undefined) {
+    if (!isStringArray(v.issues)) return false;
+  }
+  return true;
+}
+
+function validateImportReview(p: Record<string, unknown>): boolean {
+  if (!isNonEmptyString(p.fileUploadId)) return false;
+  if (!isNonEmptyString(p.ingestId)) return false;
+  if (!isNonEmptyString(p.filename)) return false;
+  if (!isOneOf(p.target, IMPORT_TARGETS)) return false;
+  if (!isStringArray(p.columns)) return false;
+  if (!Array.isArray(p.sample)) return false;
+  for (const row of p.sample) {
+    if (!validateImportReviewSampleRow(row)) return false;
+  }
+  if (!isPlainObject(p.totals)) return false;
+  for (const k of [
+    "rows",
+    "sampled",
+    "new",
+    "existing_match",
+    "conflict",
+    "with_issues",
+  ]) {
+    if (!isFiniteInteger(p.totals[k])) return false;
+    if ((p.totals[k] as number) < 0) return false;
+  }
+  if (!isNonEmptyString(p.detectedAt)) return false;
+  if (!isStringArray(p.notes)) return false;
+  return true;
+}
+
 // Kind -> prop-shape validator. Extending this requires: (1) add to
 // WIDGET_KINDS, (2) add validator here, (3) add renderer in the
 // workspace dashboard registry. Skipping any one of the three should
@@ -442,6 +570,8 @@ const PROP_VALIDATORS: Record<WidgetKind, (p: Record<string, unknown>) => boolea
     confirm_draft: validateConfirmDraft,
     confirm_send: validateConfirmSend,
     workspace_rollup: validateWorkspaceRollup,
+    file_digest: validateFileDigest,
+    import_review: validateImportReview,
   };
 
 // ---- public entry point ----
