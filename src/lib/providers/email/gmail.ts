@@ -72,8 +72,32 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
       // Connect yet, or the last connection was revoked and the row
       // deleted. Fail closed with a clear message so the send
       // pipeline's retry logic doesn't loop on a config gap.
+      //
+      // The orderBy is load-bearing, not cosmetic: Postgres treats
+      // NULLs as DISTINCT in the `@@unique([provider, teamId])`
+      // constraint, so two concurrent admin connects on the
+      // office-wide slot (teamId=null) can leave duplicate rows in
+      // the table. Without an explicit order, `findFirst` could pick
+      // a stale older row and we'd send from the wrong mailbox or
+      // with a revoked refresh_token even though a newer valid
+      // connection exists. `updatedAt desc` means:
+      //   - a fresh reconnect always wins over an older duplicate
+      //     (because /callback's upsert bumps updatedAt on the row
+      //     it writes, and the cleanup deleteMany removes losers on
+      //     the same commit);
+      //   - token refreshes tick updatedAt too, so once we start
+      //     using a row it stays the winner across its TTL.
+      // `createdAt desc` / `id desc` are tiebreakers for the
+      // pathological case where two rows share an updatedAt (can
+      // happen if cleanup fails partway for some reason — we'd
+      // rather be deterministic than coin-flip).
       const account = await prisma.oAuthAccount.findFirst({
         where: { provider: "google", teamId },
+        orderBy: [
+          { updatedAt: "desc" },
+          { createdAt: "desc" },
+          { id: "desc" },
+        ],
       });
       if (!account) {
         return {

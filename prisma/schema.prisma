@@ -556,10 +556,18 @@ model OAuthAccount {
 
   // One account per (provider, team). `teamId IS NULL` is the office-wide
   // slot — Postgres treats NULLs as distinct by default, so this unique
-  // DOESN'T enforce "one office-wide row"; the callback route handles
-  // that race with find-first + update-or-create in a transaction. Two
-  // concurrent admin connects on the same office button are vanishingly
-  // rare; a leftover duplicate row is a harmless GC target.
+  // DOESN'T enforce "one office-wide row" on its own. Two mitigations:
+  //   1. The callback route does find-first + update-or-create + a
+  //      deleteMany(id != winner) inside one transaction, so every
+  //      successful connect collapses the (provider, teamId=null)
+  //      set back to one row.
+  //   2. The Gmail send adapter resolves the mailbox with `orderBy
+  //      updatedAt desc` (not an arbitrary findFirst), so if a
+  //      transient duplicate does survive two truly concurrent
+  //      commits it still routes sends to the freshest row.
+  // Leftover duplicates are no longer a "harmless GC target" post-B2 —
+  // they'd cause nondeterministic send routing. The cleanup + ordering
+  // above is what prevents that.
   @@unique([provider, teamId])
   @@index([provider])
 }

@@ -258,10 +258,25 @@ export async function GET(req: Request) {
   // Upsert on (provider, teamId). See schema — Postgres treats NULL
   // as distinct in unique constraints by default, so the teamId=null
   // ("office-wide") case is race-prone at the DB layer. We mitigate
-  // by doing find-first + update-or-create in a transaction — two
-  // concurrent admin clicks on the same connect button are rare in
-  // practice (one human), and a leftover duplicate row is a harmless
-  // GC target rather than a corruption.
+  // in two steps inside one transaction:
+  //   1. find-first + update-or-create — writes the winning row,
+  //      deterministic within a single flow.
+  //   2. deleteMany of any other (provider, teamId) rows that aren't
+  //      the winner — collapses leftover duplicates from a prior
+  //      race back to a single row. The send path (gmail provider)
+  //      also orders by updatedAt desc, so even if a duplicate
+  //      survives (e.g. two truly concurrent commits where neither
+  //      tx sees the other's uncommitted insert), the next send
+  //      picks the fresher row and the next connect deletes the
+  //      stale one.
+  //
+  // Before B2 we described the leftover-duplicate as a "harmless GC
+  // target" — that was true when Gmail sends didn't use these rows.
+  // With B2, the send adapter resolves the sending mailbox from
+  // this table, and a stale duplicate could cause nondeterministic
+  // routing (wrong mailbox, or revoked-refresh-token even though a
+  // newer valid connection exists). Hence the cleanup + deterministic
+  // ordering.
   //
   // The try/catch is the SECOND line of defence for the team-binding
   // path. `/start` already validates that `teamId` points at a live
@@ -275,7 +290,13 @@ export async function GET(req: Request) {
     await prisma.$transaction(async (tx) => {
       const existing = await tx.oAuthAccount.findFirst({
         where: { provider: "google", teamId: teamId },
+        orderBy: [
+          { updatedAt: "desc" },
+          { createdAt: "desc" },
+          { id: "desc" },
+        ],
       });
+      let winnerId: string;
       if (existing) {
         await tx.oAuthAccount.update({
           where: { id: existing.id },
@@ -288,8 +309,9 @@ export async function GET(req: Request) {
             connectedByUserId: user.id,
           },
         });
+        winnerId = existing.id;
       } else {
-        await tx.oAuthAccount.create({
+        const created = await tx.oAuthAccount.create({
           data: {
             provider: "google",
             teamId: teamId,
@@ -301,7 +323,19 @@ export async function GET(req: Request) {
             connectedByUserId: user.id,
           },
         });
+        winnerId = created.id;
       }
+      // Collapse any NULL-race leftovers from a prior connect. This
+      // is the "no harmless duplicate survives a reconnect" half of
+      // the fix — pairs with the send-path orderBy so even a
+      // transient duplicate can't route a send to the wrong row.
+      await tx.oAuthAccount.deleteMany({
+        where: {
+          provider: "google",
+          teamId: teamId,
+          id: { not: winnerId },
+        },
+      });
     });
   } catch (e) {
     // Distinguish "team disappeared mid-flow" (FK violation on
