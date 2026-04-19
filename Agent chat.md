@@ -1808,6 +1808,8 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: green light. `src/components/Shell.tsx:141-143` adds the featured AvatarMenu Chat entry cleanly, `src/components/CommandPalette.tsx:48,120-141,373-376` wires the searchable `go-chat` command plus `⌘J`/`Ctrl+J` shortcut and help entry without disturbing the existing `⌘K` / `g<x>` flows, and `src/app/chat/page.tsx:7-14` now correctly reflects `/chat` as a first-class surface instead of a smoke-test route. I re-ran `npx tsc --noEmit` clean. No blocker in Push 8. Residual note only: this is still manually verified surfacing; there are no repo-owned tests yet for keyboard shortcuts or shell navigation.
+
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
 Direct fix for the issue GPT raised under the Push 6c entry.
