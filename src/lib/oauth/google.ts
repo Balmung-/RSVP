@@ -46,6 +46,7 @@ export const GOOGLE_AUTHORIZE_URL =
 export const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const GOOGLE_USERINFO_URL =
   "https://openidconnect.googleapis.com/v1/userinfo";
+export const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
 // Scopes we request. Kept as a constant so tests can import it and
 // assert that the URL builder emits exactly this set — any future PR
@@ -226,6 +227,94 @@ export async function fetchUserInfo(input: {
     email: json.email,
     email_verified:
       typeof json.email_verified === "boolean" ? json.email_verified : undefined,
+  };
+}
+
+// Revoke a Google OAuth token (access OR refresh). Passing a refresh
+// token invalidates BOTH the refresh token and any access tokens
+// derived from it, which is what we want on admin-initiated disconnect.
+//
+// Fail-open by design: this helper NEVER throws. The disconnect route
+// still needs to delete the local row even if Google's revoke endpoint
+// 5xxs — otherwise a transient Google outage would strand the office
+// in a half-disconnected state (no way to reconnect until Google
+// recovers, because our uniqueness constraint would still be occupied).
+// We return a structured result and let the caller decide whether to
+// surface a warning.
+//
+// The 400 "invalid_token" response is treated as success, not failure:
+// if Google says the token is already invalid, the end state we're
+// trying to reach (revoked) is already achieved. Idempotency matters
+// because an admin might click Disconnect twice, or a previously
+// partial disconnect may have revoked remotely but failed to delete
+// locally — the retry should converge, not error.
+export interface RevokeResult {
+  ok: boolean;
+  status: number;
+  // True when Google says the token is already revoked/expired. We
+  // treat this as `ok: true` for the disconnect flow — the effect is
+  // what we wanted.
+  alreadyInvalid: boolean;
+  // Only populated when ok=false. Short operator-visible string.
+  error?: string;
+}
+
+export async function revokeGoogleToken(input: {
+  token: string;
+  fetchImpl?: FetchLike;
+}): Promise<RevokeResult> {
+  const fetchImpl = input.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  // Google's revoke endpoint accepts `token=` as an x-www-form-urlencoded
+  // body. No client secret required (the token itself authorizes the
+  // revoke).
+  const body = new URLSearchParams({ token: input.token }).toString();
+  let res;
+  try {
+    res = await fetchImpl(GOOGLE_REVOKE_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch (e) {
+    // Network failure — no HTTP status. Report a synthetic 0 so the
+    // caller's audit captures "couldn't reach Google" separately from
+    // "Google said no".
+    return {
+      ok: false,
+      status: 0,
+      alreadyInvalid: false,
+      error: `network: ${String(e).slice(0, 200)}`,
+    };
+  }
+
+  if (res.ok) {
+    return { ok: true, status: res.status, alreadyInvalid: false };
+  }
+
+  // 400 invalid_token means the token was already revoked or never
+  // valid. Either way, the remote state matches what disconnect wants
+  // — treat as success and let the caller drop the local row.
+  if (res.status === 400) {
+    const errText = await res.text().catch(() => "");
+    if (errText.includes("invalid_token")) {
+      return { ok: true, status: 400, alreadyInvalid: true };
+    }
+    return {
+      ok: false,
+      status: 400,
+      alreadyInvalid: false,
+      error: errText.slice(0, 200),
+    };
+  }
+
+  // Everything else: 401/403 (shouldn't happen — revoke is token-
+  // authorized), 429, 5xx. Return the body for audit visibility.
+  const errText = await res.text().catch(() => "");
+  return {
+    ok: false,
+    status: res.status,
+    alreadyInvalid: false,
+    error: errText.slice(0, 200),
   };
 }
 
