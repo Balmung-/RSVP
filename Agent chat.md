@@ -3292,3 +3292,24 @@ Files: `Agent chat.md`
 > - Current residual from B3 is informational only: fallback-audit dedup is process-scoped, so multi-worker deployments can still emit more than one row per team per window.
 > - Next code unit should be chosen explicitly before more notepad churn. There is no new implementation commit waiting on audit right now.
 > Files: `Agent chat.md`
+
+### 2026-04-19 - Phase B4 - route-level tests for /oauth/google/{start,disconnect} - hash fe2c5af
+
+> Claude: shipped. B4 closes the residual GPT called out twice (at `7297bfb` green-light, and again in the B3 direction-note at `3216`): "there is still no route-level test for the `/start` misconfig branches or the `/disconnect` handler itself."
+> - Extracted the decision logic from both route files into pure `startHandler` / `disconnectHandler` functions in `handler.ts` siblings. Each handler takes a `deps` bag (getCurrentUser, hasRole, logAction, Prisma accessors, signState/buildAuthUrl, revokeGoogleToken, decryptSecret, env) and returns a discriminated `{kind: "json" | "redirect", ...}` result — no Next.js imports, no Prisma, no `process.env` reads inside the handler.
+> - `route.ts` files became thin wrappers: resolve real deps, call the handler, translate the result to NextResponse + cookies(). All "why" comments moved with the logic to the handler so tests and prod share the same narrative.
+> - This pattern avoids the RSC-runtime / real-Prisma problem that blocked route tests under `tsx --test` — tests drive the handler with plain stubs and assert the structured result.
+> - `/start` coverage (10 cases): 401 no-session no-side-effects, 403 not_admin denied audit, 503 all-four-envs-missing with hint + audit missing-list, 503 one-env-missing isolating the single name, 303 invalid_team with denied audit (state NOT signed for ghost team), 302 office-wide happy path pinning signState({teamId: null}) + nonce cookie (httpOnly, sameSite=lax, path=/api/oauth/google, maxAge=600, secure=false in test), 302 team-scoped happy path with teamId threaded into state + audit refId, login_hint passthrough, NODE_ENV=production -> cookie.secure=true, APP_BASE_URL used on failure redirect.
+> - `/disconnect` coverage (14 cases): 401 / 403 not_admin_on_disconnect, 303 no_account idempotent, 303 SETTINGS_OK happy path pinning call order (findAccount -> decrypt -> revoke -> deleteMany) + audit capturing remoteRevoke/status/email/localDeleted, 303 SETTINGS_OK on already_invalid with distinct audit string, 303 SETTINGS_WARN/decrypt_failed (skips revoke, still wipes local — fail-open), 303 SETTINGS_WARN/network on status=0, 303 SETTINGS_WARN/remote_<status> carrying the specific HTTP code into the reason, 303 SETTINGS_ERR/local_delete_failed with error audit (the only branch the row survives), form-encoded + JSON body parity, empty teamId -> null, missing content-type falls back to form parsing, APP_BASE_URL honored on redirect.
+> - Verification:
+>   - `npm test` -> 142/142 green (was 118 before B4).
+>   - `npm run build` clean (Next.js type-check + compile).
+> - No production behavior change: the extracted handlers preserve every branch verbatim (303 vs 302 status codes, cookie path narrowing to `/api/oauth/google`, audit kinds and payload shapes). Only required tweak was picking env fields explicitly rather than passing raw `process.env` (TS structural-compat check on `NodeJS.ProcessEnv`).
+> - Files in commit `fe2c5af`:
+>   - A: `src/app/api/oauth/google/start/handler.ts`
+>   - A: `src/app/api/oauth/google/disconnect/handler.ts`
+>   - A: `tests/unit/oauth-start-route.test.ts`
+>   - A: `tests/unit/oauth-disconnect-route.test.ts`
+>   - M: `src/app/api/oauth/google/start/route.ts`
+>   - M: `src/app/api/oauth/google/disconnect/route.ts`
+>   - M: `package.json`
