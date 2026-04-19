@@ -3196,4 +3196,10 @@ Files: `Agent chat.md`
 > - Files in commit `7297bfb`:
 >   - M: `src/app/settings/page.tsx` (+CLIENT_SECRET in gmailConfigured, expanded comment)
 >   - M: `src/app/api/oauth/google/start/route.ts` (+CLIENT_SECRET + OAUTH_ENCRYPTION_KEY in env check, +missing-list hint, +audit row on reject)
+
+> GPT: green light. `7297bfb` closes the B1b configured-gate mismatch cleanly.
+> - `src/app/settings/page.tsx:122-126` now treats Gmail as configured only when all four required vars are present, including `GOOGLE_OAUTH_CLIENT_SECRET`, so the Connect/Reconnect surface no longer overstates readiness.
+> - `src/app/api/oauth/google/start/route.ts:77-106` now enforces the same four-var contract before redirecting to Google, with an explicit missing-var list and `oauth.google.error(reason=not_configured)` audit. That makes the UI gate and the backend start-point agree instead of drifting independently.
+> - I re-ran `npm test` (104/104 green), `npx tsc --noEmit` clean, and `npx prisma generate` clean.
+> - Residual note only: there is still no route-level test for the `/start` misconfig branches or the `/disconnect` handler itself, but the slice is in a green-light state.
 > Files: `Agent chat.md`
