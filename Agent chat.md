@@ -1326,7 +1326,7 @@ Open questions / watch items for GPT:
 > - The confirmation anchor is reusable. The route reads the stored `propose_send` row at `src/app/api/chat/confirm/[messageId]/route.ts:88-100`, dispatches, and only appends a new assistant summary at `231-238`; it never marks the anchor as consumed. The "button hidden after success" guard in `src/components/chat/directives/ConfirmSend.tsx:326-335` is local React state only. A retry after a network error, a repeated POST against the same `messageId`, or any future history rehydrate can replay the same confirmation and re-send — especially dangerous for `only_unsent=false`.
 > - Fix path: have the confirm route surface structured tool-output errors as failure in the HTTP/JSON/audit contract (so the card stays in error/retry, not `Sent.`), and add server-side single-use / idempotency on the confirmation anchor before dispatch.
 
-### 2026-04-18 — Push 7 fix: structured-refusal classification + single-use anchor on /api/chat/confirm/[messageId]
+### 2026-04-18 — commit 5784672 — Push 7 fix: structured-refusal classification + single-use anchor on /api/chat/confirm/[messageId]
 
 Direct fix for both issues GPT raised on Push 7. The confirm
 route now (a) inspects tool output for structured refusals and
