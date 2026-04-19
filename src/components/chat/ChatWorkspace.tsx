@@ -1,11 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AnyDirective } from "./DirectiveRenderer";
 import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
+import {
+  reduceFocusRequest,
+  reduceTurns,
+  reduceWidgets,
+} from "./workspaceReducer";
 
 // The split-workspace orchestrator for /chat (W2).
 //
@@ -56,10 +60,6 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   // the send() callback kicks off a fetch that outlives a re-render.
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Monotonic counter for focus requests. Ref (not state) — the
-  // value only matters as an effect-dep tiebreaker, so re-rendering
-  // just to increment it would be wasted work.
-  const focusSeqRef = useRef(0);
 
   // Single setter that keeps state, ref, and URL in sync. The URL
   // update is optional — some callers (initial hydrate fetch,
@@ -224,7 +224,6 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           setTurns,
           setWidgets,
           setFocusRequest,
-          focusSeqRef,
         });
       });
       // Belt-and-braces: if the stream ended without `done`, clear
@@ -348,36 +347,35 @@ function parseFrame(frame: string): SseEvent | null {
   return { event, data: dataLines.join("\n") };
 }
 
-function parseJson(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
 type EventDeps = {
   assistantId: string;
   setSessionId: (id: string | null, opts?: { updateUrl?: boolean }) => void;
   setTurns: React.Dispatch<React.SetStateAction<Turn[]>>;
   setWidgets: React.Dispatch<React.SetStateAction<ClientWidget[]>>;
   setFocusRequest: React.Dispatch<React.SetStateAction<FocusRequest | null>>;
-  focusSeqRef: React.MutableRefObject<number>;
 };
 
+// W6 — the three `reduce*` functions live in ./workspaceReducer.ts as
+// pure state-transition helpers so they can be unit-tested without a
+// React harness. Every non-session SSE event touches exactly one of
+// {turns, widgets, focusRequest}, so funnelling each event through all
+// three reducers (each a no-op for events they don't recognise) is
+// cheaper than dispatching — React bails out of the unchanged-slice
+// re-renders when the reducer returns the same reference.
+//
+// `session` stays special-cased here because it has a URL side effect
+// (history.replaceState) the pure reducers deliberately don't own.
 function handleEvent(ev: SseEvent, deps: EventDeps): void {
-  const data = parseJson(ev.data);
-  const {
-    assistantId,
-    setSessionId,
-    setTurns,
-    setWidgets,
-    setFocusRequest,
-    focusSeqRef,
-  } = deps;
+  const { assistantId, setSessionId, setTurns, setWidgets, setFocusRequest } =
+    deps;
 
   if (ev.event === "session") {
-    const obj = data as { id?: string } | null;
+    let obj: { id?: string } | null = null;
+    try {
+      obj = JSON.parse(ev.data) as { id?: string } | null;
+    } catch {
+      obj = null;
+    }
     if (obj && typeof obj.id === "string") {
       // Updating the URL here — this is the moment the server
       // first tells us the session id, either on a fresh create or
@@ -387,170 +385,7 @@ function handleEvent(ev: SseEvent, deps: EventDeps): void {
     return;
   }
 
-  if (ev.event === "workspace_snapshot") {
-    const obj = data as { widgets?: ClientWidget[] } | null;
-    if (obj && Array.isArray(obj.widgets)) {
-      // Wholesale replace — the server's view is authoritative.
-      // An empty array is a valid value ("clear the board").
-      setWidgets(obj.widgets);
-    }
-    return;
-  }
-
-  if (ev.event === "widget_upsert") {
-    const widget = data as ClientWidget | null;
-    if (!widget || typeof widget.widgetKey !== "string") return;
-    setWidgets((prev) => {
-      const idx = prev.findIndex((w) => w.widgetKey === widget.widgetKey);
-      if (idx === -1) return [...prev, widget];
-      const next = [...prev];
-      next[idx] = widget;
-      return next;
-    });
-    return;
-  }
-
-  if (ev.event === "widget_remove") {
-    const obj = data as { widgetKey?: string } | null;
-    if (!obj || typeof obj.widgetKey !== "string") return;
-    const key: string = obj.widgetKey;
-    setWidgets((prev) => prev.filter((w) => w.widgetKey !== key));
-    return;
-  }
-
-  if (ev.event === "widget_focus") {
-    // W4: translate the server's "scroll to this widget" signal
-    // into state the dashboard can react to. Bump `seq` so the
-    // effect fires even when the key repeats — refining a filter
-    // twice in a row should pull attention back twice. The server
-    // always sends widget_upsert BEFORE widget_focus, so by the
-    // time the focus effect runs after this setState commits, the
-    // target widget's ref has already been populated. Focus for a
-    // ghost key (e.g. a stale client missed the upsert) no-ops
-    // safely — the ref map simply won't find a target.
-    const obj = data as { widgetKey?: string } | null;
-    if (!obj || typeof obj.widgetKey !== "string") return;
-    const widgetKey: string = obj.widgetKey;
-    focusSeqRef.current += 1;
-    setFocusRequest({ widgetKey, seq: focusSeqRef.current });
-    return;
-  }
-
-  if (ev.event === "text") {
-    const obj = data as { delta?: string } | null;
-    if (!obj || typeof obj.delta !== "string") return;
-    const delta: string = obj.delta;
-    setTurns((prev) =>
-      prev.map((t) => {
-        if (t.kind !== "assistant" || t.id !== assistantId) return t;
-        const blocks = [...t.blocks];
-        const last = blocks[blocks.length - 1];
-        if (last && last.type === "text") {
-          blocks[blocks.length - 1] = { ...last, text: last.text + delta };
-        } else {
-          blocks.push({ type: "text", text: delta });
-        }
-        return { ...t, blocks };
-      }),
-    );
-    return;
-  }
-
-  if (ev.event === "tool") {
-    const obj = data as
-      | {
-          name?: string;
-          status?: "running" | "ok" | "error";
-          error?: string;
-        }
-      | null;
-    if (!obj || typeof obj.name !== "string" || !obj.status) return;
-    const toolName: string = obj.name;
-    const toolStatus: "running" | "ok" | "error" = obj.status;
-    const toolError: string | undefined = obj.error;
-    setTurns((prev) =>
-      prev.map((t) => {
-        if (t.kind !== "assistant" || t.id !== assistantId) return t;
-        const blocks = [...t.blocks];
-        const lastIdx = blocks.length - 1;
-        const last = blocks[lastIdx];
-        if (
-          last &&
-          last.type === "tool" &&
-          last.name === toolName &&
-          last.status === "running" &&
-          toolStatus !== "running"
-        ) {
-          blocks[lastIdx] = {
-            type: "tool",
-            name: toolName,
-            status: toolStatus,
-            error: toolError,
-          };
-        } else {
-          blocks.push({
-            type: "tool",
-            name: toolName,
-            status: toolStatus,
-            error: toolError,
-          });
-        }
-        return { ...t, blocks };
-      }),
-    );
-    return;
-  }
-
-  if (ev.event === "directive") {
-    if (!data || typeof data !== "object") return;
-    const d = data as {
-      kind?: string;
-      props?: Record<string, unknown>;
-      messageId?: string;
-    };
-    if (typeof d.kind !== "string" || !d.props) return;
-    const kind: string = d.kind;
-    const props: Record<string, unknown> = d.props;
-    const messageId: string | undefined =
-      typeof d.messageId === "string" && d.messageId.length > 0
-        ? d.messageId
-        : undefined;
-    const payload: AnyDirective = { kind, props };
-    if (messageId !== undefined) payload.messageId = messageId;
-    setTurns((prev) =>
-      prev.map((t) => {
-        if (t.kind !== "assistant" || t.id !== assistantId) return t;
-        return {
-          ...t,
-          blocks: [...t.blocks, { type: "directive", payload }],
-        };
-      }),
-    );
-    return;
-  }
-
-  if (ev.event === "error") {
-    const obj = data as { message?: string } | null;
-    const message =
-      obj && typeof obj.message === "string" ? obj.message : "stream_error";
-    setTurns((prev) =>
-      prev.map((t) =>
-        t.kind === "assistant" && t.id === assistantId
-          ? { ...t, streaming: false, error: message }
-          : t,
-      ),
-    );
-    return;
-  }
-
-  if (ev.event === "done") {
-    setTurns((prev) =>
-      prev.map((t) =>
-        t.kind === "assistant" && t.id === assistantId
-          ? { ...t, streaming: false }
-          : t,
-      ),
-    );
-    return;
-  }
+  setTurns((prev) => reduceTurns(prev, ev, { assistantId }));
+  setWidgets((prev) => reduceWidgets(prev, ev));
+  setFocusRequest((prev) => reduceFocusRequest(prev, ev));
 }

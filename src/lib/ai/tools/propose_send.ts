@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
+import { confirmSendWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
 
@@ -305,7 +306,7 @@ export const proposeSendTool: ToolDef<Input> = {
         summary: summaryLines.join("\n"),
       },
       widget: {
-        widgetKey: `confirm.send.${campaign.id}`,
+        widgetKey: confirmSendWidgetKey(campaign.id),
         kind: "confirm_send",
         slot: "action",
         props,

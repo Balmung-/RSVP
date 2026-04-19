@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
 import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
+import { confirmDraftWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 
 // Creates a draft Campaign row from a small set of human-shaped
@@ -235,7 +236,7 @@ export const draftCampaignTool: ToolDef<Input> = {
         summary: summaryLines.join("\n"),
       },
       widget: {
-        widgetKey: `confirm.draft.${created.id}`,
+        widgetKey: confirmDraftWidgetKey(created.id),
         kind: "confirm_draft",
         slot: "action",
         props,

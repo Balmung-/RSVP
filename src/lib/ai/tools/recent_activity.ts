@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { phrase, type ActivityRecord } from "@/lib/activity";
+import { ACTIVITY_STREAM_WIDGET_KEY } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 
 // The last N EventLog rows that this operator can see. Matches the
@@ -152,7 +153,7 @@ export const recentActivityTool: ToolDef<Input> = {
     return {
       output: { summary: lines.join("\n"), count: items.length },
       widget: {
-        widgetKey: "activity.stream",
+        widgetKey: ACTIVITY_STREAM_WIDGET_KEY,
         kind: "activity_stream",
         slot: "secondary",
         props: { items, filters: { days, limit } },

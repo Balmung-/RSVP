@@ -1,4 +1,5 @@
 import { searchContacts, VIP_LABEL, type VipTier } from "@/lib/contacts";
+import { CONTACTS_TABLE_WIDGET_KEY } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 
 // Text search across the contact book, optionally narrowed by VIP
@@ -158,7 +159,7 @@ export const searchContactsTool: ToolDef<Input> = {
     return {
       output: { summary: lines.join("\n"), count: items.length, total },
       widget: {
-        widgetKey: "contacts.table",
+        widgetKey: CONTACTS_TABLE_WIDGET_KEY,
         kind: "contact_table",
         slot: "primary",
         props,

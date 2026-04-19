@@ -7,6 +7,7 @@ import { buildToolCtx } from "@/lib/ai/ctx";
 import { dispatch } from "@/lib/ai/tools";
 import { runConfirmSend } from "@/lib/ai/confirm-flow";
 import { focusWidget, upsertWidget } from "@/lib/ai/widgets";
+import { confirmSendWidgetKey } from "@/lib/ai/widgetKeys";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -327,7 +328,7 @@ export async function POST(
             ? ((parsedInput as Record<string, unknown>).campaign_id as string)
             : null;
         if (!campaignId) return;
-        const widgetKey = `confirm.send.${campaignId}`;
+        const widgetKey = confirmSendWidgetKey(campaignId);
         const existing = await focusWidget(
           { prismaLike: prisma },
           row.sessionId,

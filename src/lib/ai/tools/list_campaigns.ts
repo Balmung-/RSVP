@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { bulkCampaignStats } from "@/lib/campaigns";
+import { CAMPAIGNS_LIST_WIDGET_KEY } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 
 // First real tool: enumerate campaigns the operator can see, with
@@ -191,7 +192,7 @@ export const listCampaignsTool: ToolDef<Input> = {
     return {
       output: { summary: lines.join("\n"), count: items.length },
       widget: {
-        widgetKey: "campaigns.list",
+        widgetKey: CAMPAIGNS_LIST_WIDGET_KEY,
         kind: "campaign_list",
         slot: "primary",
         props,

@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { campaignStats } from "@/lib/campaigns";
 import { phrase, type ActivityRecord } from "@/lib/activity";
+import { campaignDetailWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 
 // Deep-read for a single campaign. Used when the operator asks
@@ -210,7 +211,7 @@ export const campaignDetailTool: ToolDef<Input> = {
     return {
       output: { summary: lines.join("\n"), id: detail.id },
       widget: {
-        widgetKey: `campaign.${detail.id}`,
+        widgetKey: campaignDetailWidgetKey(detail.id),
         kind: "campaign_card",
         slot: "primary",
         props: detail,
