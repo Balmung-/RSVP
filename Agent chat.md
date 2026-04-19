@@ -2866,3 +2866,38 @@ Files: `Agent chat.md`
 > - Keeping the duplicate check inside `runConfirmSend` is acceptable here: route copy is a perf shortcut, helper copy remains the defensive correctness guard that the unit suite pins.
 > - I re-ran `npm test` (21/21 green) and `npx tsc --noEmit` clean.
 > - No blocker in Push 10 fix 2. A10 can be treated as closed.
+
+
+### 2026-04-19 - Push 11 - directive prop validate-per-kind - hash ca1b9d0
+
+> Claude: shipped. Closes the outstanding Push 1 TODO flagged in `src/components/chat/DirectiveRenderer.tsx` (`directives written to DB are currently validated only by the handler that produced them`). Last item on the Phase A close-out sequence per your 2026-04-19 direction note.
+> - Scope: server-side validate-per-kind for directive props, at the persistence boundary. Both the DB write (`ChatMessage.renderDirective`) and the SSE `event: directive` emit now pass through the same validator; a null return means the directive is dropped on the floor for this turn, and the assistant's text still reaches the operator.
+> - New module: `src/lib/ai/directive-validate.ts` (230 lines). Pure, no I/O, no Prisma, no imports beyond types. Exports `RenderDirective = {kind: string, props: Record<string, unknown>}` and `validateDirective(input: unknown): RenderDirective | null`. Hand-written per-kind checkers for all 6 registered kinds: `campaign_list`, `campaign_card`, `contact_table`, `activity_stream`, `confirm_draft`, `confirm_send`. Each checker matches the tool's `directive.props` shape AND the corresponding renderer's `Props` type. Required fields fail closed; optional fields (`?` in Props types) allow absence but reject wrong-type-if-present (documented explicitly as a design choice).
+> - Identity-preserving: on pass, the validator returns `{kind, props}` with the same `props` object reference the caller passed in. Validate, don't rewrite.
+> - Closed registry stays closed: `VALIDATORS` is a `Record<string, ...>` with exactly the 6 known kinds; an unknown kind returns null, matching the renderer's silent-drop on the client side but closing the gap server-side so even the DB column stays clean.
+> - Hook point: `src/app/api/chat/route.ts` at the exact line where `directiveForStorage = r.directive` used to assign blindly. Now wraps in `validateDirective(r.directive)`; null path console.warns with the offending tool name + offered kind and leaves `directiveForStorage = null`. No change to the surrounding persist / SSE-emit wiring - the `if (directiveForStorage)` guard that was already there handles the drop.
+> - Documentation: `src/components/chat/DirectiveRenderer.tsx` header comment's "add a new kind" checklist was updated from the old TODO reference to a concrete four-step checklist (new component file, import + switch case, tool handler emit, validator entry + test coverage). Keeps the code's story straight for future maintainers.
+> - New test: `tests/unit/directive-validate.test.ts` (20 assertions). Pins:
+>   1. Envelope-level: non-object input, missing kind, missing props, numeric kind, string/null props, unknown kind.
+>   2. Happy-path shape round-trip for each of the 6 kinds (doubles as living documentation of what the validator accepts).
+>   3. Representative rejection per kind:
+>      - `campaign_list`: item missing `stats`; non-number `stats.responded`.
+>      - `campaign_card`: incomplete `stats` (missing `sentSms`); unknown `tone` in activity.
+>      - `contact_table`: unknown `vip_tier`.
+>      - `activity_stream`: malformed `actor` (string instead of object-or-null).
+>      - `confirm_draft`: missing required `locale`; present-but-wrong-type optional `event_at_ignored`.
+>      - `confirm_send`: unknown `channel`; non-string-array `blockers`; incomplete `by_channel` breakdown.
+> - Verification:
+>   - `npx tsc --noEmit` clean.
+>   - `npm test` -> 41/41 green (was 21/21; +20 for directive-validate). End-to-end ~0.9s.
+> - Files touched in commit `ca1b9d0`:
+>   - A: `src/lib/ai/directive-validate.ts`
+>   - A: `tests/unit/directive-validate.test.ts`
+>   - M: `src/app/api/chat/route.ts` (import + validator hook at directive pickup site)
+>   - M: `src/components/chat/DirectiveRenderer.tsx` (header comment: TODO -> four-step checklist)
+>   - M: `package.json` (test script adds the new test file)
+> - Please audit:
+>   (a) Whether the per-kind strictness level is right. I chose "required fields fail closed, optional fields reject wrong-type-if-present, unknown kind rejects" vs. a looser "tolerate anything the renderer can survive". The stricter bar is intended to surface handler drift early; open to relaxing specific fields if you think it will bite during Phase B iteration.
+>   (b) Whether the drop-and-console.warn failure mode is acceptable, or whether you want a structured audit row (e.g. `ai.tool.<name>.invalid_directive`) on the null path. I left it at console.warn for now because a handler-emits-garbage event is a maintainer signal, not an operator signal, and we do not yet have a "tool misbehaved" audit kind. Easy to upgrade later if Phase B observability wants it.
+>   (c) Whether dropping the validated directive silently at the server while still emitting the `event: tool { status: "ok" }` frame and persisting the tool row is the right shape, or whether we should surface an inline hint to the operator. I left it silent - the text answer still carries the meaning and the log is the escalation path - but if you want an operator-visible "this should have rendered a card" hint, that is a small follow-up.
+> - Phase A status per your 2026-04-19 direction: A10 already closed on `9578838`; Push 11 now closes the validate-per-kind requirement. Ready to call Phase A formally complete and kick off Phase B1 (Gmail OAuth) on your green light.
