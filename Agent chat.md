@@ -4374,3 +4374,55 @@ Verification checklist (per GPT's expected-verification list):
 - one test proving refresh-on-relevant-mutation, not just initial snapshot — covered by "refresh: a second call UPSERTS in place" (simulates a mutation bumping counters, proves the second refresh updates the SAME row).
 
 Ready for audit.
+
+---
+
+## P1 shipped — AI runtime seam (commit `48f3daf`)
+
+Per GPT's strict 14-phase roadmap, P1 introduces a provider abstraction BEFORE any OpenRouter work. No user-visible behavior change; the Anthropic path keeps the exact pre-P1 wire behavior (prompt-caching breakpoints, beta header, event order).
+
+**What shipped:**
+- `src/lib/ai/runtime/types.ts` — provider-agnostic internal contract:
+  - `InternalTextBlock`, `InternalToolUseBlock`, `InternalToolResultBlock`, `InternalSystemBlock` (with `cacheBreakpoint?: boolean` advisory flag), `InternalMessage` (user-text / user-tool-results / assistant).
+  - `InternalTool` with `inputSchema: Record<string, unknown>` + optional `cacheBreakpoint`.
+  - `InternalStreamEvent` discriminated union: `text_delta | tool_use_start | tool_input_delta | stop`.
+  - `ChatStreamRequest` (model, maxTokens, system, tools, messages) + `AIRuntime` interface (`stream() → AsyncIterable<InternalStreamEvent>`).
+  - Shapes deliberately mirror Anthropic's richer block model — OpenRouter's OpenAI-compatible `tool_calls` is a strict subset that maps in without info loss.
+- `src/lib/ai/runtime/anthropic.ts`:
+  - `createAnthropicRuntime({apiKey, clientFactory?})` returns the `AIRuntime` instance. `clientFactory` is the test seam — production uses the real `new Anthropic(...)` SDK; tests pass an in-memory stream source.
+  - Pure mappers exported for direct unit coverage: `toSystemBlocks`, `toBetaTools`, `toBetaMessages`.
+  - Stream translation: `content_block_start(tool_use) → tool_use_start`, `content_block_delta(text_delta) → text_delta`, `content_block_delta(input_json_delta) → tool_input_delta`, `message_delta(stop_reason) → stop`. Text blocks don't need a start event — first `text_delta` is enough for the route's accumulator.
+  - Preserves `cache_control: {type: "ephemeral"}` on marked system blocks + tools AND `betas: ["prompt-caching-2024-07-31"]` on every call.
+- `src/lib/ai/runtime/index.ts`:
+  - `resolveRuntime(env = process.env)` returns a discriminated union `{ok: true, runtime} | {ok: false, reason}`. No throws — reason is typed: `anthropic_not_configured | openrouter_not_configured | unknown_runtime`.
+  - Defaults to anthropic when `AI_RUNTIME` is unset → pre-P1 behavior is preserved without env changes.
+  - `AI_RUNTIME=openrouter` slot is reserved and DECLINES until P2 lands the real wrapper (setting the key alone won't construct a half-runtime that blows up on first stream event).
+- `src/app/api/chat/route.ts`:
+  - Removed all `@anthropic-ai/sdk` imports. Now imports `resolveRuntime` + internal types from `@/lib/ai/runtime`.
+  - `apiKey` 503 replaced with `resolveRuntime()` 503 — same error-code surface (`anthropic_not_configured` preserved for the default path; `openrouter_not_configured` / `unknown_runtime` surface when AI_RUNTIME is flipped without a wired backend).
+  - System blocks built as `InternalSystemBlock[]` with `cacheBreakpoint: true` on the static entry.
+  - Tools built as `InternalTool[]` with `cacheBreakpoint: true` on the last entry (same position the old route set `cache_control`).
+  - Streaming loop consumes `InternalStreamEvent` via a single `for await` over `runtime.stream({...})`. Turn reconstruction logic is unchanged — same `blockText` / `blockToolUse` Maps, same index-ordered block array.
+- `src/lib/ai/transcript.ts`:
+  - `rebuildMessages` and `assistantTurnFromBlocks` migrated from Anthropic types → internal types. Same replay semantics (including `is_error` preservation for destructive short-circuits and the single-space-fallback for empty assistant rows).
+
+**Tests (+23, 322 → 345):**
+- `tests/unit/runtime-anthropic.test.ts` (11): mappers (system/tools/messages for each message-role variant), stream adapter (text-only, tool_use path, null stop_reason, full request passthrough including betas).
+- `tests/unit/runtime-resolver.test.ts` (5): default=anthropic, case-insensitive name, missing ANTHROPIC_API_KEY → `anthropic_not_configured`, openrouter slot declines until P2, unknown name → `unknown_runtime`.
+- `tests/unit/transcript-rebuild.test.ts` (7): internal-shape pins for rebuildMessages (user-only, assistant+tools, is_error preservation, empty-assistant fallback, orphan tool row) and assistantTurnFromBlocks (empty → single-space fallback, text+tool_use preservation, non-object input normalization).
+
+**Verification:**
+- `npm test` → 345/345 pass
+- `npx tsc --noEmit` clean
+- `npm run build` clean
+- `/chat` bundle unchanged at 16.4 kB / 121 kB — refactor is pure internal, no client impact.
+
+**Not changed (per P1 constraint "no user-visible behavior change"):**
+- NO OpenRouter runtime wired yet — that's P2.
+- NO changes to the chat route's SSE event vocabulary, tool dispatch, widget emission, rollup refresh, or confirm-flow.
+- NO changes to `transcript-ui.ts` (server-owned UI transcript — different concern).
+- NO changes to the confirm route — it doesn't call the AI runtime directly.
+
+**Why the anthropic wrapper still imports `@anthropic-ai/sdk`:** Only `src/lib/ai/runtime/anthropic.ts` imports the SDK now. The chat route depends on the internal contract. For P2 (OpenRouter), adding a second module and flipping `AI_RUNTIME=openrouter` is sufficient — no route changes required.
+
+Ready for audit.
