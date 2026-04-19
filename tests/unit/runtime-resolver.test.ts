@@ -40,10 +40,32 @@ test("resolveRuntime: anthropic without API key → anthropic_not_configured", (
   assert.equal(res.reason, "anthropic_not_configured");
 });
 
-test("resolveRuntime: openrouter slot is reserved and declines until P2", () => {
-  // Even with a key set, the openrouter runtime isn't wired yet —
-  // the selector MUST refuse rather than construct a half-runtime
-  // that would blow up on first stream event.
+// P2 — OpenRouter is now a real selectable backend. Resolver still
+// declines when either the key or the model env var is missing —
+// both are required, since OpenRouter has no server-side default.
+
+test("resolveRuntime: openrouter with key + model resolves to openrouter runtime", () => {
+  const res = resolveRuntime({
+    AI_RUNTIME: "openrouter",
+    OPENROUTER_API_KEY: "sk-or",
+    OPENROUTER_MODEL: "anthropic/claude-sonnet-4-6",
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.runtime.name, "openrouter");
+});
+
+test("resolveRuntime: openrouter missing key → openrouter_not_configured", () => {
+  const res = resolveRuntime({
+    AI_RUNTIME: "openrouter",
+    OPENROUTER_MODEL: "anthropic/claude-sonnet-4-6",
+  });
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.equal(res.reason, "openrouter_not_configured");
+});
+
+test("resolveRuntime: openrouter missing model → openrouter_not_configured", () => {
   const res = resolveRuntime({
     AI_RUNTIME: "openrouter",
     OPENROUTER_API_KEY: "sk-or",
@@ -51,6 +73,17 @@ test("resolveRuntime: openrouter slot is reserved and declines until P2", () => 
   assert.equal(res.ok, false);
   if (res.ok) return;
   assert.equal(res.reason, "openrouter_not_configured");
+});
+
+test("resolveRuntime: openrouter is case-insensitive", () => {
+  const res = resolveRuntime({
+    AI_RUNTIME: "OpenRouter",
+    OPENROUTER_API_KEY: "sk-or",
+    OPENROUTER_MODEL: "openai/gpt-4o",
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.runtime.name, "openrouter");
 });
 
 test("resolveRuntime: unknown backend → unknown_runtime", () => {

@@ -1,4 +1,5 @@
 import { createAnthropicRuntime } from "./anthropic";
+import { createOpenRouterRuntime } from "./openrouter";
 import type { AIRuntime } from "./types";
 
 // Runtime selector. Reads `AI_RUNTIME` at resolution time and hands
@@ -30,6 +31,16 @@ export type RuntimeEnv = {
   AI_RUNTIME?: string;
   ANTHROPIC_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  // P2 — OpenRouter model is env-driven, not hard-coded. An
+  // OpenRouter model id is namespaced (e.g.
+  // `anthropic/claude-sonnet-4-6`), which is distinct from the
+  // Anthropic-native id the route passes in `request.model` — so
+  // the OpenRouter runtime substitutes this value over the request.
+  OPENROUTER_MODEL?: string;
+  // Optional analytics headers OpenRouter uses to populate the
+  // dashboard; not part of auth.
+  OPENROUTER_HTTP_REFERER?: string;
+  OPENROUTER_X_TITLE?: string;
 };
 
 // Exposed as a parameter so unit tests can simulate env states
@@ -47,10 +58,20 @@ export function resolveRuntime(
   }
 
   if (name === "openrouter") {
-    // P2 lands the real wrapper. Until then, declining early keeps
-    // the failure mode explicit rather than constructing a runtime
-    // that would blow up on first stream event.
-    return { ok: false, reason: "openrouter_not_configured" };
+    const apiKey = env.OPENROUTER_API_KEY;
+    const model = env.OPENROUTER_MODEL;
+    // Both are required — a missing model is as fatal as a missing
+    // key because OpenRouter has no server-side default for us.
+    if (!apiKey || !model) return { ok: false, reason: "openrouter_not_configured" };
+    return {
+      ok: true,
+      runtime: createOpenRouterRuntime({
+        apiKey,
+        model,
+        httpReferer: env.OPENROUTER_HTTP_REFERER,
+        xTitle: env.OPENROUTER_X_TITLE,
+      }),
+    };
   }
 
   return { ok: false, reason: "unknown_runtime" };
