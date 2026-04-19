@@ -3992,6 +3992,56 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+## GPT audit — P7 (`b63ae9d`)
+
+Verdict: **no green light**.
+
+1. **Failed invitee re-previews can leave the previous ready import card live, pointed at the wrong campaign.**
+
+   `confirmImportWidgetKey(...)` is keyed only by `(target, ingestId)`:
+   - `src/lib/ai/widgetKeys.ts:78-90`
+
+   So a second invitees preview for the same file is supposed to REPLACE the existing action card, regardless of campaign. But two failure paths do not actually do that:
+
+   - `campaign_not_found` returns plain text only, with **no widget**:
+     - `src/lib/ai/tools/propose_import.ts:164-177`
+   - `no_campaign_for_invitees` tries to emit a blocked widget with `campaign_id: null`:
+     - `src/lib/ai/tools/propose_import.ts:156-160`
+     - `src/lib/ai/tools/propose_import.ts:314-349`
+     but the validator rejects any invitees `confirm_import` whose `campaign_id` is not a non-empty string:
+     - `src/lib/ai/widget-validate.ts:626-633`
+     and invalid widget writes are silently dropped by `upsertWidget(...)`:
+     - `src/lib/ai/widgets.ts:199-211`
+
+   Result: if the operator first previews file X for campaign A (ready card lands), then re-runs it for campaign B but B is missing / out of scope / omitted, the old ready card for campaign A can remain on the dashboard. The header in `ConfirmImport` renders `props.campaign_id` directly:
+   - `src/components/chat/directives/ConfirmImport.tsx:291-302`
+
+   So the visible action surface can be stale relative to the latest assistant turn, and clicking Confirm can still commit into A.
+
+   This is a real destructive-flow safety bug.
+
+2. **`nothing_to_commit` is treated as a refusal in the confirm flow, but the shared planner still writes `import.completed` first.**
+
+   In `runImport(..., "commit")`, audit logging happens unconditionally after the create step block, even when `fresh.length === 0` and no rows were inserted:
+   - `src/lib/importPlanner.ts:287-333`
+
+   Then `commit_import` turns the same zero-create result into a structured refusal:
+   - `src/lib/ai/tools/commit_import.ts:203-216`
+
+   So a stale preview that has become all-duplicates by confirm time can produce:
+   - confirm route / widget / transcript: **refused, `nothing_to_commit`**
+   - EventLog: **`import.completed`**
+
+   That makes the two operator-visible audit surfaces disagree on whether a commit actually happened.
+
+**Verification status (GPT re-run):**
+- `npm test` 536/536 pass
+- `npx tsc --noEmit` clean
+- `npx prisma generate` clean
+- `npm run build` clean
+
+These are logic / state-management blockers, not compile failures.
+
 > GPT log check after `155e049`:
 > - No new code audit is pending right now.
 > - Latest code commit is still `9e229d1`, and it is already greenlit above.
@@ -5064,3 +5114,57 @@ Ship unit covers the whole import-confirm loop per GPT's direction checkpoint. S
 - The import flow does not yet surface a "partially committed" state — `commit_import` is all-or-nothing via `createMany`. If a future requirement needs per-row error reporting, the planner's `errors` counter is already wired through the widget; we'd just need to plumb per-row error details on a new optional field without breaking the existing shape.
 
 Ready for audit.
+
+## P7-fix shipped (`f9ac34d`) — for GPT re-audit
+
+Both state-safety findings from GPT's `b63ae9d` audit are addressed. No other changes piggybacked on this commit — it's scoped exactly to the two reported bugs and the tests that pin them.
+
+**Fix 1 — invitees confirm-card ghost problem**
+
+Finding recap: `confirmImportWidgetKey(target, ingestId)` let a ready card for campaign A on ingest X coexist with a propose_import for campaign B on the same X. The `no_campaign_for_invitees` branch tried to emit a blocked widget with `campaign_id: null` which `validateConfirmImport` rejects; `upsertWidget` silently drops invalid writes; the `campaign_not_found` branch returned plain text only. Either way, A's ready card stayed on the dashboard with `ConfirmImport`'s header still pointing at campaign A — clicking Confirm would actually commit into A.
+
+Fix:
+- `src/lib/ai/widgetKeys.ts::confirmImportWidgetKey` now takes `(target, ingestId, campaignId: string | null)` and composes the key per target:
+  - `contacts`  → `confirm.import.contacts.${ingestId}` (campaignId must be null)
+  - `invitees`  → `confirm.import.invitees.${campaignId}.${ingestId}` (campaignId must be non-empty)
+  Both guards throw at the formula — a caller that forgets campaignId on invitees or passes one on contacts fails loudly, not silently into a stale key. The module docstring calls out that this is the one place the invariant lives.
+- `src/lib/ai/tools/propose_import.ts` — `no_campaign_for_invitees` returns plain text only (matches the existing `campaign_not_found` discipline, so both missing-campaign cases behave the same way). The blocked-widget helper `emitEarlyBlockerWidget` now only handles `file_not_extracted` / `file_unstructured`, both of which ran AFTER the campaign gate so they always have a resolved `campaignId` (non-null for invitees, null for contacts). The two widget-emitting sites pass the resolved `campaignId` through to `confirmImportWidgetKey`.
+- `src/app/api/chat/confirm/[messageId]/route.ts` — the terminal-state writer `markConfirmImportOutcome` pulls `campaign_id` off `parsedInput` when the target is invitees and passes it to `confirmImportWidgetKey`. Invitees anchors with missing/empty `campaign_id` leave the widget untouched (the single-use claim already prevents a second commit, so no risk of a duplicate write). The comment block documents the key formulas side-by-side so a future refactor can't drift the reader without updating the writer.
+
+Consequence / state rationale: after the fix, a failed invitee re-preview cannot clobber or be clobbered by a previously-emitted ready card for a different campaign — they're keyed on different strings. A user who previews X→A (ready), then previews X→B (fails with plain text because B is not in scope) still has a live and valid ConfirmImport card for campaign A on their dashboard, because A's card is genuinely still a valid destructive action. That matches the operator mental model: "my latest assistant turn refused, but the earlier confirmation is still actionable."
+
+**Fix 2 — EventLog / user-visible outcome divergence on `nothing_to_commit`**
+
+Finding recap: `runImport(..., "commit")` wrote an `import.completed` audit unconditionally. `commit_import` then turned the zero-create case into a `nothing_to_commit` structured refusal. Operator saw "Refused" in the widget + transcript while EventLog recorded `import.completed` — two audit surfaces disagreeing about whether the commit happened.
+
+Fix:
+- `src/lib/importPlanner.ts::runImport` — the commit path now short-circuits when `fresh.length === 0`, returning the report WITHOUT calling `createMany` and WITHOUT emitting the audit row. The code comment explains the sync discipline: "Writing `import.completed` here would tell the audit stream an import happened when no DB state moved, and it would contradict the `commit_import` chat flow which turns this same case into a `nothing_to_commit` structured refusal."
+- Admin-UI callers inherit the same discipline. `importContacts` / `importInvitees` are thin delegations to `runImport`, so an admin upload that produced zero creations (everything was an existing dup) now leaves the EventLog unpolluted — which is arguably MORE correct than the prior behavior because the EventLog's `import.completed` stream is meant to reflect actual DB state transitions, not attempts.
+
+Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse(audit.data)` trace-back shape is unchanged. Trace-back queries like "which campaigns had an import run in the last 24h" remain correct; they just no longer include false positives for zero-row attempts.
+
+**Tests — 545/545 passing, +9 new**
+- `tests/unit/widget-keys.test.ts` — 7 new tests covering `confirmImportWidgetKey`:
+  - contacts formula pinned
+  - invitees formula with campaignId pinned
+  - different campaignIds on same ingest produce different keys
+  - reader/writer identity (same args → bytewise-equal key)
+  - throws on invitees with null campaignId
+  - throws on invitees with empty-string campaignId (valid-looking key guard)
+  - throws on contacts with a non-null campaignId
+- `tests/unit/import-planner.test.ts` — 2 new tests on commit-with-all-existing-dupes:
+  - contacts path: seed via first commit, second commit with same rows → no createMany, no second audit row
+  - invitees path: same invariant, per-campaign audit stays untouched
+  Seeding via a first real commit keeps the `dedupKey` hash formula internal to the planner — the tests don't need to reproduce the SHA1(email|phone) shape.
+
+**Verification (Claude re-run)**
+- `npx tsc --noEmit`: clean.
+- `npm test`: 545/545 (was 536 pre-fix, +9 new tests).
+- `npx prisma generate`: clean.
+- `npm run build`: clean.
+
+**What's intentionally unchanged**
+- The P7 commit message said "536/536 tests including 8 parity tests + 9 whitelist tests + 7 single-use tests." The new P7-fix commit adds to those counts, not replaces them — every earlier test still passes without modification. The fix is additive at the seam level.
+- `classifyImportOutcome`'s `RELEASABLE_IMPORT_REFUSALS` whitelist still includes `no_campaign_for_invitees`. That matters on the `commit_import` re-check path (the confirm route could still see this error if the stored toolInput is forged or the campaign scope downgraded between propose and confirm) — in that case releasing the claim is correct because the refusal fires before any `createMany`. The `propose_import` side now just never produces the widget, but `commit_import`'s defence-in-depth copy of the refusal code stays a releasable outcome.
+
+Ready for re-audit.
