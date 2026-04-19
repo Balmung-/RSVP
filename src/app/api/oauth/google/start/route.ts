@@ -74,20 +74,44 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI;
-  if (!clientId || !redirectUri) {
+  // /start technically only needs CLIENT_ID + REDIRECT_URI to build the
+  // authorization URL, but the round-trip requires CLIENT_SECRET at the
+  // callback (for code exchange) and OAUTH_ENCRYPTION_KEY (to encrypt
+  // tokens at rest). Checking all four here means an incomplete config
+  // fails FAST with a clear error — without this check the admin gets
+  // shipped through Google's consent screen and sees a stale-looking
+  // "not_configured" redirect on return, which is the opaque-misconfig
+  // UX B1b was built to eliminate. The /settings "Configured" gate
+  // uses the same four-var set.
+  const missing = [
+    ["GOOGLE_OAUTH_CLIENT_ID", process.env.GOOGLE_OAUTH_CLIENT_ID],
+    ["GOOGLE_OAUTH_CLIENT_SECRET", process.env.GOOGLE_OAUTH_CLIENT_SECRET],
+    ["GOOGLE_OAUTH_REDIRECT_URI", process.env.GOOGLE_OAUTH_REDIRECT_URI],
+    ["OAUTH_ENCRYPTION_KEY", process.env.OAUTH_ENCRYPTION_KEY],
+  ]
+    .filter(([, v]) => !v)
+    .map(([k]) => k as string);
+  if (missing.length > 0) {
     // Config problem, not user-facing. Emit 503 + explicit hint so ops
-    // can see where to look.
+    // can see exactly which env vars are missing.
+    await logAction({
+      kind: "oauth.google.error",
+      data: { reason: "not_configured", userId: user.id, missing },
+      actorId: user.id,
+    });
     return NextResponse.json(
       {
         ok: false,
         error: "oauth_not_configured",
-        hint: "Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_REDIRECT_URI.",
+        hint: `Set ${missing.join(", ")}.`,
       },
       { status: 503 },
     );
   }
+  // After the guard, all four must be strings. Re-read with a non-
+  // null assertion so TS keeps the types precise through buildAuthUrl.
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID!;
+  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI!;
 
   const url = new URL(req.url);
   const teamId = url.searchParams.get("teamId");

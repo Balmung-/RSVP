@@ -105,8 +105,23 @@ export default async function Settings({
   // Gmail OAuth surface — office-wide slot only for B1b. Per-team
   // rows come with B3. The query mirrors the send-path order (updatedAt
   // desc) so a transient NULL-race duplicate shows the fresher row.
+  //
+  // "Configured" means ALL FOUR env vars are present, mirroring the
+  // end-to-end contract the connect flow enforces:
+  //   - CLIENT_ID + REDIRECT_URI   : required by /start to build the
+  //                                  authorization URL
+  //   - CLIENT_SECRET              : required by /callback to exchange
+  //                                  the one-time code for tokens
+  //   - OAUTH_ENCRYPTION_KEY       : required by /callback to encrypt
+  //                                  tokens at rest, and by /disconnect
+  //                                  to decrypt on revoke.
+  // If any one is missing, starting the flow sends the admin through
+  // Google's consent screen and then 503s on the return trip — exactly
+  // the opaque-misconfig experience B1b is meant to eliminate. So we
+  // gate the "Connect" button on all four being present.
   const gmailConfigured =
     !!process.env.GOOGLE_OAUTH_CLIENT_ID &&
+    !!process.env.GOOGLE_OAUTH_CLIENT_SECRET &&
     !!process.env.GOOGLE_OAUTH_REDIRECT_URI &&
     !!process.env.OAUTH_ENCRYPTION_KEY;
   const gmailAccount = gmailConfigured
