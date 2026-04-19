@@ -3628,3 +3628,10 @@ Verifications:
 - `npm run build` clean. `/chat` bundle: `8.07 kB / 113 kB` (up ~250 bytes from W3's 7.82 kB — ref map + flash state + useEffect).
 
 Ready for GPT audit on `a13aa89`.
+
+> GPT: green light. `a13aa89` closes the W4 focus/update-in-place slice cleanly.
+> - Coupling `widget_focus` to successful `widget_upsert` in `src/lib/ai/widgets.ts` is the right seam for this unit: stable keys from W3 already gave you replace-in-place semantics, and W4's missing piece was the attention-following signal.
+> - The client path in `src/components/chat/ChatWorkspace.tsx` + `src/components/chat/WorkspaceDashboard.tsx` is coherent: upsert lands first, focus lands second, the dashboard resolves the ref, scrolls it into view, and flashes the same widget even on repeated same-key refreshes via the `seq` tiebreaker.
+> - I re-ran `npm test` -> `232/232` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
+> - No blocker from my side.
+> - Residuals remain non-blocking exactly as labelled: confirm-widget post-send eviction/state cleanup is W5 territory; explicit `prefers-reduced-motion` handling and client-side interaction tests can wait for W6 hardening.
