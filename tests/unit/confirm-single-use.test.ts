@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { runConfirmSend } from "../../src/lib/ai/confirm-flow";
-import type { ConfirmPort, ConfirmRow } from "../../src/lib/ai/confirm-flow";
+import type {
+  ConfirmPort,
+  ConfirmRow,
+  ConfirmSendOutcome,
+} from "../../src/lib/ai/confirm-flow";
 import type {
   DispatchResult,
   ToolCtx,
@@ -55,6 +59,7 @@ type PortRecorder = {
   }>[];
   auditConfirmCalls: Call<Record<string, unknown>>[];
   auditDeniedCalls: Call<Record<string, unknown>>[];
+  markOutcomeCalls: Call<ConfirmSendOutcome>[];
 };
 
 // Build a fake port that simulates an atomic `updateMany({where:
@@ -78,6 +83,7 @@ function buildPort(
     persistCalls: [],
     auditConfirmCalls: [],
     auditDeniedCalls: [],
+    markOutcomeCalls: [],
   };
   rec.port = {
     claim: async () => {
@@ -105,6 +111,9 @@ function buildPort(
     auditDenied: async (args) => {
       rec.auditDeniedCalls.push({ args: args.data, at: t++ });
     },
+    markConfirmSendOutcome: async (outcome) => {
+      rec.markOutcomeCalls.push({ args: outcome, at: t++ });
+    },
   };
   return rec;
 }
@@ -127,7 +136,16 @@ test("runConfirmSend: first POST wins, dispatches, audits, persists, 200", async
   const rec = buildPort({
     dispatchResult: {
       ok: true,
-      result: { output: { sent: 3, summary: "Sent 3: 2 email, 1 sms" } },
+      result: {
+        output: {
+          sent: 3,
+          email: 2,
+          sms: 1,
+          skipped: 0,
+          failed: 0,
+          summary: "Sent 3: 2 email, 1 sms",
+        },
+      },
     },
   });
   const resp = await runConfirmSend(
@@ -150,6 +168,22 @@ test("runConfirmSend: first POST wins, dispatches, audits, persists, 200", async
   assert.equal(rec.persistCalls[0].args.isError, false);
   assert.equal(rec.auditDeniedCalls.length, 0);
   assert.equal(rec.releaseCalls.length, 0);
+  // W5 — widget row flipped to "done" with the handler's counters.
+  // Must run AFTER auditConfirm + persistTranscript so a widget-write
+  // failure doesn't mask the authoritative record of the send.
+  assert.equal(rec.markOutcomeCalls.length, 1);
+  const outcome = rec.markOutcomeCalls[0].args;
+  assert.equal(outcome.state, "done");
+  if (outcome.state === "done") {
+    assert.deepEqual(outcome.result, {
+      email: 2,
+      sms: 1,
+      skipped: 0,
+      failed: 0,
+    });
+  }
+  assert(rec.markOutcomeCalls[0].at > rec.auditConfirmCalls[0].at);
+  assert(rec.markOutcomeCalls[0].at > rec.persistCalls[0].at);
 });
 
 test("runConfirmSend: SECOND call against same row short-circuits to 409 without dispatching", async () => {
@@ -159,7 +193,16 @@ test("runConfirmSend: SECOND call against same row short-circuits to 409 without
   const rec = buildPort({
     dispatchResult: {
       ok: true,
-      result: { output: { sent: 1, summary: "Sent 1" } },
+      result: {
+        output: {
+          sent: 1,
+          email: 1,
+          sms: 0,
+          skipped: 0,
+          failed: 0,
+          summary: "Sent 1",
+        },
+      },
     },
   });
   // First — wins.
@@ -193,6 +236,10 @@ test("runConfirmSend: SECOND call against same row short-circuits to 409 without
   assert.equal(rec.auditDeniedCalls.length, 1);
   assert.equal(rec.auditDeniedCalls[0].args.reason, "already_confirmed");
   assert.equal(rec.auditDeniedCalls[0].args.raced, true);
+  // W5 — loser also must NOT touch the widget row. The winner's
+  // outcome is the source of truth; the loser re-marking could
+  // overwrite with stale data in a future refactor.
+  assert.equal(rec.markOutcomeCalls.length, 1);
 });
 
 test("runConfirmSend: fast-path 409 when row.confirmedAt is already set — no claim attempted", async () => {
@@ -224,6 +271,10 @@ test("runConfirmSend: fast-path 409 when row.confirmedAt is already set — no c
     rec.auditDeniedCalls[0].args.confirmedAt,
     confirmedAt.toISOString(),
   );
+  // W5 — fast-path also does not touch the widget row. The original
+  // winner stamped it already; re-marking could overwrite with stale
+  // data.
+  assert.equal(rec.markOutcomeCalls.length, 0);
 });
 
 test("runConfirmSend: releasable structured refusal releases the claim and returns 400", async () => {
@@ -255,6 +306,14 @@ test("runConfirmSend: releasable structured refusal releases the claim and retur
   assert.equal(rec.auditConfirmCalls[0].args.ok, false);
   assert.equal(rec.auditConfirmCalls[0].args.error, "status_not_sendable");
   assert.equal(rec.persistCalls[0].args.isError, true);
+  // W5 — widget row flipped to "error" carrying the refusal code, so
+  // a reload shows the same actionable error the transcript surfaces.
+  assert.equal(rec.markOutcomeCalls.length, 1);
+  const outcome = rec.markOutcomeCalls[0].args;
+  assert.equal(outcome.state, "error");
+  if (outcome.state === "error") {
+    assert.equal(outcome.error, "status_not_sendable");
+  }
 });
 
 test("runConfirmSend: dispatch throw keeps the claim held (non-releasable)", async () => {

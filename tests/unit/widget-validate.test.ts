@@ -395,12 +395,13 @@ test("validateWidget: confirm_draft minimum shape passes", () => {
       status: "draft",
       team_id: null,
       created_at: "2026-04-19T00:00:00Z",
+      state: "done",
     },
   });
   assert.ok(out);
 });
 
-test("validateWidget: confirm_send minimum shape passes", () => {
+test("validateWidget: confirm_send minimum shape (ready) passes", () => {
   const out = validateWidget({
     widgetKey: "confirm_send:c-1",
     kind: "confirm_send",
@@ -436,6 +437,7 @@ test("validateWidget: confirm_send minimum shape passes", () => {
         sms_body: null,
       },
       blockers: [],
+      state: "ready",
     },
   });
   assert.ok(out);
@@ -533,10 +535,256 @@ test("validateWidget: confirm_send — rejects unknown channel", () => {
           sms_body: null,
         },
         blockers: [],
+        state: "ready",
       },
     }),
     null,
   );
+});
+
+// ---- W5 state machine ----
+//
+// The confirm_send widget carries a persisted `state` that drives the
+// renderer and must survive a reload. Its relationship with `result`
+// and `error` is tight: the two terminal states each require their
+// own payload, and pre-terminal states must not carry either. The
+// validator is the last line of defence against a drifted blob in
+// the DB reaching the renderer.
+
+// Builds a minimum-shape confirm_send widget input, with `state`
+// overridable per test. Keeps the per-test fixtures short without
+// duplicating the 20-line shape.
+function buildConfirmSend(extra: Record<string, unknown>) {
+  return {
+    widgetKey: "confirm_send:c-1",
+    kind: "confirm_send",
+    slot: "action",
+    props: {
+      campaign_id: "c-1",
+      name: "Eid reception",
+      status: "active",
+      venue: null,
+      event_at: null,
+      locale: "en",
+      channel: "both",
+      only_unsent: true,
+      invitee_total: 40,
+      ready_messages: 72,
+      by_channel: {
+        email: {
+          ready: 40,
+          skipped_already_sent: 0,
+          skipped_unsubscribed: 0,
+          no_contact: 0,
+        },
+        sms: {
+          ready: 32,
+          skipped_already_sent: 0,
+          skipped_unsubscribed: 0,
+          no_contact: 8,
+        },
+      },
+      template_preview: {
+        subject_email: null,
+        email_body: null,
+        sms_body: null,
+      },
+      blockers: [],
+      ...extra,
+    },
+  };
+}
+
+test("validateWidget: confirm_send — rejects missing state", () => {
+  // Shape is otherwise valid; omitting `state` must fail so the
+  // renderer always has a defined state to switch on.
+  assert.equal(validateWidget(buildConfirmSend({})), null);
+});
+
+test("validateWidget: confirm_send — rejects unknown state value", () => {
+  assert.equal(
+    validateWidget(buildConfirmSend({ state: "totally-new" })),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — accepts each pre-terminal state", () => {
+  for (const state of ["ready", "blocked", "submitting"] as const) {
+    assert.ok(validateWidget(buildConfirmSend({ state })), `state=${state}`);
+  }
+});
+
+test("validateWidget: confirm_send — rejects pre-terminal with result", () => {
+  // A `ready` preview must not carry post-dispatch counters. The
+  // route only writes `result` on the `done` transition, so a blob
+  // mixing the two means something wrote in the wrong order.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "ready",
+        result: { email: 1, sms: 1, skipped: 0, failed: 0 },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects pre-terminal with error", () => {
+  assert.equal(
+    validateWidget(buildConfirmSend({ state: "blocked", error: "boom" })),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — done accepts result + optional summary", () => {
+  const out = validateWidget(
+    buildConfirmSend({
+      state: "done",
+      result: { email: 40, sms: 32, skipped: 5, failed: 0 },
+      summary: "Sent 72: 40 email, 32 sms.",
+    }),
+  );
+  assert.ok(out);
+});
+
+test("validateWidget: confirm_send — done requires result", () => {
+  assert.equal(
+    validateWidget(buildConfirmSend({ state: "done" })),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — done rejects co-present error", () => {
+  // done is success; error must be absent. A blob with both fields
+  // is inconsistent and the renderer shouldn't have to guess.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "done",
+        result: { email: 1, sms: 0, skipped: 0, failed: 0 },
+        error: "should not be here",
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — done rejects non-finite result counters", () => {
+  // NaN/Infinity could sneak through a naive numeric coerce. The
+  // validator's `isFiniteNumber` guards against that; pin here.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "done",
+        result: { email: Number.NaN, sms: 0, skipped: 0, failed: 0 },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "done",
+        result: {
+          email: 1,
+          sms: 1,
+          skipped: Number.POSITIVE_INFINITY,
+          failed: 0,
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — error accepts non-empty error string", () => {
+  const out = validateWidget(
+    buildConfirmSend({
+      state: "error",
+      error: "send_in_flight",
+      summary: "Refused: a send is already in flight.",
+    }),
+  );
+  assert.ok(out);
+});
+
+test("validateWidget: confirm_send — error requires non-empty error", () => {
+  assert.equal(
+    validateWidget(buildConfirmSend({ state: "error" })),
+    null,
+    "missing error",
+  );
+  assert.equal(
+    validateWidget(buildConfirmSend({ state: "error", error: "" })),
+    null,
+    "empty error",
+  );
+});
+
+test("validateWidget: confirm_send — error rejects co-present result", () => {
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "error",
+        error: "boom",
+        result: { email: 0, sms: 0, skipped: 0, failed: 0 },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_draft — rejects missing state", () => {
+  // Drafts are terminal-on-creation, so a missing state field means
+  // the tool forgot to stamp "done" — fail closed.
+  assert.equal(
+    validateWidget({
+      widgetKey: "confirm_draft:c-1",
+      kind: "confirm_draft",
+      slot: "action",
+      props: {
+        id: "c-1",
+        name: "New draft",
+        description: null,
+        venue: null,
+        event_at: null,
+        locale: "en",
+        status: "draft",
+        team_id: null,
+        created_at: "2026-04-19T00:00:00Z",
+      },
+    }),
+    null,
+  );
+});
+
+test("validateWidget: confirm_draft — rejects non-done state", () => {
+  // There is no POST flow for drafts; the only valid state is "done".
+  // If a future tool tries to emit a pre-terminal draft, this guard
+  // forces the design change through a validator update first.
+  for (const state of ["ready", "blocked", "submitting", "error"] as const) {
+    assert.equal(
+      validateWidget({
+        widgetKey: "confirm_draft:c-1",
+        kind: "confirm_draft",
+        slot: "action",
+        props: {
+          id: "c-1",
+          name: "New draft",
+          description: null,
+          venue: null,
+          event_at: null,
+          locale: "en",
+          status: "draft",
+          team_id: null,
+          created_at: "2026-04-19T00:00:00Z",
+          state,
+        },
+      }),
+      null,
+      `state=${state} must reject`,
+    );
+  }
 });
 
 // ---- identity preservation on pass ----

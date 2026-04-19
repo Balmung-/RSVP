@@ -6,6 +6,7 @@ import { logAction } from "@/lib/audit";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { dispatch } from "@/lib/ai/tools";
 import { runConfirmSend } from "@/lib/ai/confirm-flow";
+import { focusWidget, upsertWidget } from "@/lib/ai/widgets";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -308,6 +309,61 @@ export async function POST(
           actorId: me.id,
           data,
         }),
+      // W5 — write the post-dispatch terminal state onto the
+      // `confirm.send.${campaign_id}` widget row. We recover the
+      // campaign id from the same stored toolInput the dispatcher
+      // uses, so the widget key agrees with the one propose_send
+      // emitted. A missing campaign_id (shouldn't happen — propose_send
+      // requires it) leaves the widget untouched; the next reload
+      // will show the pre-action preview, and the already-confirmed
+      // anchor keeps the button from rendering a second send.
+      markConfirmSendOutcome: async (outcome) => {
+        const campaignId =
+          parsedInput &&
+          typeof parsedInput === "object" &&
+          !Array.isArray(parsedInput) &&
+          typeof (parsedInput as Record<string, unknown>).campaign_id ===
+            "string"
+            ? ((parsedInput as Record<string, unknown>).campaign_id as string)
+            : null;
+        if (!campaignId) return;
+        const widgetKey = `confirm.send.${campaignId}`;
+        const existing = await focusWidget(
+          { prismaLike: prisma },
+          row.sessionId,
+          widgetKey,
+        );
+        if (!existing) return;
+        // Merge the outcome into the existing props. We strip any
+        // pre-terminal `result`/`error` first (defence in depth: the
+        // validator already rejects stale terminal fields on
+        // pre-terminal states, but a future migration could leave
+        // junk in the DB). Then layer in the new state + matching
+        // outcome fields.
+        const nextProps: Record<string, unknown> = { ...existing.props };
+        delete nextProps.result;
+        delete nextProps.error;
+        delete nextProps.summary;
+        nextProps.state = outcome.state;
+        if (outcome.state === "done") {
+          nextProps.result = outcome.result;
+        } else {
+          nextProps.error = outcome.error;
+        }
+        if (outcome.summary) nextProps.summary = outcome.summary;
+        await upsertWidget(
+          { prismaLike: prisma },
+          {
+            sessionId: row.sessionId,
+            widgetKey: existing.widgetKey,
+            kind: existing.kind,
+            slot: existing.slot,
+            props: nextProps,
+            order: existing.order,
+            sourceMessageId: existing.sourceMessageId,
+          },
+        );
+      },
     },
   );
 

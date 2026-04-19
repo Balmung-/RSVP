@@ -39,6 +39,25 @@ export type ConfirmRow = {
   confirmedAt: Date | null;
 };
 
+// W5 — the terminal outcome the route persists onto the confirm_send
+// widget's props after dispatch. The client's local React state
+// already flipped to "done"/"error" on the JSON response; this write
+// is what makes the state survive a reload. `submitting` is NEVER
+// passed here — it's a client-local transient that the DB never
+// sees. See `validateConfirmSend` in `widget-validate.ts` for the
+// invariants enforced at the boundary.
+export type ConfirmSendOutcome =
+  | {
+      state: "done";
+      result: { email: number; sms: number; skipped: number; failed: number };
+      summary?: string;
+    }
+  | {
+      state: "error";
+      error: string;
+      summary?: string;
+    };
+
 export type ConfirmPort = {
   // Atomic single-use claim. Equivalent to a conditional update with
   // a `confirmedAt IS NULL` predicate: returns `{count: 1}` if this
@@ -72,6 +91,17 @@ export type ConfirmPort = {
     sessionId: string;
     data: Record<string, unknown>;
   }) => Promise<void>;
+  // W5 — write the post-dispatch terminal state onto the
+  // `confirm_send` widget row. Called exactly once per winning claim,
+  // AFTER `auditConfirm` / `persistTranscript` so the audit + replay
+  // record is complete even if this write fails. Implementations read
+  // the existing widget row, merge state/result/error/summary into
+  // its props, and upsert; see the route binding for the reference
+  // implementation. Errors here are swallowed by the flow — the
+  // operator already got their outcome in the JSON response, and a
+  // missed widget update shows up as a pre-action card on next
+  // reload rather than breaking the response.
+  markConfirmSendOutcome: (outcome: ConfirmSendOutcome) => Promise<void>;
 };
 
 export type ConfirmResponse = {
@@ -191,6 +221,55 @@ export async function runConfirmSend(
     isError: !effectiveOk,
   });
 
+  // W5 — persist the terminal state onto the confirm_send widget.
+  // The client's JSON response already told the local UI to flip;
+  // this write makes that flip survive a reload. We compute the
+  // outcome shape from the same `output` + `effectiveError` the
+  // audit/transcript used, so the three surfaces (audit row,
+  // transcript row, widget row) agree on what happened.
+  //
+  // On success the send_campaign handler returns counters directly on
+  // its output ({email, sms, skipped, failed}); coerce defensively
+  // (0 if missing/non-finite) because the validator rejects NaN.
+  // On failure we persist the error code that went into the audit —
+  // same surface the operator saw in the response body.
+  let outcome: ConfirmSendOutcome;
+  if (effectiveOk) {
+    const rec =
+      output !== null && typeof output === "object"
+        ? (output as Record<string, unknown>)
+        : {};
+    outcome = {
+      state: "done",
+      result: {
+        email: asFiniteNumber(rec.email),
+        sms: asFiniteNumber(rec.sms),
+        skipped: asFiniteNumber(rec.skipped),
+        failed: asFiniteNumber(rec.failed),
+      },
+      summary,
+    };
+  } else {
+    outcome = {
+      state: "error",
+      // `effectiveError` is the same code the audit recorded; default
+      // to "unknown" on the pathological null case so the validator's
+      // non-empty-string invariant holds.
+      error: effectiveError ?? "unknown",
+      summary,
+    };
+  }
+  // Swallow write errors: the operator already has their outcome in
+  // the response body + transcript; a widget row write failure is
+  // recoverable (the next reload sees the prior `ready`/`blocked`
+  // state and the action is idempotent via the single-use anchor).
+  // Logging stays at the route level where the logger context lives.
+  try {
+    await port.markConfirmSendOutcome(outcome);
+  } catch {
+    // intentionally no-op
+  }
+
   if (!effectiveOk) {
     return {
       status: 400,
@@ -202,4 +281,15 @@ export async function runConfirmSend(
     status: 200,
     body: { ok: true, result: output, summary },
   };
+}
+
+// Coerce a handler-output field to a finite number, defaulting to 0
+// for missing / non-numeric / NaN / Infinity. The send_campaign
+// handler produces finite integers on the happy path, but a future
+// handler bug or structured refusal wrapped in a success envelope
+// could surface junk — the validator would then reject the widget
+// write and we'd lose the state transition. Coerce once here so the
+// write always lands.
+function asFiniteNumber(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }

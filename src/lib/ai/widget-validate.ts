@@ -148,6 +148,30 @@ const TONES = ["default", "success", "warn", "fail"] as const;
 const VIP_TIERS = ["royal", "minister", "vip", "standard"] as const;
 const CHANNELS = ["email", "sms", "both"] as const;
 
+// W5 — persisted widget state for the action-slot widgets. The
+// spec lists five states; their mapping to the UI is:
+//   ready      — preview ready, button enabled (confirm_send only)
+//   blocked    — preview has blockers, button disabled
+//   submitting — transient mid-POST state (rarely persisted; the
+//                confirm route writes terminal states after dispatch
+//                completes, so `submitting` is mostly client-local)
+//   done       — action completed successfully (carries `result`)
+//   error      — action failed with a structured error (carries
+//                `error`)
+// `confirm_draft` is terminal-on-creation — the draft is written
+// before the widget emits — so it only ever carries `state: "done"`.
+// Keeping the same enum across both kinds means the renderer /
+// reducer can dispatch on state without a per-kind branch.
+export const CONFIRM_STATES = [
+  "ready",
+  "blocked",
+  "submitting",
+  "done",
+  "error",
+] as const;
+
+export type ConfirmState = (typeof CONFIRM_STATES)[number];
+
 // ---- per-kind prop validators ----
 //
 // The prop shapes MIRROR the corresponding directive validators —
@@ -285,6 +309,11 @@ function validateConfirmDraft(p: Record<string, unknown>): boolean {
   if (!isStringOrNull(p.team_id)) return false;
   if (!isString(p.created_at)) return false;
   if (!optional(p, "event_at_ignored", isBoolean)) return false;
+  // W5 — state is terminal-on-creation for drafts. The row exists
+  // before the widget emits, so the only value the validator ever
+  // sees is "done". Reject any other value rather than allow
+  // surprise transitions — a draft has no POST flow.
+  if (p.state !== "done") return false;
   return true;
 }
 
@@ -294,6 +323,20 @@ function validateChannelBreakdown(v: unknown): boolean {
   if (!isFiniteNumber(v.skipped_already_sent)) return false;
   if (!isFiniteNumber(v.skipped_unsubscribed)) return false;
   if (!isFiniteNumber(v.no_contact)) return false;
+  return true;
+}
+
+// W5 — shape of the server-reported send outcome persisted on the
+// confirm_send widget after dispatch. Mirrors the audit counters in
+// `runConfirmSend`: email/sms = successful deliveries, skipped = rows
+// the router intentionally bypassed (already-sent / unsubscribed /
+// no-contact), failed = provider errors that hit the retry queue.
+function validateConfirmSendResult(v: unknown): boolean {
+  if (!isPlainObject(v)) return false;
+  if (!isFiniteNumber(v.email)) return false;
+  if (!isFiniteNumber(v.sms)) return false;
+  if (!isFiniteNumber(v.skipped)) return false;
+  if (!isFiniteNumber(v.failed)) return false;
   return true;
 }
 
@@ -316,6 +359,33 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isStringOrNull(p.template_preview.email_body)) return false;
   if (!isStringOrNull(p.template_preview.sms_body)) return false;
   if (!isStringArray(p.blockers)) return false;
+  // W5 — state drives the renderer. See the `CONFIRM_STATES` comment
+  // block above for the full state machine.
+  if (!isOneOf(p.state, CONFIRM_STATES)) return false;
+  // `ready` / `blocked` / `submitting` are pre-terminal — no result,
+  // no error on the blob. The renderer reads state and short-circuits.
+  // `done` and `error` are TERMINAL states that carry their outcome
+  // payload; the route writes exactly one of them after dispatch.
+  if (p.state === "done") {
+    if (!validateConfirmSendResult(p.result)) return false;
+    // Error must be absent on a successful dispatch — a blob with
+    // both `result` and `error` is inconsistent and rejected rather
+    // than letting the renderer guess which one wins.
+    if ("error" in p && p.error !== undefined) return false;
+  } else if (p.state === "error") {
+    if (!isNonEmptyString(p.error)) return false;
+    if ("result" in p && p.result !== undefined) return false;
+  } else {
+    // Pre-terminal: no outcome fields allowed. Keeps the blob small
+    // on the common case (a preview that's never actioned).
+    if ("result" in p && p.result !== undefined) return false;
+    if ("error" in p && p.error !== undefined) return false;
+  }
+  // Optional one-line summary. The route can set this for any
+  // terminal state to give the transcript a tidy recap ("Sent 42 via
+  // email, 3 skipped."); the renderer falls back to a derived summary
+  // when absent.
+  if (!optional(p, "summary", isString)) return false;
   return true;
 }
 

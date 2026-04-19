@@ -32,6 +32,13 @@ export type ConfirmDraftProps = {
   team_id: string | null;
   created_at: string;
   event_at_ignored?: boolean;
+  // W5 — drafts are terminal-on-creation (the row is written before
+  // this widget emits), so the state field is always "done". Kept on
+  // the type to match the shared CONFIRM_STATES enum in the
+  // server-side validator — if the state machine ever gains a
+  // pre-terminal draft flow, the renderer needs to fork here and
+  // leaving the field off the type would hide that requirement.
+  state: "done";
 };
 
 function formatEventAt(iso: string | null, fmt: FormatContext): string {

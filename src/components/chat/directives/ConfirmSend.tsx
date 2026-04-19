@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import clsx from "clsx";
 import type { FormatContext } from "./CampaignList";
@@ -74,6 +74,22 @@ export type ConfirmSendProps = {
     sms_body: string | null;
   };
   blockers: string[];
+  // W5 — persisted state of the confirm flow. See `CONFIRM_STATES`
+  // in `widget-validate.ts` for the full state machine. On the
+  // client:
+  //   ready / blocked  — render the preview + enabled/disabled CTA
+  //   submitting       — never written by the server; client-local
+  //                      transient during the POST window
+  //   done             — render the emerald "Sent" morph, carrying
+  //                      `result` + optional `summary`
+  //   error            — render the inline error, carrying `error` +
+  //                      optional `summary`, button reverts to Retry
+  // The reload path feeds this straight from the DB so the operator
+  // sees the final state without having to re-click.
+  state: "ready" | "blocked" | "submitting" | "done" | "error";
+  result?: { email: number; sms: number; skipped: number; failed: number };
+  error?: string;
+  summary?: string;
 };
 
 const BLOCKER_LABEL: Record<string, string> = {
@@ -126,6 +142,30 @@ type SendState =
     }
   | { phase: "error"; error: string };
 
+// W5 — project persisted widget state into the local SendState that
+// drives the render. `ready`/`blocked`/`submitting` all map to idle
+// on the client — the preview is still actionable (or hard-gated by
+// blockers, which is a separate render branch). `done` and `error`
+// are terminal and carry their payload. Used both for the useState
+// initial AND for the props-change sync below, so a reload lands on
+// the right terminal morph without the operator clicking anything.
+function deriveSendState(props: ConfirmSendProps): SendState {
+  if (props.state === "done" && props.result) {
+    return {
+      phase: "sent",
+      summary: props.summary ?? "Send complete.",
+      email: props.result.email,
+      sms: props.result.sms,
+      skipped: props.result.skipped,
+      failed: props.result.failed,
+    };
+  }
+  if (props.state === "error") {
+    return { phase: "error", error: props.error ?? "unknown" };
+  }
+  return { phase: "idle" };
+}
+
 export function ConfirmSend({
   props,
   fmt,
@@ -135,7 +175,18 @@ export function ConfirmSend({
   fmt: FormatContext;
   messageId?: string;
 }) {
-  const [state, setState] = useState<SendState>({ phase: "idle" });
+  const [state, setState] = useState<SendState>(() => deriveSendState(props));
+  // Sync local SendState when the persisted state on props changes —
+  // e.g. the operator asked for a fresh preview (server emits a new
+  // widget_upsert with state back to "ready"), so the button should
+  // re-enable. We watch the small set of terminal-affecting fields
+  // rather than the whole props object so a harmless re-render (a
+  // parent ref change, say) doesn't clobber client-local `sending`.
+  // Dep list is the same set `deriveSendState` inspects.
+  useEffect(() => {
+    setState(deriveSendState(props));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.state, props.error, props.summary, props.result?.email, props.result?.sms, props.result?.skipped, props.result?.failed]);
   const when = formatEventAt(props.event_at, fmt);
   const hasBlockers = props.blockers.length > 0;
   // `canConfirm` now also requires a messageId — without one the

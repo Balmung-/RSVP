@@ -260,6 +260,15 @@ export const proposeSendTool: ToolDef<Input> = {
       `A ConfirmSend card has been rendered. The operator must click Confirm to actually send — this tool does not send.`,
     );
 
+    // W5 — pre-terminal state. `ready` when the operator can click
+    // confirm right now; `blocked` when one or more blockers must be
+    // resolved first. The confirm route rewrites this to `done` or
+    // `error` after dispatch (see `markConfirmSendOutcome` in
+    // `src/app/api/chat/confirm/[messageId]/route.ts`). The same
+    // validator rejects `submitting` as a persisted state — that one
+    // is client-local during the POST window and never hits the DB.
+    const state: "ready" | "blocked" = blockers.length > 0 ? "blocked" : "ready";
+
     const props = {
       campaign_id: campaign.id,
       name: campaign.name,
@@ -281,6 +290,7 @@ export const proposeSendTool: ToolDef<Input> = {
         sms_body: clip(campaign.templateSms, BODY_PREVIEW_CHARS),
       },
       blockers,
+      state,
     };
 
     return {

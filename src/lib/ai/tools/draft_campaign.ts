@@ -219,6 +219,11 @@ export const draftCampaignTool: ToolDef<Input> = {
       team_id: created.teamId,
       created_at: created.createdAt.toISOString(),
       event_at_ignored: eventAtIgnored,
+      // W5 — drafts are terminal-on-creation: the row is already in
+      // the DB by the time this widget emits, so the only valid state
+      // is `done`. The renderer uses this to match the confirm_send
+      // state-machine branch instead of hard-coding a per-kind cue.
+      state: "done" as const,
     };
 
     return {
