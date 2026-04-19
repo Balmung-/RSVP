@@ -6,7 +6,14 @@ import type { ToolDef, ToolResult } from "./types";
 // Creates a draft Campaign row from a small set of human-shaped
 // fields (name, optional venue, event date, description, locale,
 // team). Mirrors the guards in `src/app/campaigns/new/page.tsx` so
-// AI-initiated drafts land in the same shape as editor-created ones:
+// AI-initiated drafts land in the same shape as editor-created ones.
+//
+// On success the handler emits a `confirm_draft` widget into the
+// `action` slot, keyed by `confirm.draft.${id}` — one card per
+// draft so multiple drafts created in the same session coexist.
+// The operator clicks through to the edit page from the card;
+// there's no destructive follow-up to anchor against (the draft is
+// already persisted), so the widget is purely informational.
 //
 //   - `editor` role is required. Viewers are rejected with a
 //     structured `forbidden` output that the model can explain to
@@ -201,6 +208,19 @@ export const draftCampaignTool: ToolDef<Input> = {
       `Open /campaigns/${created.id} to edit details, attach templates, and schedule stages.`,
     );
 
+    const props = {
+      id: created.id,
+      name: created.name,
+      description: created.description,
+      venue: created.venue,
+      event_at: created.eventAt ? created.eventAt.toISOString() : null,
+      locale: created.locale,
+      status: created.status,
+      team_id: created.teamId,
+      created_at: created.createdAt.toISOString(),
+      event_at_ignored: eventAtIgnored,
+    };
+
     return {
       output: {
         id: created.id,
@@ -209,20 +229,11 @@ export const draftCampaignTool: ToolDef<Input> = {
         event_at_ignored: eventAtIgnored,
         summary: summaryLines.join("\n"),
       },
-      directive: {
+      widget: {
+        widgetKey: `confirm.draft.${created.id}`,
         kind: "confirm_draft",
-        props: {
-          id: created.id,
-          name: created.name,
-          description: created.description,
-          venue: created.venue,
-          event_at: created.eventAt ? created.eventAt.toISOString() : null,
-          locale: created.locale,
-          status: created.status,
-          team_id: created.teamId,
-          created_at: created.createdAt.toISOString(),
-          event_at_ignored: eventAtIgnored,
-        },
+        slot: "action",
+        props,
       },
     };
   },

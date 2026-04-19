@@ -13,10 +13,15 @@ import type { ToolDef, ToolResult } from "./types";
 // round.
 //
 // The row cap is low by design — the model only needs enough
-// context to phrase a reply, and directives render the same
-// data back to the operator with a "show more" affordance (via
-// the `total` count). Defaults to 20; max 50 to keep the
-// model-facing payload terse.
+// context to phrase a reply, and the `contact_table` workspace
+// widget renders the same data back to the operator with a "show
+// more" affordance (via the `total` count). Defaults to 20; max 50
+// to keep the model-facing payload terse.
+//
+// WidgetKey `contacts.table` is stable — re-searching replaces the
+// previous results rather than stacking multiple tables in
+// `primary`. Refining the filters is the common case and the
+// operator expects the table to update in place.
 
 type Input = {
   query?: string;
@@ -139,20 +144,24 @@ export const searchContactsTool: ToolDef<Input> = {
       }
     }
 
+    const props = {
+      items,
+      total,
+      filters: {
+        query: input.query ?? null,
+        tier,
+        include_archived: Boolean(input.include_archived),
+        limit,
+      },
+    };
+
     return {
       output: { summary: lines.join("\n"), count: items.length, total },
-      directive: {
+      widget: {
+        widgetKey: "contacts.table",
         kind: "contact_table",
-        props: {
-          items,
-          total,
-          filters: {
-            query: input.query ?? null,
-            tier,
-            include_archived: Boolean(input.include_archived),
-            limit,
-          },
-        },
+        slot: "primary",
+        props,
       },
     };
   },

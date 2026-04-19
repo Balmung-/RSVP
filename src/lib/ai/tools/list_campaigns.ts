@@ -11,9 +11,14 @@ import type { ToolDef, ToolResult } from "./types";
 //
 // The handler returns BOTH a compact text summary for the model
 // (feeds back as tool_result content, so the model can phrase things
-// naturally) AND a typed `campaign_list` directive for the client to
-// render a proper list. The model doesn't have to narrate every
-// field — the UI carries the weight.
+// naturally) AND a `campaign_list` workspace widget the client pins
+// into the `primary` dashboard slot. The model doesn't have to
+// narrate every field — the UI carries the weight.
+//
+// WidgetKey `campaigns.list` is stable — re-invoking the tool UPSERTS
+// in place, so an operator refining "only upcoming" replaces the old
+// list rather than stacking a second card. If the tool later needs to
+// fan out per-filter lists they'd each pick their own key.
 //
 // Input shape is hand-written JSON Schema (not zod). Optional runtime
 // validate() coerces strings / numbers and clamps the limit.
@@ -174,18 +179,22 @@ export const listCampaignsTool: ToolDef<Input> = {
       }
     }
 
+    const props = {
+      items,
+      filters: {
+        status: statuses,
+        upcoming_only: Boolean(input.upcoming_only),
+        limit,
+      },
+    };
+
     return {
       output: { summary: lines.join("\n"), count: items.length },
-      directive: {
+      widget: {
+        widgetKey: "campaigns.list",
         kind: "campaign_list",
-        props: {
-          items,
-          filters: {
-            status: statuses,
-            upcoming_only: Boolean(input.upcoming_only),
-            limit,
-          },
-        },
+        slot: "primary",
+        props,
       },
     };
   },

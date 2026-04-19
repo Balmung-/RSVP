@@ -17,8 +17,13 @@ import type { ToolDef, ToolResult } from "./types";
 //
 // Payload: each row is pre-rendered via `phrase()` so the same
 // bilingual phrasing the Overview shows also reaches the model
-// and the `activity_stream` directive. The raw `kind` + `data`
-// are preserved for future richer rendering.
+// and the `activity_stream` widget. The raw `kind` + `data` are
+// preserved for future richer rendering.
+//
+// The widget lands in the `secondary` slot — activity is contextual
+// companion reading next to whatever `primary` is showing (a
+// campaign card, a contact table). WidgetKey `activity.stream` is
+// stable; re-invoking refreshes in place.
 
 type Input = {
   days?: number;
@@ -146,8 +151,10 @@ export const recentActivityTool: ToolDef<Input> = {
 
     return {
       output: { summary: lines.join("\n"), count: items.length },
-      directive: {
+      widget: {
+        widgetKey: "activity.stream",
         kind: "activity_stream",
+        slot: "secondary",
         props: { items, filters: { days, limit } },
       },
     };

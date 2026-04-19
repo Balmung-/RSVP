@@ -538,10 +538,48 @@ export async function POST(req: Request) {
                 // button knows which row to POST against. Directives
                 // that don't need a confirm round-trip (CampaignList,
                 // ConfirmDraft) ignore the extra field.
+                //
+                // DEPRECATED path as of W3 — the six shipped kinds
+                // now emit `widget` instead (see below). This branch
+                // survives for any future tool that opts into the
+                // transient transcript-only render path.
                 send("directive", {
                   ...(directiveForStorage as Record<string, unknown>),
                   messageId: toolRow.id,
                 });
+              }
+              // W3 — workspace widget emission. Each of the six
+              // shipped tools returns a `widget` alongside (or
+              // instead of) a directive. We call `.upsert(...)`
+              // with the tool row id as `sourceMessageId` so
+              // ConfirmSend's POST anchor resolves the same way the
+              // old directive path's `messageId` did.
+              //
+              // `.upsert(...)` validates via validateWidget and
+              // returns null on failure; on success the emitter
+              // sends `widget_upsert` over the SSE stream. A null
+              // return means the handler produced a widget payload
+              // the validator rejected — we log and continue, same
+              // trust model as the directive branch above.
+              const r = result.result;
+              if (r.widget) {
+                const upserted = await workspace.upsert({
+                  widgetKey: r.widget.widgetKey,
+                  kind: r.widget.kind,
+                  slot: r.widget.slot,
+                  props: r.widget.props,
+                  order: r.widget.order,
+                  sourceMessageId: toolRow.id,
+                });
+                if (!upserted) {
+                  console.warn(
+                    `[chat] invalid widget from tool ${call.name}; dropped`,
+                    {
+                      widgetKey: r.widget.widgetKey,
+                      kind: r.widget.kind,
+                    },
+                  );
+                }
               }
               send("tool", { name: call.name, status: "ok" });
             } else {

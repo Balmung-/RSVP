@@ -7,10 +7,18 @@ import { loadAudience, computeBlockers } from "./send-blockers";
 // Previews what `sendCampaign` WOULD do, without doing it. The
 // model calls this to resolve an audience + template + count
 // before asking the operator for confirmation. The `confirm_send`
-// directive this emits carries every field `/api/chat/confirm`
+// widget this emits carries every field `/api/chat/confirm`
 // (Push 7) will need to re-dispatch the actual destructive
 // send — campaign_id, channel, only_unsent — plus a preview the
 // operator can sanity-check before clicking.
+//
+// WidgetKey `confirm.send.${campaign_id}` — one in-flight confirm
+// per campaign. A second propose_send for the same campaign upserts
+// (refreshes preview with latest audience counts) rather than
+// stacking a duplicate `action` card. The confirm route reads the
+// stored `toolInput` off the ChatMessage anchor row the widget
+// points at via `sourceMessageId` — stream of custody stays
+// server-side.
 //
 // Scope note — this tool is `scope: "read"` despite its name. It
 // reads the campaign, counts invitees, and reports blockers; it
@@ -252,6 +260,29 @@ export const proposeSendTool: ToolDef<Input> = {
       `A ConfirmSend card has been rendered. The operator must click Confirm to actually send — this tool does not send.`,
     );
 
+    const props = {
+      campaign_id: campaign.id,
+      name: campaign.name,
+      status: campaign.status,
+      venue: campaign.venue,
+      event_at: campaign.eventAt ? campaign.eventAt.toISOString() : null,
+      locale: campaign.locale,
+      channel,
+      only_unsent: onlyUnsent,
+      invitee_total: invitees.length,
+      ready_messages: readyMessages,
+      by_channel: {
+        email: emailBucket,
+        sms: smsBucket,
+      },
+      template_preview: {
+        subject_email: clip(campaign.subjectEmail, SUBJECT_PREVIEW_CHARS),
+        email_body: clip(campaign.templateEmail, BODY_PREVIEW_CHARS),
+        sms_body: clip(campaign.templateSms, BODY_PREVIEW_CHARS),
+      },
+      blockers,
+    };
+
     return {
       output: {
         id: campaign.id,
@@ -263,30 +294,11 @@ export const proposeSendTool: ToolDef<Input> = {
         blockers,
         summary: summaryLines.join("\n"),
       },
-      directive: {
+      widget: {
+        widgetKey: `confirm.send.${campaign.id}`,
         kind: "confirm_send",
-        props: {
-          campaign_id: campaign.id,
-          name: campaign.name,
-          status: campaign.status,
-          venue: campaign.venue,
-          event_at: campaign.eventAt ? campaign.eventAt.toISOString() : null,
-          locale: campaign.locale,
-          channel,
-          only_unsent: onlyUnsent,
-          invitee_total: invitees.length,
-          ready_messages: readyMessages,
-          by_channel: {
-            email: emailBucket,
-            sms: smsBucket,
-          },
-          template_preview: {
-            subject_email: clip(campaign.subjectEmail, SUBJECT_PREVIEW_CHARS),
-            email_body: clip(campaign.templateEmail, BODY_PREVIEW_CHARS),
-            sms_body: clip(campaign.templateSms, BODY_PREVIEW_CHARS),
-          },
-          blockers,
-        },
+        slot: "action",
+        props,
       },
     };
   },

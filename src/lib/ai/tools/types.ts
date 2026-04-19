@@ -1,5 +1,6 @@
 import type { User } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
+import type { WidgetKind, WidgetSlot } from "../widget-validate";
 
 // Contracts for the AI tool registry. Every capability the chat layer
 // can invoke is a ToolDef: a declarative description + a handler that
@@ -40,18 +41,48 @@ export type ToolCtx = {
 // component registry; unknown kinds are dropped silently. `props` is
 // the data payload — it MUST be JSON-serializable, and the server
 // validates its shape per-kind before persisting.
+//
+// DEPRECATED for the 6 shipped kinds as of W3 — handlers now emit
+// `widget` instead, which upserts into the persistent ChatWidget
+// table and lands on the workspace dashboard rather than disappearing
+// inline in the transcript. The field stays on `ToolResult` so a
+// future tool (outside the shipped six) can still use the transient
+// transcript-only render path without bringing up a new surface.
 export type RenderDirective = {
   kind: string;
   props: Record<string, unknown>;
 };
 
+// A workspace widget emission. Replaces directives for the six kinds
+// the dashboard renders. The chat route calls `workspace.upsert(...)`
+// with this payload after persisting the tool row, threading
+// `sourceMessageId` from the ChatMessage row id so ConfirmSend's POST
+// anchor still resolves (same contract the old directive path used
+// via `messageId`).
+//
+// `kind` and `slot` are typed against the closed widget registry so
+// the compiler catches drift between handlers, the validator, and the
+// dashboard renderer. Props shape is validated at runtime by
+// `validateWidget` — a malformed widget is dropped silently (null
+// return from `upsertWidget`) and logged server-side.
+export type ToolWidget = {
+  widgetKey: string;
+  kind: WidgetKind;
+  slot: WidgetSlot;
+  props: Record<string, unknown>;
+  order?: number;
+};
+
 // What a handler returns. `output` is what we feed back to the model
 // as the tool_result (string, or JSON we'll stringify). `directive`
-// is optional rendering hint for the client; can be set without
-// affecting what the model sees.
+// is the legacy transient-render path (see comment on RenderDirective);
+// `widget` is the W3 persistent-workspace path — emit at most one of
+// the two per call. Both can also be omitted (the handler's text
+// output is enough on its own).
 export type ToolResult = {
   output: string | Record<string, unknown>;
   directive?: RenderDirective;
+  widget?: ToolWidget;
 };
 
 // Minimal JSON Schema typing — we don't need full draft-07 support,

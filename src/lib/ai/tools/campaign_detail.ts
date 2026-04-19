@@ -8,7 +8,13 @@ import type { ToolDef, ToolResult } from "./types";
 // "tell me about X" or drills into a row from the list. Returns
 // the campaign's core fields, the full stats block, and the last
 // 10 activity-log entries that concern it — rendered as a
-// `campaign_card` directive on the client.
+// `campaign_card` workspace widget in the `primary` dashboard slot.
+//
+// WidgetKey is `campaign.${id}` so each campaign owns one card. The
+// operator can drill into several campaigns in one session and see
+// their cards stack in `primary`; re-invoking for the same id
+// upserts the existing card with fresh stats + activity rather than
+// appending a duplicate.
 //
 // Scope discipline: the campaign is looked up under AND-composed
 // `ctx.campaignScope`. If the id resolves to a campaign outside
@@ -203,8 +209,10 @@ export const campaignDetailTool: ToolDef<Input> = {
 
     return {
       output: { summary: lines.join("\n"), id: detail.id },
-      directive: {
+      widget: {
+        widgetKey: `campaign.${detail.id}`,
         kind: "campaign_card",
+        slot: "primary",
         props: detail,
       },
     };
