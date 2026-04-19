@@ -499,3 +499,39 @@ export function validateWidgetProps(
   if (!isPlainObject(props)) return false;
   return PROP_VALIDATORS[kind](props);
 }
+
+// W7 — gate for the operator-dismissable action widgets. Dismiss is
+// ONLY offered on terminal confirm surfaces (operator has seen the
+// outcome and is clearing the row) and ONLY on the two confirm
+// kinds — every other widget kind is a live view that the operator
+// shouldn't be able to accidentally close from chat.
+//
+// Server-side the dismiss route calls this after `rowToWidget`
+// rehydrates the stored props, so the shape we see here has already
+// passed `validateWidgetProps`. Client-side `WidgetRenderer` calls
+// it on a `ClientWidget` whose props traversed the same validation
+// on the SSE emit path. Sharing this gate means a widget that
+// SHOWS the dismiss affordance is exactly the widget the server
+// will agree to delete — no "button renders but POST returns 400"
+// surprises when the UI drifts from the server contract.
+export function isTerminalConfirmWidget(
+  kind: string,
+  props: unknown,
+): boolean {
+  if (!isPlainObject(props)) return false;
+  if (kind === "confirm_draft") {
+    // Draft widgets are terminal-on-creation — the row is written
+    // before the widget emits and no post-action flow exists. The
+    // validator only accepts `state === "done"` for this kind, so
+    // this line is belt-and-braces against a drifted blob.
+    return props.state === "done";
+  }
+  if (kind === "confirm_send") {
+    // Send widgets are dismissable only AFTER the destructive POST
+    // landed a terminal state. `ready` / `blocked` / `submitting`
+    // are pre-action — dismissing those would throw away an unused
+    // authorization anchor and confuse the operator.
+    return props.state === "done" || props.state === "error";
+  }
+  return false;
+}

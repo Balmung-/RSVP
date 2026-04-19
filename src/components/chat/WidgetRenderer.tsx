@@ -3,6 +3,7 @@
 import { DirectiveRenderer, type AnyDirective } from "./DirectiveRenderer";
 import type { ClientWidget } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
+import { isTerminalConfirmWidget } from "@/lib/ai/widget-validate";
 
 // Workspace widget renderer. Thin shim over `DirectiveRenderer` for
 // W2 — the six widget kinds (campaign_list, campaign_card,
@@ -24,13 +25,26 @@ import type { FormatContext } from "./directives/CampaignList";
 //   - Future widget-only concerns (focus highlight, drag reorder,
 //     inline actions) land here without touching the live
 //     transcript path.
+//
+// W7 — operator dismiss for terminal confirm widgets. The button is
+// rendered by THIS component (not inside ConfirmDraft / ConfirmSend)
+// so the dismiss affordance lives on the workspace side of the
+// widget/directive seam — the live directive-streaming path shares
+// those components and must not sprout an X the transcript can
+// click. The gate (`isTerminalConfirmWidget`) mirrors the server
+// check in the dismiss route so a visible ✕ is exactly a widget
+// the server will agree to delete.
 
 export function WidgetRenderer({
   widget,
   fmt,
+  onDismiss,
+  locale,
 }: {
   widget: ClientWidget;
   fmt: FormatContext;
+  onDismiss?: (widgetKey: string) => void;
+  locale?: "en" | "ar";
 }) {
   // Translate the widget envelope into the directive envelope
   // DirectiveRenderer expects. `sourceMessageId` carries the same
@@ -43,5 +57,40 @@ export function WidgetRenderer({
   if (widget.sourceMessageId) {
     directive.messageId = widget.sourceMessageId;
   }
-  return <DirectiveRenderer directive={directive} fmt={fmt} />;
+
+  const showDismiss =
+    typeof onDismiss === "function" &&
+    isTerminalConfirmWidget(widget.kind, widget.props);
+
+  return (
+    <>
+      <DirectiveRenderer directive={directive} fmt={fmt} />
+      {showDismiss && (
+        <button
+          type="button"
+          onClick={() => onDismiss(widget.widgetKey)}
+          // Absolute within the parent dashboard wrapper (which
+          // sets `relative`). Top-right so it doesn't collide with
+          // the emerald "Draft created" / "Sent" header bar on
+          // either confirm widget. Small, subdued until hover —
+          // the confirm card is the primary surface, dismiss is a
+          // secondary action.
+          className="absolute top-2 right-2 rounded-md px-1.5 py-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-300"
+          aria-label={
+            locale === "ar"
+              ? "إزالة البطاقة من لوحة العمل"
+              : "Dismiss from workspace"
+          }
+          title={locale === "ar" ? "إزالة" : "Dismiss"}
+        >
+          {/* Heavy multiplication sign (×, U+00D7) — renders
+              crisper than the lowercase "x" at small sizes and
+              doesn't need an icon font. */}
+          <span aria-hidden className="text-sm leading-none">
+            ×
+          </span>
+        </button>
+      )}
+    </>
+  );
 }

@@ -49,11 +49,18 @@ export function WorkspaceDashboard({
   fmt,
   phase,
   focusRequest,
+  onDismissWidget,
 }: {
   widgets: ClientWidget[];
   fmt: FormatContext;
   phase: Phase;
   focusRequest: FocusRequest | null;
+  // W7 — terminal confirm widgets get a small ✕ button when this
+  // callback is provided. The dashboard itself doesn't know which
+  // widgets are dismissable; WidgetRenderer consults the shared
+  // `isTerminalConfirmWidget` gate so the button only appears on
+  // the kinds + states the server will agree to delete.
+  onDismissWidget?: (widgetKey: string) => void;
 }) {
   // W4 focus plumbing. Each rendered widget registers its DOM node
   // via a ref-callback keyed by widgetKey. When `focusRequest`
@@ -71,10 +78,25 @@ export function WorkspaceDashboard({
     if (!el) return;
     // `block: "center"` pulls the card into the middle of the
     // viewport rather than sticking it to the top or bottom edge.
-    // `behavior: "smooth"` matches the rest of the app's scroll
-    // motion (see ChatRail auto-pin). Supported in all Evergreen
-    // browsers the admin console targets.
-    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    // Supported in all Evergreen browsers the admin console
+    // targets.
+    //
+    // W7 — honour `prefers-reduced-motion`. Operators who've set
+    // the OS-level motion-reduction flag (vestibular sensitivity,
+    // screen readers that piggy-back on it) see an instant jump
+    // instead of a smooth scroll. Same accessibility pattern the
+    // rest of the app uses for motion; the `matchMedia` check is
+    // wrapped because SSR / older browsers that lack the API
+    // should still get a scroll (defaulting to smooth keeps the
+    // existing experience when the query can't be evaluated).
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({
+      block: "center",
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
     setFlashedKey(focusRequest.widgetKey);
     const timer = window.setTimeout(() => {
       setFlashedKey((current) =>
@@ -140,13 +162,22 @@ export function WorkspaceDashboard({
                       if (el) widgetRefs.current.set(w.widgetKey, el);
                       else widgetRefs.current.delete(w.widgetKey);
                     }}
+                    // `relative` so the dismiss button can absolute-
+                    // position itself in WidgetRenderer without
+                    // leaking its positioning concern into every
+                    // DirectiveRenderer kind.
                     className={clsx(
-                      "min-w-0 rounded-xl transition-shadow duration-500 ease-glide",
+                      "relative min-w-0 rounded-xl transition-shadow duration-500 ease-glide",
                       flashedKey === w.widgetKey &&
                         "ring-2 ring-ink-300 shadow-lift",
                     )}
                   >
-                    <WidgetRenderer widget={w} fmt={fmt} />
+                    <WidgetRenderer
+                      widget={w}
+                      fmt={fmt}
+                      onDismiss={onDismissWidget}
+                      locale={fmt.locale}
+                    />
                   </div>
                 ))}
               </SlotSection>

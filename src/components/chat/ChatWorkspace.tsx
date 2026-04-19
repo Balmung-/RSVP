@@ -252,6 +252,65 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     }
   }, [input, phase, setSessionId]);
 
+  // ---- dismiss ----------------------------------------------------
+  //
+  // W7 — operator-initiated removal of a terminal confirm widget
+  // from the dashboard. The server is the source of truth: the
+  // POST round-trips to /api/chat/dismiss which validates ownership
+  // AND the terminal-state gate (kind + state) before deleting the
+  // ChatWidget row. On a 200 we apply the same `widget_remove`
+  // reducer the SSE path uses so local state converges without a
+  // re-hydrate. Failure cases (non-200) leave the widget in place
+  // and surface via topError — the most likely refusal here is
+  // `not_found` (already dismissed from another tab), which the
+  // operator can't fix by retrying, so we display a short message
+  // and let the next snapshot reconcile.
+  //
+  // Why not optimistic-remove-then-POST: a failed POST would need
+  // to re-INSERT the widget into state, and the hydration order
+  // inside a slot depends on `order + updatedAt`. Racing against
+  // a concurrent workspace_snapshot would leave the slot flicker-
+  // sorted. Waiting for the 200 is cheap (single DB row delete)
+  // and keeps the visible state consistent with persistence.
+  const handleDismissWidget = useCallback(
+    async (widgetKey: string) => {
+      const currentSession = sessionIdRef.current;
+      if (!currentSession) return;
+      try {
+        const res = await fetch("/api/chat/dismiss", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: currentSession, widgetKey }),
+          credentials: "same-origin",
+        });
+        if (!res.ok) {
+          let message = `HTTP ${res.status}`;
+          try {
+            const body = (await res.json()) as { error?: string };
+            if (body?.error) message = body.error;
+          } catch {
+            /* keep code */
+          }
+          setTopError(message);
+          return;
+        }
+        // Reuse the SSE path's reducer to keep one mutation shape.
+        // The server already pruned the row; this just drops it
+        // from the local array so React re-renders without it.
+        setWidgets((prev) =>
+          reduceWidgets(prev, {
+            event: "widget_remove",
+            data: JSON.stringify({ widgetKey }),
+          }),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "dismiss_error";
+        setTopError(msg);
+      }
+    },
+    [],
+  );
+
   return (
     <div
       // Height budget: viewport minus header (h-14) minus compact
@@ -280,6 +339,7 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           fmt={fmt}
           phase={phase}
           focusRequest={focusRequest}
+          onDismissWidget={handleDismissWidget}
         />
       </div>
     </div>
