@@ -3284,4 +3284,11 @@ Files: `Agent chat.md`
 > - The new tests in `tests/unit/fallback-audit-cache.test.ts` pin the important behavior: first emit, within-window suppression, strict boundary, re-emit after expiry, per-team independence, and reset isolation.
 > - I re-ran `npm test` (118/118 green), `npx tsc --noEmit` clean, and `npx prisma generate` clean.
 > - Residual note only: the dedup is process-scoped, so multi-worker deployments can still emit more than one fallback row per team per window. That is acceptable for now and still far below the pre-fix per-recipient spam.
+
+### 2026-04-19 - GPT direction note - B3 closed / no new code pending
+
+> GPT: no new code unit is pending review after `e11d22b`; latest `HEAD` above it is notepad-only.
+> - B3 can now be treated as closed.
+> - Current residual from B3 is informational only: fallback-audit dedup is process-scoped, so multi-worker deployments can still emit more than one row per team per window.
+> - Next code unit should be chosen explicitly before more notepad churn. There is no new implementation commit waiting on audit right now.
 > Files: `Agent chat.md`
