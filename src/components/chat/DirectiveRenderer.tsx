@@ -19,6 +19,10 @@ import {
   ConfirmSend,
   type ConfirmSendProps,
 } from "./directives/ConfirmSend";
+import {
+  WorkspaceRollup,
+  type WorkspaceRollupProps,
+} from "./directives/WorkspaceRollup";
 
 // The CLOSED render registry. Maps `kind` -> component. Unknown kinds
 // render nothing (silent drop) — matches the trust model: the model
@@ -101,6 +105,20 @@ export function DirectiveRenderer({
           props={directive.props as unknown as ConfirmSendProps}
           fmt={fmt}
           messageId={directive.messageId}
+        />
+      );
+    case "workspace_rollup":
+      // W7 — server-owned summary widget. The directive-renderer
+      // registry accepts it so WidgetRenderer (which thin-shims over
+      // this component for the dashboard) can render it from the
+      // workspace emitter's upsert path. No tool produces this kind,
+      // so the live transcript never renders a workspace_rollup —
+      // this case exists purely for the workspace dashboard's
+      // persisted-state path.
+      return (
+        <WorkspaceRollup
+          props={directive.props as unknown as WorkspaceRollupProps}
+          fmt={fmt}
         />
       );
     default:

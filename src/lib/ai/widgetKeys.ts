@@ -28,6 +28,13 @@ export const CAMPAIGNS_LIST_WIDGET_KEY = "campaigns.list";
 export const CONTACTS_TABLE_WIDGET_KEY = "contacts.table";
 export const ACTIVITY_STREAM_WIDGET_KEY = "activity.stream";
 
+// W7 — persistent workspace summary pinned to the `summary` slot.
+// One row per chat session, updated in-place by `refreshWorkspaceSummary`
+// after any mutation that could move its counters. The key is static
+// (not per-entity) so every refresh upserts the SAME row — the whole
+// point of the rollup is a single stable card operators can skim.
+export const WORKSPACE_SUMMARY_WIDGET_KEY = "workspace.summary";
+
 export function campaignDetailWidgetKey(campaignId: string): string {
   return `campaign.${campaignId}`;
 }

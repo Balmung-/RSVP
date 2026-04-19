@@ -26,6 +26,8 @@ import { listTools, dispatch } from "@/lib/ai/tools";
 import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 import { validateDirective } from "@/lib/ai/directive-validate";
 import { createWorkspaceEmitter } from "@/lib/ai/widgets";
+import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
+import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
 
 // The chat endpoint. Accepts a POST body `{ sessionId?, message }`,
 // authenticates via the usual session cookie, then opens a
@@ -581,6 +583,44 @@ export async function POST(req: Request) {
                   );
                 }
               }
+
+              // W7 — refresh the workspace rollup after any tool run
+              // that can move its counters. Today only `draft_campaign`
+              // qualifies in the chat route; `send_campaign` is
+              // destructive and intercepted by dispatch() here (its
+              // real execution is the /confirm route, which has its
+              // own refresh call). We persist + emit `widget_upsert`
+              // directly rather than routing through
+              // `workspace.upsert(...)` because that emitter also
+              // fires `widget_focus`, which would pull the dashboard
+              // away from the confirm_draft card the operator just
+              // created. Errors are logged + swallowed: a failed
+              // refresh leaves stale counters on the rollup until the
+              // next mutation, which is recoverable, whereas raising
+              // would abort the chat turn and lose the model's
+              // response in-flight.
+              if (call.name === "draft_campaign") {
+                try {
+                  const rollup = await refreshWorkspaceSummary(
+                    { prismaLike: prisma as never },
+                    { sessionId, campaignScope: ctx.campaignScope },
+                  );
+                  if (rollup) {
+                    send("widget_upsert", rollup);
+                  } else {
+                    console.warn(
+                      `[chat] workspace rollup produced invalid props; dropped`,
+                      { sessionId, widgetKey: WORKSPACE_SUMMARY_WIDGET_KEY },
+                    );
+                  }
+                } catch (err) {
+                  console.warn(
+                    `[chat] workspace rollup refresh failed`,
+                    err,
+                  );
+                }
+              }
+
               send("tool", { name: call.name, status: "ok" });
             } else {
               send("tool", {

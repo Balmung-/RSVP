@@ -50,6 +50,14 @@ export const WIDGET_KINDS = [
   "activity_stream",
   "confirm_draft",
   "confirm_send",
+  // W7 — server-owned rollup pinned to the `summary` slot. Unlike the
+  // other six (which come from a tool's handler as a side-effect of a
+  // model call), the rollup is computed by a standalone helper
+  // (`refreshWorkspaceSummary`) invoked after workspace-mutating
+  // actions. No tool emits this kind; keeping it in the closed registry
+  // is how the validator accepts rollup writes while every OTHER
+  // producer path for the same kind stays firmly rejected.
+  "workspace_rollup",
 ] as const;
 
 export type WidgetKind = (typeof WIDGET_KINDS)[number];
@@ -389,6 +397,38 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   return true;
 }
 
+// W7 — workspace_rollup prop shape. A small, flat blob of integer
+// counters scoped to the operator's visible campaigns. The rollup
+// exists to give the dashboard a single "at-a-glance" card; its
+// producers are server-owned (not model-driven), so the validator is
+// primarily a drift guard for read-side `rowToWidget` rehydration
+// rather than a defence against a misbehaving tool.
+//
+// Why every counter is required (no optional `|| 0` in the renderer):
+//   - The compute helper writes ALL fields on every refresh. A missing
+//     field here would mean schema drift between the helper and the
+//     validator, which is exactly the case `validateWidgetProps`
+//     catches on read to fail closed.
+//   - `generated_at` is an ISO timestamp so the renderer can show
+//     relative freshness ("updated 2 min ago") without a second trip
+//     to `updatedAt` from the DB.
+function validateWorkspaceRollup(p: Record<string, unknown>): boolean {
+  if (!isPlainObject(p.campaigns)) return false;
+  for (const k of ["draft", "active", "closed", "archived", "total"]) {
+    if (!isFiniteInteger(p.campaigns[k])) return false;
+  }
+  if (!isPlainObject(p.invitees)) return false;
+  if (!isFiniteInteger(p.invitees.total)) return false;
+  if (!isPlainObject(p.responses)) return false;
+  for (const k of ["total", "attending", "declined", "recent_24h"]) {
+    if (!isFiniteInteger(p.responses[k])) return false;
+  }
+  if (!isPlainObject(p.invitations)) return false;
+  if (!isFiniteInteger(p.invitations.sent_24h)) return false;
+  if (!isNonEmptyString(p.generated_at)) return false;
+  return true;
+}
+
 // Kind -> prop-shape validator. Extending this requires: (1) add to
 // WIDGET_KINDS, (2) add validator here, (3) add renderer in the
 // workspace dashboard registry. Skipping any one of the three should
@@ -401,6 +441,7 @@ const PROP_VALIDATORS: Record<WidgetKind, (p: Record<string, unknown>) => boolea
     activity_stream: validateActivityStream,
     confirm_draft: validateConfirmDraft,
     confirm_send: validateConfirmSend,
+    workspace_rollup: validateWorkspaceRollup,
   };
 
 // ---- public entry point ----

@@ -8,6 +8,7 @@ import { dispatch } from "@/lib/ai/tools";
 import { runConfirmSend } from "@/lib/ai/confirm-flow";
 import { focusWidget, upsertWidget } from "@/lib/ai/widgets";
 import { confirmSendWidgetKey } from "@/lib/ai/widgetKeys";
+import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -367,6 +368,32 @@ export async function POST(
       },
     },
   );
+
+  // W7 — refresh the workspace rollup after a successful send. The
+  // rollup's `invitations.sent_24h` counter is send-sensitive, so the
+  // confirm route is one of the two callsites that must invoke the
+  // refresh helper (the other is the chat route after
+  // `draft_campaign`). No SSE channel here — the row lands in the DB
+  // and the next `workspace_snapshot` (session reload or next chat
+  // turn) picks it up. Errors are swallowed by design: the operator
+  // already got their outcome in `body`, and a stale rollup surfaces
+  // in a later snapshot once the next mutation refreshes.
+  //
+  // Gated on HTTP 200 so we only refresh on the true-success path.
+  // Structured refusals (status_not_sendable, forbidden, etc.) land
+  // as 400 with `body.ok: false` and don't move the send counters;
+  // dispatch-throws keep the anchor claimed and don't run the audit
+  // either, so refreshing there would be wasted work.
+  if (status === 200) {
+    try {
+      await refreshWorkspaceSummary(
+        { prismaLike: prisma as never },
+        { sessionId: row.sessionId, campaignScope: ctx.campaignScope },
+      );
+    } catch (err) {
+      console.warn(`[confirm] workspace rollup refresh failed`, err);
+    }
+  }
 
   return NextResponse.json(body, { status });
 }

@@ -253,12 +253,18 @@ test("validateWidget: rejects sourceMessageId of wrong type", () => {
 
 // ---- closed-set exports ----
 
-test("validateWidget: WIDGET_KINDS matches the 6 shipped directive kinds", () => {
+test("validateWidget: WIDGET_KINDS matches the shipped dashboard + rollup kinds", () => {
   // The W3 migration lives or dies by these two sets staying
   // aligned. If someone adds a new directive kind without widening
   // WIDGET_KINDS (or vice versa), the migration will silently lose
   // surfaces. Pin the expected set here so a change in either file
   // fails review until both are updated.
+  //
+  // W7 sub-slice 2 added `workspace_rollup` — server-owned summary
+  // widget, no directive twin (no tool emits this kind). It lives in
+  // the widget registry because it's persisted like every other
+  // widget, but the directive-validate registry stays at six; the
+  // two sets deliberately diverge from this push onward.
   assert.deepEqual(
     [...WIDGET_KINDS].sort(),
     [
@@ -268,6 +274,7 @@ test("validateWidget: WIDGET_KINDS matches the 6 shipped directive kinds", () =>
       "confirm_draft",
       "confirm_send",
       "contact_table",
+      "workspace_rollup",
     ],
   );
 });
