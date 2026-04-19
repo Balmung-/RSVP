@@ -458,6 +458,19 @@ model ChatMessage {
   toolOutput       String?     // JSON
   renderDirective  String?     // JSON
   isError          Boolean     @default(false)
+  // Single-use anchor for destructive confirmations (Push 7 fix).
+  // When /api/chat/confirm/[messageId] atomically claims a
+  // propose_send tool row for dispatch, this timestamp is set via
+  // `updateMany({where: {..., confirmedAt: null}})`. A second POST
+  // against the same messageId races for the same row and loses;
+  // the second request audits `ai.denied.send_campaign` with
+  // reason=already_confirmed and returns 409. On a dispatched-but-
+  // refused path (status_not_sendable / send_in_flight / forbidden
+  // / not_found — all of which refuse BEFORE any send fan-out) the
+  // route releases the claim so the operator can retry without
+  // hitting a stale already_confirmed. Nullable because only tool
+  // rows with toolName=propose_send ever set it.
+  confirmedAt      DateTime?
   createdAt        DateTime    @default(now())
 
   @@index([sessionId, createdAt])

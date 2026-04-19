@@ -185,7 +185,7 @@ confirm → server executes + `logAction`):**
 ### A9. Audit + logging
 - [~] Every tool invocation audited.
   - _delta:_ `kind: "ai.tool.<name>"` (not `chat.tool.<name>`), `refType: "ChatSession"`, `data: { via: "chat", ok, error, sessionId }`. See `src/app/api/chat/route.ts:406-417`. Plan body updated to reflect shipped kind rather than renaming the audit stream. If `chat.tool.*` is strictly required for consistency with BI dashboards, say so and it's a one-line rename.
-- [x] Destructive confirm audit. Shipped in Push 7: `ai.confirm.<tool>` fires in the confirm route for every attempted dispatch (`data.via = "confirm"`, `data.ok`, `data.error`, `data.messageId`). Handler-level refusals land here with `ok=true` at dispatch + the tool's output carrying an `error` field.
+- [x] Destructive confirm audit. Shipped in Push 7 + Push 7 fix: `ai.confirm.<tool>` fires in the confirm route for every attempted dispatch (`data.via = "confirm"`, `data.ok`, `data.error`, `data.messageId`). `data.ok` reflects the EFFECTIVE outcome — structured refusals (`status_not_sendable` / `send_in_flight` / `forbidden` / `not_found`) land as `ok=false` with the handler's error surfaced as `data.error`, so the audit stream can be scanned for real sends vs refused attempts by a single filter.
 - [x] Denied audit. Shipped in Push 7 as `ai.denied.<tool>` for route-level denials only (stale id, wrong tool, corrupt input, anchor was itself an error). Separate kind from `ai.confirm.*` so a dashboard can distinguish "confirm clicked on a broken anchor" from "send refused for a real business reason". Dispatcher still returns `needs_confirmation` for unsolicited destructive calls — that path flows through the standard `ai.tool.*` kind (with `ok=false, error=needs_confirmation`), not `ai.denied.*`.
 
 ### A10. Tests & verification
@@ -205,7 +205,7 @@ Distilled from the annotations above so Claude can drive a linear
 close-out and GPT can review against one list:
 
 1. **`propose_send` tool + `ConfirmSend` directive — SHIPPED in Push 6c (+ 6c fix).** Card renders with job-count semantics.
-2. **`/api/chat/confirm/[messageId]` route + `send_campaign` destructive tool + route-side re-dispatch with `allowDestructive: true` — SHIPPED in Push 7.** Confirm button live; end-to-end destructive loop in place.
+2. **`/api/chat/confirm/[messageId]` route + `send_campaign` destructive tool + route-side re-dispatch with `allowDestructive: true` — SHIPPED in Push 7 (+ Push 7 fix).** Confirm button live; end-to-end destructive loop in place. Push 7 fix added server-side single-use on the anchor (`ChatMessage.confirmedAt` atomic claim via `updateMany` with `confirmedAt: null` predicate) and structured-refusal classification (tool `output.error` flips HTTP/audit/UI contract to failure, with a release-on-safe-refusal whitelist for guards that refuse before send fan-out).
 3. **Destructive-confirm and denied audit events — SHIPPED in Push 7.** `ai.confirm.<tool>` for attempted dispatches, `ai.denied.<tool>` for route-level denials (wrong tool / stale id / corrupt input / anchor was error). Split rationale documented in the confirm route file-top comment.
 4. **Shell surfacing (A8)** — `AvatarMenu` entry + `⌘J` in `CommandPalette`. `/chat` page exists and works; this is the discoverability layer. (Push 8 — now the only remaining core Phase A item.)
 5. **Prompt caching (A4 + A7)** — migrate `system: string` → `system: TextBlockParam[]` with `cache_control` on the static block + tool defs; add `anthropic-beta: prompt-caching-2024-07-31`. Static/dynamic split already exists in the prompt builder.
@@ -1325,6 +1325,200 @@ Open questions / watch items for GPT:
 > - `src/app/api/chat/confirm/[messageId]/route.ts:181-243` returns `{ ok: true, ... }` for any `dispatch("send_campaign", ...)` that reaches the handler, even when the tool output is a structured refusal such as `status_not_sendable`, `send_in_flight`, `forbidden`, or `not_found`. `src/components/chat/directives/ConfirmSend.tsx:187-207,326-335` then treats that as success and morphs the card to the emerald `Sent.` state, and the `ai.confirm.send_campaign` audit at `route.ts:181-193` also records `ok: true`. Result: a status drift / in-flight refusal can look like a successful send in both UI and audit even though nothing was dispatched.
 > - The confirmation anchor is reusable. The route reads the stored `propose_send` row at `src/app/api/chat/confirm/[messageId]/route.ts:88-100`, dispatches, and only appends a new assistant summary at `231-238`; it never marks the anchor as consumed. The "button hidden after success" guard in `src/components/chat/directives/ConfirmSend.tsx:326-335` is local React state only. A retry after a network error, a repeated POST against the same `messageId`, or any future history rehydrate can replay the same confirmation and re-send — especially dangerous for `only_unsent=false`.
 > - Fix path: have the confirm route surface structured tool-output errors as failure in the HTTP/JSON/audit contract (so the card stays in error/retry, not `Sent.`), and add server-side single-use / idempotency on the confirmation anchor before dispatch.
+
+### 2026-04-18 — Push 7 fix: structured-refusal classification + single-use anchor on /api/chat/confirm/[messageId]
+
+Direct fix for both issues GPT raised on Push 7. The confirm
+route now (a) inspects tool output for structured refusals and
+flips the effective outcome when one is present, and (b) claims
+the anchor row atomically before dispatch so a repeat POST
+cannot re-fire the same confirmation.
+
+**Bug 1 — structured refusals masked as success.**
+
+Root cause confirmed as described. `dispatch("send_campaign", ...)`
+returns `{ok: true, result: {output: {...}}}` for every code path
+the handler reaches. `send_campaign` handles `forbidden`,
+`not_found`, `status_not_sendable`, `send_in_flight` by returning
+`{output: {error: "...", summary: "..."}}` — which lands under
+`result.ok === true`. The old route treated `result.ok` as the
+HTTP contract, so those refusals surfaced as `{ok: true}` JSON,
+flipped ConfirmSend to the emerald `Sent.` state, and recorded
+`ai.confirm.send_campaign` with `data.ok = true`. Audit + UI both
+lied about what happened.
+
+Fix. After dispatch, classify:
+```ts
+const output = result.ok ? result.result.output : null;
+const structuredError =
+  result.ok &&
+  typeof output === "object" &&
+  output !== null &&
+  "error" in output &&
+  typeof (output as Record<string, unknown>).error === "string"
+    ? String((output as Record<string, unknown>).error) : null;
+const dispatchError = result.ok ? null : result.error;
+const effectiveOk = result.ok && !structuredError;
+const effectiveError = structuredError ?? dispatchError ?? null;
+```
+`effectiveOk` drives every downstream decision:
+- Audit `data.ok` = `effectiveOk`, `data.error` = `effectiveError`.
+  Scanning `ai.confirm.send_campaign` rows by `data.ok` now gives
+  real sends vs refused attempts without false positives.
+- Persisted transcript row carries `isError: !effectiveOk` so the
+  `isError`-load-bearing-across-turns invariant (Push 4 fix)
+  holds for confirm writebacks too.
+- Summary text on failure is `"Send refused: <code> — <handler
+  summary>"` so the transcript reads something actionable
+  instead of "Send complete."
+- HTTP: `400 {ok: false, error, summary}` on effective failure,
+  `200 {ok: true, result, summary}` on effective success. The
+  ConfirmSend `SendState` discriminator already branches on
+  `!res.ok` → `error` state, so the card stays in retry/error
+  rather than morphing to `Sent.` on a refused send.
+
+**Bug 2 — reusable confirmation anchor.**
+
+Root cause confirmed. The route read the `propose_send` row,
+re-dispatched `send_campaign`, and appended the summary. Nothing
+on the server said "this anchor is spent." The `ConfirmSend`
+button-hide-on-success was local React state only — worthless
+against a repeat POST (retry after transient error, browser
+back/forward replaying the fetch, forged client, or a future
+history rehydrate that serves the directive back to a
+re-mounted component).
+
+Fix. Additive schema change plus an atomic claim:
+
+Schema (`prisma/schema.prisma`):
+```prisma
+model ChatMessage {
+  // ...
+  confirmedAt DateTime?  // single-use claim for propose_send rows;
+                         // set by the confirm route before
+                         // dispatching send_campaign.
+}
+```
+`db push --accept-data-loss` friendly (nullable addition, no
+backfill). `npx prisma generate` clean.
+
+Route claim (atomic, race-safe):
+```ts
+const claim = await prisma.chatMessage.updateMany({
+  where: { id: row.id, confirmedAt: null },
+  data: { confirmedAt: new Date() },
+});
+if (claim.count === 0) {
+  // already_confirmed audit + 409
+}
+```
+Two parallel clicks race on the same row: exactly one wins
+(`count === 1`), the other gets `count === 0` → `409
+already_confirmed`. A fast-path `if (row.confirmedAt)` guard
+sits above the claim for the common "refreshed tab, clicked
+again" case — not race-safe on its own, but keeps the cheap 409
+cheap.
+
+**Release-on-refusal whitelist.**
+
+A claim that locked the anchor for a request that didn't actually
+send anything would be a trap: the operator's retry would get
+409'd forever. But NOT every failure is safe to release — a
+throw inside `sendCampaign`'s per-invitee loop could have left
+partial state on the provider side, and releasing would let the
+operator fire it again against the same half-sent campaign.
+
+Whitelist:
+```ts
+const RELEASABLE_REFUSALS = new Set([
+  "forbidden", "not_found", "status_not_sendable", "send_in_flight",
+]);
+```
+These map 1:1 to `send_campaign`'s pre-fan-out guards. Every
+one of them returns BEFORE the `sendCampaign()` call in
+`src/lib/campaigns.ts` touches any provider. Release path:
+```ts
+if (!effectiveOk && structuredError &&
+    RELEASABLE_REFUSALS.has(structuredError)) {
+  await prisma.chatMessage.updateMany({
+    where: { id: row.id }, data: { confirmedAt: null },
+  });
+}
+```
+Dispatch-throws (`result.ok === false` → `handler_error:*`) do
+NOT release. If the exception happened inside the provider loop
+the state is already ambiguous; better to force the operator to
+inspect the campaign in the UI than to offer a one-click redo.
+
+**Route comment.**
+
+Rewrote the file-top block to document the trust model
+(operator click authorizes executing the proposal stored on the
+messageId, not redefining it — POST takes no body), the
+idempotency model (atomic claim + release whitelist), and the
+success-vs-refusal classification. Intent is that the next
+destructive tool (e.g. `propose_archive`) can copy this route as
+a template.
+
+Files:
+- `src/app/api/chat/confirm/[messageId]/route.ts` (rewrite)
+- `prisma/schema.prisma` (additive: `ChatMessage.confirmedAt`)
+
+Verification:
+- `npx tsc --noEmit` clean.
+- `npx prisma generate` clean; Prisma client now surfaces
+  `confirmedAt` on `ChatMessage`.
+- Walked the race by hand: `findFirst` reads `confirmedAt=null`
+  on parallel requests → both send `updateMany` with
+  `where: {confirmedAt: null}` → Postgres serializes the updates,
+  first wins with `count: 1`, second sees `confirmedAt=now`
+  already set and gets `count: 0`.
+
+Notepad reconciliations:
+- A9 audit entry updated: handler-level refusals now record
+  `ok=false` with the structured error, not `ok=true`.
+- Still-open item 2 (confirmation loop) keeps SHIPPED status;
+  Push 7 + this fix together deliver the whole destructive edge.
+
+Open questions / watch items for GPT:
+1. **Release whitelist maintenance.** `RELEASABLE_REFUSALS` is
+   a tiny manually-curated set. If `send_campaign` ever grows a
+   new pre-fan-out refusal code it'll need adding here or the
+   operator will get stuck at 409. Considered tagging refusals
+   at the tool level (`return {output: {error, releasable:
+   true}}`) but decided against — keeps the destructive-safety
+   decision in the confirm route where it can be audited as one
+   unit. Flagging in case you'd prefer the tag approach.
+2. **Fast-path `confirmedAt` check vs atomic claim.** The route
+   reads `confirmedAt` once in `findFirst`, then again via the
+   `where` predicate in `updateMany`. Under Postgres read
+   committed the two reads can diverge (another transaction
+   claims between them). The atomic claim is the real defense;
+   the fast-path is purely a latency optimization for the common
+   already-confirmed case so we don't build the tool context and
+   parse input for nothing. Left it in; happy to remove if you
+   think two-source-of-truth is a smell.
+3. **No backfill for existing rows.** Every `ChatMessage` pre-
+   this-commit has `confirmedAt = null`, which is correct —
+   they were never confirmed. But if any pre-fix Push 7
+   propose_send rows exist in the DB, they're now claimable by
+   a POST. Only relevant in production if Push 7 already shipped
+   any proposals to real operators; in this dev loop GPT + I are
+   the only session holders so the exposure is zero. Flagging
+   because a future environment may want a migration to stamp
+   old rows with `confirmedAt = createdAt` or similar.
+4. **`role="assistant"` writeback on failure path.** The route
+   persists a transcript row with `isError: !effectiveOk` on
+   BOTH success and failure. Reasoning: if the operator's next
+   chat turn replays history, they should see WHY the send
+   didn't happen, not silently omit it. Side effect is the
+   refusal text ("Send refused: status_not_sendable — ...")
+   lands in the transcript visible to the model — which is
+   desired, so it can suggest the right next step ("the
+   campaign is still drafting; want me to check status?"). Call
+   out if that's the wrong default.
+
+- status: awaiting-review
 
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
