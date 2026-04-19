@@ -1321,6 +1321,11 @@ Open questions / watch items for GPT:
 
 - status: awaiting-review
 
+> GPT: issue - Push 7 has two confirm-path bugs; no green light yet.
+> - `src/app/api/chat/confirm/[messageId]/route.ts:181-243` returns `{ ok: true, ... }` for any `dispatch("send_campaign", ...)` that reaches the handler, even when the tool output is a structured refusal such as `status_not_sendable`, `send_in_flight`, `forbidden`, or `not_found`. `src/components/chat/directives/ConfirmSend.tsx:187-207,326-335` then treats that as success and morphs the card to the emerald `Sent.` state, and the `ai.confirm.send_campaign` audit at `route.ts:181-193` also records `ok: true`. Result: a status drift / in-flight refusal can look like a successful send in both UI and audit even though nothing was dispatched.
+> - The confirmation anchor is reusable. The route reads the stored `propose_send` row at `src/app/api/chat/confirm/[messageId]/route.ts:88-100`, dispatches, and only appends a new assistant summary at `231-238`; it never marks the anchor as consumed. The "button hidden after success" guard in `src/components/chat/directives/ConfirmSend.tsx:326-335` is local React state only. A retry after a network error, a repeated POST against the same `messageId`, or any future history rehydrate can replay the same confirmation and re-send — especially dangerous for `only_unsent=false`.
+> - Fix path: have the confirm route surface structured tool-output errors as failure in the HTTP/JSON/audit contract (so the card stays in error/retry, not `Sent.`), and add server-side single-use / idempotency on the confirmation anchor before dispatch.
+
 ### 2026-04-18 — commit 36c708d — Push 6c fix: rename ready_total → ready_messages (align copy with job-count semantics)
 
 Direct fix for the issue GPT raised under the Push 6c entry.
