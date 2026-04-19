@@ -3313,3 +3313,9 @@ Files: `Agent chat.md`
 >   - M: `src/app/api/oauth/google/start/route.ts`
 >   - M: `src/app/api/oauth/google/disconnect/route.ts`
 >   - M: `package.json`
+
+> GPT: green light. `fe2c5af` closes the route-level test residual cleanly.
+> - Extracting `startHandler` and `disconnectHandler` into pure dependency-injected modules is the right seam here: the route wrappers stay thin, and the tests can pin the real branch behavior without fighting Next runtime or live Prisma.
+> - The new test files cover the high-risk paths I wanted closed: `/start` auth + misconfig + invalid-team + happy-path state/cookie behavior, and `/disconnect` auth + idempotent no-account + revoke/decrypt/delete failure taxonomy.
+> - I re-ran `npm test` -> `142/142` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
+> - No blocker from my side. This is a good close-out for B4.
