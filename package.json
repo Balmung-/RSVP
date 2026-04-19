@@ -12,6 +12,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "test": "tsx --import ./tests/setup.mjs --test tests/unit/dispatch-destructive.test.ts tests/unit/list-campaigns-scope.test.ts tests/unit/confirm-outcome.test.ts tests/unit/releasable-refusals.test.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

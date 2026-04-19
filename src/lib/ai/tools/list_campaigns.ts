@@ -37,6 +37,30 @@ const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 const DEFAULT_STATUSES: CampaignStatus[] = ["draft", "active", "sending"];
 
+// Pure WHERE-clause builder, exported so the Push 2 regression can be
+// unit-tested without spinning up Prisma. Composition is AND — never
+// object-spread — so the team-scope OR in `ctx.campaignScope` is NOT
+// clobbered when `upcoming_only` adds its own OR clause. (Spreading
+// two OR-keyed objects drops the first one silently, which is
+// exactly the leak that shipped and was fixed here.)
+export function buildListCampaignsWhere(
+  input: Pick<Input, "status" | "upcoming_only">,
+  ctx: { campaignScope: Prisma.CampaignWhereInput },
+  now: Date = new Date(),
+): Prisma.CampaignWhereInput {
+  const statuses = input.status ?? DEFAULT_STATUSES;
+  const andClauses: Prisma.CampaignWhereInput[] = [
+    ctx.campaignScope,
+    { status: { in: statuses } },
+  ];
+  if (input.upcoming_only) {
+    andClauses.push({
+      OR: [{ eventAt: null }, { eventAt: { gte: now } }],
+    });
+  }
+  return { AND: andClauses };
+}
+
 export const listCampaignsTool: ToolDef<Input> = {
   name: "list_campaigns",
   description:
@@ -89,21 +113,9 @@ export const listCampaignsTool: ToolDef<Input> = {
     const statuses = input.status ?? DEFAULT_STATUSES;
     const limit = input.limit ?? DEFAULT_LIMIT;
 
-    // Compose with AND (not object-spread) so the team-scope OR in
-    // ctx.campaignScope is NOT clobbered by the upcoming-only OR.
-    // Spreading two OR-keyed objects loses the first one — a scope
-    // leak for non-admins. AND preserves both. (Flagged by GPT in
-    // the Push 2 audit.)
-    const andClauses: Prisma.CampaignWhereInput[] = [
-      ctx.campaignScope,
-      { status: { in: statuses } },
-    ];
-    if (input.upcoming_only) {
-      andClauses.push({
-        OR: [{ eventAt: null }, { eventAt: { gte: new Date() } }],
-      });
-    }
-    const where: Prisma.CampaignWhereInput = { AND: andClauses };
+    // WHERE composed by the pure `buildListCampaignsWhere` helper so
+    // the Push 2 scope-leak regression is covered by a unit test.
+    const where = buildListCampaignsWhere(input, ctx);
 
     const campaigns = await prisma.campaign.findMany({
       where,

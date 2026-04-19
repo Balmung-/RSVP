@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { dispatch } from "@/lib/ai/tools";
+import { classifyOutcome } from "@/lib/ai/confirm-classify";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -90,30 +91,12 @@ import { dispatch } from "@/lib/ai/tools";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Handler-refusal error codes that are safe to release the
-// single-use claim on. Every one of these is a guard that returns
-// BEFORE send_campaign hands off to sendCampaign()'s fan-out — so
-// retrying cannot double-send. Any other error (including a
-// dispatch-layer throw bubbling up as handler_error:*) keeps the
-// claim in place.
-//
-// Blocker codes (`no_*`) are sourced from `src/lib/ai/tools/
-// send-blockers.ts::computeBlockers` — the same helper
-// propose_send uses to surface blockers to the ConfirmSend
-// directive. send_campaign re-checks that helper at confirm time
-// and refuses with the first non-status blocker as the error
-// code; all of those refusals happen before sendCampaign's
-// fan-out, hence releasable.
-const RELEASABLE_REFUSALS = new Set([
-  "forbidden",
-  "not_found",
-  "status_not_sendable",
-  "send_in_flight",
-  "no_invitees",
-  "no_ready_messages",
-  "no_email_template",
-  "no_sms_template",
-]);
+// Classification of the `dispatch(...)` result — structured-refusal
+// vs real failure vs real success, plus the releasable-refusals
+// whitelist used to decide whether to release the single-use claim
+// — lives in `src/lib/ai/confirm-classify.ts`. Extracted for unit
+// testing (see tests/unit/confirm-outcome.test.ts and
+// tests/unit/releasable-refusals.test.ts).
 
 export async function POST(
   _req: Request,
@@ -301,32 +284,23 @@ export async function POST(
   // Classify the outcome. `result.ok` only tells us whether
   // dispatch reached the handler — a structured refusal
   // (`return {output: {error: "..."}}`) still lands under
-  // `result.ok === true`. We flip to effective failure when the
-  // handler's output carries an error field.
-  const output = result.ok ? result.result.output : null;
-  const structuredError: string | null =
-    result.ok &&
-    typeof output === "object" &&
-    output !== null &&
-    "error" in output &&
-    typeof (output as Record<string, unknown>).error === "string"
-      ? String((output as Record<string, unknown>).error)
-      : null;
-  const dispatchError: string | null = result.ok ? null : result.error;
-  const effectiveOk = result.ok && !structuredError;
-  const effectiveError: string | null =
-    structuredError ?? dispatchError ?? null;
+  // `result.ok === true`. `classifyOutcome` flips to effective
+  // failure when the handler's output carries an error field, and
+  // tells us whether this outcome is safe to release the claim on.
+  const {
+    effectiveOk,
+    effectiveError,
+    shouldReleaseClaim,
+    handlerSummary,
+    output,
+  } = classifyOutcome(result);
 
   // Release the claim only on a refusal that couldn't have sent
-  // anything. See RELEASABLE_REFUSALS for the whitelist rationale.
-  // Dispatch-throws (`handler_error:*`) keep the claim because the
-  // throw could have happened inside sendCampaign's per-invitee
-  // loop with partial state.
-  if (
-    !effectiveOk &&
-    structuredError &&
-    RELEASABLE_REFUSALS.has(structuredError)
-  ) {
+  // anything (see RELEASABLE_REFUSALS in confirm-classify.ts for
+  // the whitelist rationale). Dispatch-throws (`handler_error:*`)
+  // keep the claim because the throw could have happened inside
+  // sendCampaign's per-invitee loop with partial state.
+  if (shouldReleaseClaim) {
     await prisma.chatMessage.updateMany({
       where: { id: row.id },
       data: { confirmedAt: null },
@@ -355,12 +329,6 @@ export async function POST(
   // handler's summary (it carries "Sent N: E email, S sms" already).
   // On failure, surface the error code + any handler summary so
   // the operator reads something actionable in the transcript.
-  const handlerSummary: string | null =
-    output &&
-    typeof output === "object" &&
-    typeof (output as Record<string, unknown>).summary === "string"
-      ? String((output as Record<string, unknown>).summary)
-      : null;
   const summary = effectiveOk
     ? (handlerSummary ??
       (typeof output === "string" ? output : "Send complete."))
