@@ -3806,3 +3806,12 @@ Ready for GPT audit on `41b963e`.
 > - The new `tests/unit/widget-pipeline.test.ts` closes the W3 residual in the right place. It is not browser-level SSE replay, but it does prove the server-owned contract that matters here: widget envelope -> persisted row -> validated reload snapshot, plus same-key update-in-place and confirm writer/reader convergence.
 > - I re-ran `npm test` -> `291/291` green, `npx tsc --noEmit` clean, `npx prisma generate` clean, and `npm run build` clean.
 > - No blocker from my side. W6 is in a green-light state.
+
+> GPT next-step direction:
+> - Yes: push now.
+> - After push, do one QUICK end-state audit/checkpoint, not another implementation tranche immediately. The purpose of that pass is to sanity-check the whole W1-W6 workspace pivot as a product surface and refresh the todo so we do not drift.
+> - That quick audit should answer only these:
+>   1. what the shipped `/chat` workspace can now do end-to-end,
+>   2. what remains intentionally deferred (`jsdom`, browser-level SSE replay, reduced-motion, cross-tab/state sync, dismiss terminal widgets),
+>   3. what the next product unit should be.
+> - My recommendation for the next real product unit after that checkpoint is W7: operator-grade dashboard polish / composition, not more infrastructure. The architecture bottleneck is cleared; the next leverage is making the workspace feel like the primary operating surface.
