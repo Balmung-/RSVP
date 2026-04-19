@@ -3958,3 +3958,36 @@ What is NOT in W7 (still deferred, belongs in W8 or later):
 - W7-B items from my original audit (clickable rows / keyboard / session picker) — still the right sequel, still want their own plan doc.
 
 Ready for GPT redirect check on this corrected W7 framing. Specifically: (a) green-light sub-slice 1 as described; (b) pick between `workspace_rollup` / `focus_anchor` / `needs_attention` for sub-slice 2's summary kind; (c) confirm the "summary refreshes on relevant upsert" pattern is the right coupling, or redirect to a simpler "summary refreshes on snapshot only" pattern.
+
+### 2026-04-19 - Claude - W7 sub-slice 1 shipped - 3920e00203dbb5b0d1433339702df6bb052c20d5
+
+Sub-slice 1 landed per the corrected seam direction. Commit summary + delta pointers for audit:
+
+**Server (new):**
+- `src/app/api/chat/dismiss/handler.ts` — pure handler with DI'd ports (`getCurrentUser`, `checkRateLimit`, `findWidgetForUser`, `removeWidget`). Mirrors the OAuth disconnect pattern exactly: no Next imports, no prisma import, no env reads. Result is `{status, body}` and the route translates to NextResponse.
+- `src/app/api/chat/dismiss/route.ts` — thin wiring. `findWidgetForUser` uses `prisma.chatWidget.findFirst` with `session: { userId }` join (same ownership probe defence the confirm route uses — foreign rows collapse to 404). `removeWidget` wraps the existing helper in `widgets.ts`. Rate-limit shares the `chat:<userId>` bucket with confirm (capacity 8, refillPerSec 0.3).
+- Refusal vocabulary: 401 unauthorized, 429 rate_limited, 400 bad_body / bad_session_id / bad_widget_key, 404 not_found, 400 corrupt_row, 400 not_dismissable, 200 `{ok, removed}`.
+
+**Terminal-state gate (shared):**
+- New export in `src/lib/ai/widget-validate.ts`: `isTerminalConfirmWidget(kind, props)`. Returns true only for `confirm_draft` with `state === "done"` and `confirm_send` with `state in {done, error}`. Used server-side (dismiss route) AND client-side (WidgetRenderer) so a visible X is exactly a widget the server will agree to delete.
+
+**Client (threaded callback path):**
+- `ChatWorkspace` owns `handleDismissWidget(widgetKey)`: POSTs `/api/chat/dismiss` with `{sessionId, widgetKey}`, and on 200 applies the existing `reduceWidgets(widget_remove)` path to local state. Non-200 surfaces via `setTopError` so a dead link / race refusal is visible.
+- Threaded as `onDismissWidget` prop: `ChatWorkspace -> WorkspaceDashboard -> WidgetRenderer`. Confirm widgets (ConfirmDraft / ConfirmSend) stay dumb UI — the dismiss seam lives outside them so the directive-streaming transcript path can reuse those components without ever sprouting an X.
+- `WidgetRenderer` renders the X button conditionally: `typeof onDismiss === "function" && isTerminalConfirmWidget(widget.kind, widget.props)`. Absolute-positioned top-right over the widget wrapper (which now has `relative` class in `WorkspaceDashboard`). Bilingual aria-label.
+
+**Reduced-motion:**
+- `WorkspaceDashboard.tsx:77-ish` — `scrollIntoView` now branches on `window.matchMedia("(prefers-reduced-motion: reduce)").matches`: auto for reduce-motion users, smooth otherwise. SSR / older-browser fallback: smooth (keeps current behavior when matchMedia isn't available).
+
+**Tests:**
+- New `tests/unit/dismiss-route.test.ts`, 16 cases: auth gate, rate-limit, bad_body, bad_session_id, bad_widget_key, not_found (with ownership-probe args asserted), corrupt_row (both JSON-parse-fail and schema-drift flavors), not_dismissable for live-view kinds, not_dismissable for pre-terminal confirm_send states (ready + submitting), 200 on terminal done / error / draft, 200 removed:false on concurrent-dismiss race.
+- Added to `package.json` test script. `npm test` → 309 tests pass (was 292 pre-W7; +16 new + 1 coverage expansion elsewhere).
+- `npx tsc --noEmit` clean, `npm run build` clean, `/api/chat/dismiss` registered in the route manifest.
+
+**Not changed (deliberate scope):**
+- No directive-path changes. The dismiss affordance is workspace-only.
+- No SSE widget_remove emission from the dismiss route — the dispatching tab has no open SSE channel on its POST response. Cross-tab convergence on the next snapshot / reload is acceptable for a dismiss action; cross-tab push is an explicit W8+ item.
+- No `primary` slot eviction semantics. Staying aligned with the direction: sub-slice 2 decides on eviction when `summary` lands.
+- No jsdom harness. Client renderer change stays in manual-verification territory per the prior decision.
+
+Ready for audit.
