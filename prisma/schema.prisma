@@ -393,8 +393,9 @@ model Team {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  memberships TeamMembership[]
-  campaigns   Campaign[]
+  memberships    TeamMembership[]
+  campaigns      Campaign[]
+  oauthAccounts  OAuthAccount[]
 
   @@index([slug])
 }
@@ -497,6 +498,7 @@ model User {
   eventLog     EventLog[]
   teams        TeamMembership[]
   chatSessions ChatSession[]
+  oauthAccounts OAuthAccount[] @relation("OAuthConnectedBy")
 
   @@index([email])
 }
@@ -514,4 +516,50 @@ model Session {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// --- OAuth accounts ---------------------------------------------
+//
+// Stored credentials for third-party accounts the operator connects for
+// outbound sending (Phase B1: Gmail send). One row per (provider, team)
+// pair — a team picks which Gmail Workspace mailbox to send from; office-
+// wide campaigns (teamId = null) use the row with `teamId IS NULL`.
+//
+// Both `accessTokenEnc` and `refreshTokenEnc` are AES-256-GCM ciphertexts
+// produced by `src/lib/secrets.ts`. The envelope format is
+// `v1.<iv>.<authTag>.<ciphertext>` (all base64) so a future key rotation
+// can add `v2` without disturbing rows at rest. Plaintext tokens never
+// touch Prisma.
+//
+// `scopes` is the space-separated list Google actually granted — always
+// re-read from the token response, never echoed from the authorize URL,
+// because Google may grant a subset (e.g. if the user unchecks a
+// non-required scope on the consent screen).
+//
+// `connectedBy` is the operator who completed the OAuth dance. Useful
+// for audit trails ("who granted this mailbox to the office") and for
+// revocation flows that want to notify the granter.
+model OAuthAccount {
+  id                String   @id @default(cuid())
+  provider          String   // "google" — open-set for future providers
+  teamId            String?
+  team              Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  googleEmail       String   // lowercased address from the userinfo response
+  accessTokenEnc    String   // AES-256-GCM envelope — see src/lib/secrets.ts
+  refreshTokenEnc   String   // AES-256-GCM envelope
+  tokenExpiresAt    DateTime
+  scopes            String   // space-separated granted scopes
+  connectedByUserId String
+  connectedBy       User     @relation("OAuthConnectedBy", fields: [connectedByUserId], references: [id])
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // One account per (provider, team). `teamId IS NULL` is the office-wide
+  // slot — Postgres treats NULLs as distinct by default, so this unique
+  // DOESN'T enforce "one office-wide row"; the callback route handles
+  // that race with find-first + update-or-create in a transaction. Two
+  // concurrent admin connects on the same office button are vanishingly
+  // rare; a leftover duplicate row is a harmless GC target.
+  @@unique([provider, teamId])
+  @@index([provider])
 }
