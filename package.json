@@ -12,7 +12,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
-    "test": "tsx --import ./tests/setup.mjs --test tests/unit/dispatch-destructive.test.ts tests/unit/list-campaigns-scope.test.ts tests/unit/confirm-outcome.test.ts tests/unit/releasable-refusals.test.ts tests/unit/confirm-single-use.test.ts tests/unit/directive-validate.test.ts tests/unit/secrets-roundtrip.test.ts tests/unit/oauth-state.test.ts tests/unit/oauth-url-builder.test.ts",
+    "test": "tsx --import ./tests/setup.mjs --test tests/unit/dispatch-destructive.test.ts tests/unit/list-campaigns-scope.test.ts tests/unit/confirm-outcome.test.ts tests/unit/releasable-refusals.test.ts tests/unit/confirm-single-use.test.ts tests/unit/directive-validate.test.ts tests/unit/secrets-roundtrip.test.ts tests/unit/oauth-state.test.ts tests/unit/oauth-url-builder.test.ts tests/unit/gmail-mime.test.ts tests/unit/gmail-token-refresh.test.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

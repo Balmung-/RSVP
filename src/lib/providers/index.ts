@@ -1,6 +1,7 @@
 import { stubEmail } from "./email/stub";
 import { sendgrid } from "./email/sendgrid";
 import { resend } from "./email/resend";
+import { gmail } from "./email/gmail";
 import { stubSms } from "./sms/stub";
 import { twilio } from "./sms/twilio";
 import { unifonic } from "./sms/unifonic";
@@ -23,6 +24,19 @@ export function getEmailProvider(): EmailProvider {
       break;
     case "resend":
       _email = resend(must("RESEND_API_KEY"), from, fromName);
+      break;
+    case "gmail":
+      // Gmail doesn't use EMAIL_FROM — the From address is the
+      // connected mailbox from the OAuthAccount row. fromName is
+      // still passed through for display-name consistency across
+      // internal audits. The client_id/secret here are the OAuth
+      // client credentials (same ones wired to /api/oauth/google/*),
+      // needed to refresh expired access tokens at send time.
+      _email = gmail({
+        clientId: must("GOOGLE_OAUTH_CLIENT_ID"),
+        clientSecret: must("GOOGLE_OAUTH_CLIENT_SECRET"),
+        fromName,
+      });
       break;
     case "stub":
     default:
