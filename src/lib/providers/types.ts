@@ -13,6 +13,16 @@ export interface EmailMessage {
   text?: string;
   replyTo?: string;
   headers?: Record<string, string>;
+  // Per-campaign mailbox routing hint (B3). Only the Gmail adapter
+  // consults it — other providers ignore it. Semantics:
+  //   - string   -> route to the OAuthAccount for (provider=google, teamId=<id>),
+  //                 falling back to the office-wide (teamId=null) slot if
+  //                 the team row isn't connected;
+  //   - null     -> route to the office-wide slot directly;
+  //   - omitted  -> same as null (office-wide). Deliberate: non-campaign
+  //                 senders (digest, admin notify) should default to the
+  //                 office-wide mailbox without having to know about teams.
+  teamId?: string | null;
 }
 
 export interface SmsMessage {

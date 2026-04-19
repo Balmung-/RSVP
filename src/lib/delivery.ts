@@ -54,6 +54,13 @@ export async function sendEmail(campaign: Campaign, invitee: Invitee) {
     text,
     replyTo: replyToFor(invitee),
     headers: listUnsubscribeHeaders(invitee),
+    // B3: per-campaign mailbox routing. The Gmail adapter picks the
+    // OAuthAccount row for (provider=google, teamId=<campaign.teamId>),
+    // falling back to the office-wide (teamId=null) slot if no team
+    // mailbox is connected. Non-Gmail providers ignore this field.
+    // For office-wide campaigns (campaign.teamId === null) this is
+    // equivalent to omitting the field.
+    teamId: campaign.teamId,
   });
   if (res.ok) {
     await prisma.invitation.update({

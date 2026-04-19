@@ -5,6 +5,10 @@ import {
   TokenRevokedError,
 } from "../../oauth/tokens";
 import { buildRawMessage } from "./gmail-mime";
+import {
+  resolveGmailAccount,
+  type MinimalAccountRow,
+} from "./resolve-account";
 import type { EmailMessage, EmailProvider, SendResult } from "../types";
 
 const GMAIL_SEND_URL =
@@ -16,16 +20,19 @@ const GMAIL_SEND_URL =
 // client credentials needed to refresh expired access tokens.
 //
 // Flow per send:
-//   1. Look up the OAuthAccount for this (provider="google", teamId).
-//      B2 wires the office-wide slot (teamId=null); per-team
-//      routing lands in B3.
+//   1. Resolve the OAuthAccount via resolveGmailAccount (B3):
+//        - msg.teamId=<string> -> try team mailbox, fall back to
+//          office-wide (teamId=null) with a `gmail.routing.fallback`
+//          audit;
+//        - msg.teamId=null or omitted -> office-wide directly.
+//      See resolve-account.ts for the full rationale.
 //   2. Decrypt the stored access token, or refresh if near-expiry
 //      (getFreshAccessToken handles the dance + re-encryption +
 //      persistence).
 //   3. Build the raw RFC 5322 message with the connected
 //      googleEmail as the From (Gmail 400s on From != authenticated
 //      user unless a verified send-as alias is configured; we keep
-//      it simple for B2 and always send AS the connected address).
+//      it simple and always send AS the connected address).
 //   4. POST to users.messages.send.
 //   5. Map the response:
 //        200 OK with body.id  -> ok + providerId
@@ -48,13 +55,17 @@ const GMAIL_SEND_URL =
 // Factory-level deliberately DOES NOT take apiKey-style creds —
 // Gmail auth is per-mailbox and lives in Postgres, not env. The
 // factory takes OAuth client creds (to refresh tokens) and an
-// optional team scope.
+// optional default team scope (kept for backward compat; the
+// per-message `msg.teamId` takes precedence).
 
 export interface GmailProviderOptions {
   clientId: string;
   clientSecret: string;
-  // null = office-wide mailbox (the default for B2). B3 will wire
-  // per-campaign selection so the caller can target a specific team.
+  // Adapter-level default team scope. B3 moved routing to per-message
+  // `msg.teamId` (so one adapter instance can route differently per
+  // send), but the factory may still pin a default for test setups.
+  // Precedence: `msg.teamId` (if defined, including null) overrides
+  // `opts.teamId`.
   teamId?: string | null;
   // Optional display-name override. Gmail ignores this for From
   // (it uses the account's configured display name) but we pass it
@@ -63,23 +74,39 @@ export interface GmailProviderOptions {
   fromName?: string;
 }
 
+// The `select` we pass to Prisma. Hoisted so the callback shape
+// matches MinimalAccountRow exactly — a stale select here vs. a
+// new field in MinimalAccountRow would be a type error at the
+// return site.
+const ACCOUNT_SELECT = {
+  id: true,
+  teamId: true,
+  googleEmail: true,
+  accessTokenEnc: true,
+  refreshTokenEnc: true,
+  tokenExpiresAt: true,
+} as const;
+
 export function gmail(opts: GmailProviderOptions): EmailProvider {
-  const teamId = opts.teamId ?? null;
+  const defaultTeamId = opts.teamId ?? null;
   return {
     name: "gmail",
     async send(msg: EmailMessage): Promise<SendResult> {
-      // Look up the connected mailbox. No row = nobody clicked
-      // Connect yet, or the last connection was revoked and the row
-      // deleted. Fail closed with a clear message so the send
-      // pipeline's retry logic doesn't loop on a config gap.
-      //
-      // The orderBy is load-bearing, not cosmetic: Postgres treats
-      // NULLs as DISTINCT in the `@@unique([provider, teamId])`
-      // constraint, so two concurrent admin connects on the
-      // office-wide slot (teamId=null) can leave duplicate rows in
-      // the table. Without an explicit order, `findFirst` could pick
-      // a stale older row and we'd send from the wrong mailbox or
-      // with a revoked refresh_token even though a newer valid
+      // Precedence: message-level hint wins over adapter default.
+      // `undefined` means "caller didn't say" -> fall back to
+      // adapter default. Explicit `null` means "caller wants
+      // office-wide" -> honor it.
+      const targetTeamId =
+        msg.teamId !== undefined ? msg.teamId : defaultTeamId;
+
+      // Look up the connected mailbox via the pure resolver. The
+      // orderBy on findFirst is load-bearing, not cosmetic: Postgres
+      // treats NULLs as DISTINCT in the `@@unique([provider, teamId])`
+      // constraint, so two concurrent admin connects on the same slot
+      // (e.g. both clicking Connect on the office-wide row) can leave
+      // duplicate rows. Without an explicit order, `findFirst` could
+      // pick a stale older row and we'd send from the wrong mailbox
+      // or with a revoked refresh_token even though a newer valid
       // connection exists. `updatedAt desc` means:
       //   - a fresh reconnect always wins over an older duplicate
       //     (because /callback's upsert bumps updatedAt on the row
@@ -91,20 +118,50 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
       // pathological case where two rows share an updatedAt (can
       // happen if cleanup fails partway for some reason — we'd
       // rather be deterministic than coin-flip).
-      const account = await prisma.oAuthAccount.findFirst({
-        where: { provider: "google", teamId },
-        orderBy: [
-          { updatedAt: "desc" },
-          { createdAt: "desc" },
-          { id: "desc" },
-        ],
+      const resolution = await resolveGmailAccount({
+        targetTeamId,
+        findFirst: async (tid): Promise<MinimalAccountRow | null> => {
+          return prisma.oAuthAccount.findFirst({
+            where: { provider: "google", teamId: tid },
+            orderBy: [
+              { updatedAt: "desc" },
+              { createdAt: "desc" },
+              { id: "desc" },
+            ],
+            select: ACCOUNT_SELECT,
+          });
+        },
       });
+      const account = resolution.account;
       if (!account) {
+        const suffix =
+          targetTeamId !== null
+            ? " (no team mailbox, and no office-wide fallback)"
+            : "";
         return {
           ok: false,
-          error: `gmail provider: no OAuthAccount for teamId=${teamId ?? "<office-wide>"}; admin must connect Gmail at /settings`,
+          error: `gmail provider: no OAuthAccount for teamId=${targetTeamId ?? "<office-wide>"}${suffix}; admin must connect Gmail at /settings`,
           retryable: false,
         };
+      }
+
+      // Audit the team -> office-wide fallback. This is the one
+      // routing outcome where the operator might want to act (connect
+      // the team's dedicated mailbox) — the other three outcomes
+      // (team_hit, office_hit, no_account) are either the happy path
+      // or already surfaced via the send's existing error payload.
+      if (resolution.routing.kind === "team_miss_fallback_office") {
+        await logAction({
+          kind: "gmail.routing.fallback",
+          refType: "oauthAccount",
+          refId: account.id,
+          data: {
+            requestedTeamId: resolution.routing.requestedTeamId,
+            fellBackTo: "office_wide",
+            googleEmail: account.googleEmail,
+            to: msg.to,
+          },
+        });
       }
 
       // Refresh-if-needed. Errors here are fatal to this send but
@@ -140,7 +197,13 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
             refType: "oauthAccount",
             refId: account.id,
             data: {
-              teamId,
+              // `teamId` = the scope of the OAuthAccount row that
+              // was actually revoked. `targetTeamId` = what the
+              // caller requested. Diverges when a team send fell
+              // back to the office-wide mailbox and THAT mailbox
+              // turned out to be revoked.
+              teamId: account.teamId,
+              targetTeamId,
               googleEmail: account.googleEmail,
               source: "refresh_invalid_grant",
             },
@@ -167,7 +230,11 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
           kind: "oauth.google.refreshed",
           refType: "oauthAccount",
           refId: account.id,
-          data: { teamId, googleEmail: account.googleEmail },
+          data: {
+            teamId: account.teamId,
+            targetTeamId,
+            googleEmail: account.googleEmail,
+          },
         });
       }
 
@@ -221,7 +288,8 @@ export function gmail(opts: GmailProviderOptions): EmailProvider {
           refType: "oauthAccount",
           refId: account.id,
           data: {
-            teamId,
+            teamId: account.teamId,
+            targetTeamId,
             googleEmail: account.googleEmail,
             source: "send_401",
             body: errSnippet,

@@ -121,6 +121,14 @@ export async function sendInboundAck(params: {
         // own vacation responder / autoresponder skips it — guards
         // against ack ↔ OOO ping-pong even if our own parser missed it.
         headers: { "Auto-Submitted": "auto-replied" },
+        // B3: reply ack comes FROM the same mailbox that sent the
+        // original invitation — otherwise an invitee who got the
+        // invite from team@ would see the confirmation arrive from
+        // office@ and might mistake it for a phishing reply. If the
+        // campaign lookup failed (campaign=null, shouldn't happen in
+        // practice but the code above handles it), fall back to
+        // office-wide.
+        teamId: campaign?.teamId ?? null,
       });
       await logAction({
         kind: res.ok ? "inbound.ack.sent" : "inbound.ack.failed",

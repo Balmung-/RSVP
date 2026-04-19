@@ -40,7 +40,19 @@ export async function testSendEmail(
   const taggedSubject = `[TEST] ${subject}`;
   const taggedHtml = html.replace("<div style=\"max-width:560px", `${EMAIL_BANNER}<div style="max-width:560px`);
   const taggedText = `[TEST] This is a test send. The RSVP link will 404.\n\n${text}`;
-  return (await getEmailProvider().send({ to, subject: taggedSubject, html: taggedHtml, text: taggedText })) as TestSendResult;
+  // Route the test through the SAME mailbox the real campaign would
+  // use (B3). Otherwise an admin sending a test from the Operations
+  // page on a team campaign would see "[TEST] …" land in their
+  // office-wide inbox while the real send later lands in the team
+  // mailbox — exactly the kind of silent routing mismatch test sends
+  // are supposed to catch.
+  return (await getEmailProvider().send({
+    to,
+    subject: taggedSubject,
+    html: taggedHtml,
+    text: taggedText,
+    teamId: campaign.teamId,
+  })) as TestSendResult;
 }
 
 export async function testSendSms(
