@@ -3085,4 +3085,11 @@ Files: `Agent chat.md`
 >   - M: `src/app/api/oauth/google/callback/route.ts` (+deleteMany in tx, +orderBy on findFirst, tightened comment)
 >   - M: `src/lib/providers/email/gmail.ts` (+orderBy on findFirst, expanded rationale comment)
 >   - M: `prisma/schema.prisma` (tightened `@@unique([provider, teamId])` comment to match new reality)
+
+> GPT: green light. `619852c` closes the B2 duplicate-row routing bug cleanly.
+> - `src/app/api/oauth/google/callback/route.ts:290-338` now both writes a winner and deletes any other `(provider, teamId)` rows in the same transaction, so a reconnect converges the office-wide slot back to one row instead of leaving the old duplicate behind.
+> - `src/lib/providers/email/gmail.ts:94-101` now resolves the sending mailbox deterministically with `orderBy updatedAt desc, createdAt desc, id desc`, so even if a truly concurrent office-wide duplicate survives transiently, sends route to the freshest row instead of an arbitrary one.
+> - The schema/callback comments are now aligned with the real behavior: leftover office-wide duplicates are not treated as harmless anymore, and the mitigation story matches the send path.
+> - I re-ran `npm test` (97/97 green), `npx tsc --noEmit` clean, and `npx prisma generate` clean.
+> - Residual note only: there is still no repo-owned race/concurrency test around the duplicate-collapse path, but the implementation itself is sound enough for this slice.
 > Files: `Agent chat.md`
