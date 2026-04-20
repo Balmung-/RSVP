@@ -261,6 +261,9 @@ function validateCampaignCard(p: Record<string, unknown>): boolean {
   if (!isString(p.created_at)) return false;
   if (!isString(p.updated_at)) return false;
   if (!isPlainObject(p.stats)) return false;
+  // P13-D.3 — `sentWhatsApp` joined the required set. See the twin
+  // comment in `directive-validate.ts` for the rationale (fail-closed
+  // on pre-P13 blobs so a missing field can't silently render "0w").
   for (const k of [
     "total",
     "responded",
@@ -271,6 +274,7 @@ function validateCampaignCard(p: Record<string, unknown>): boolean {
     "headcount",
     "sentEmail",
     "sentSms",
+    "sentWhatsApp",
   ]) {
     if (!isFiniteNumber(p.stats[k])) return false;
   }

@@ -106,13 +106,20 @@ export async function bulkCampaignStats(ids: string[]): Promise<
 }
 
 export async function campaignStats(campaignId: string) {
-  const [total, responded, attending, declined, sentEmail, sentSms, guestsAgg] = await Promise.all([
+  // P13-D.3 — the `sentWhatsApp` counter joins `sentEmail` / `sentSms`
+  // so surfaces that render campaign delivery totals (AI campaign_card
+  // directive + admin campaign detail page) don't silently hide
+  // WhatsApp sends. The counter filters the same `DELIVERED_OK_STATUSES`
+  // set as email/SMS so the three columns use the same definition of
+  // "delivered" (no per-channel drift on how success is counted).
+  const [total, responded, attending, declined, sentEmail, sentSms, sentWhatsApp, guestsAgg] = await Promise.all([
     prisma.invitee.count({ where: { campaignId } }),
     prisma.response.count({ where: { campaignId } }),
     prisma.response.count({ where: { campaignId, attending: true } }),
     prisma.response.count({ where: { campaignId, attending: false } }),
     prisma.invitation.count({ where: { campaignId, channel: "email", status: { in: DELIVERED_OK_STATUSES } } }),
     prisma.invitation.count({ where: { campaignId, channel: "sms", status: { in: DELIVERED_OK_STATUSES } } }),
+    prisma.invitation.count({ where: { campaignId, channel: "whatsapp", status: { in: DELIVERED_OK_STATUSES } } }),
     prisma.response.aggregate({ where: { campaignId, attending: true }, _sum: { guestsCount: true } }),
   ]);
   const guests = guestsAgg._sum.guestsCount ?? 0;
@@ -126,6 +133,7 @@ export async function campaignStats(campaignId: string) {
     headcount: attending + guests,
     sentEmail,
     sentSms,
+    sentWhatsApp,
   };
 }
 

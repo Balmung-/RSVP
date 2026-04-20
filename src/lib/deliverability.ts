@@ -29,7 +29,12 @@ export type LiveFailuresOptions = {
   campaignWhere?: Prisma.CampaignWhereInput;
   campaignId?: string;
   status?: "failed" | "bounced";
-  channel?: "email" | "sms";
+  // P13-D.3 — `whatsapp` joins email / sms so callers can scope a
+  // WhatsApp-only failure view without re-implementing the
+  // supersession logic. Pre-P13 callers still pass "email" / "sms"
+  // and get the same behavior; the type is an explicit union so a
+  // future channel can't sneak in as an untyped string.
+  channel?: "email" | "sms" | "whatsapp";
   take?: number;
 };
 
@@ -83,19 +88,34 @@ export async function liveFailures(opts: LiveFailuresOptions = {}): Promise<Fail
 }
 
 // Quick count per-campaign for the workspace banner.
+//
+// P13-D.3 — `whatsapp` joins the per-channel breakdown. `total` is
+// the sum of every channel counted (email + sms + whatsapp), not the
+// raw `rows.length`, so a future rogue channel row (e.g. a legacy
+// "telegram" value written before a provider was removed) does NOT
+// silently inflate `total` without a matching per-channel column.
+// A row whose `channel` string doesn't match the three known values
+// is counted in `total` via `rows.length - (email+sms+whatsapp)`? No,
+// deliberately NOT: `total` intentionally reflects only the channels
+// the renderer knows how to describe. That keeps the attention-strip
+// copy honest ("X email · Y WhatsApp failing") instead of showing
+// a `total` that doesn't add up to the listed breakdown.
 export async function liveFailureCount(campaignId: string): Promise<{
   total: number;
   email: number;
   sms: number;
+  whatsapp: number;
 }> {
   const rows = await liveFailures({ campaignId });
   let email = 0;
   let sms = 0;
+  let whatsapp = 0;
   for (const f of rows) {
     if (f.channel === "email") email++;
     else if (f.channel === "sms") sms++;
+    else if (f.channel === "whatsapp") whatsapp++;
   }
-  return { total: email + sms, email, sms };
+  return { total: email + sms + whatsapp, email, sms, whatsapp };
 }
 
 // Variant for pages that already ran their own findMany with specific

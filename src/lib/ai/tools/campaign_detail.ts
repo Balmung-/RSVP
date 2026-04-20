@@ -197,7 +197,11 @@ export const campaignDetailTool: ToolDef<Input> = {
     const lines: string[] = [];
     lines.push(`${detail.name} [${detail.status}] ${when}${venue}`);
     lines.push(
-      `Stats: ${stats.responded}/${stats.total} responded, ${stats.attending} attending + ${stats.guests} guests = ${stats.headcount} headcount. Sent: ${stats.sentEmail} email / ${stats.sentSms} sms.`,
+      // P13-D.3 — WhatsApp joins the "Sent: ..." channel breakdown
+      // so the model's text summary matches the widget's Delivered
+      // row (which now shows Xe / Ys / Zw). Keeping the line compact
+      // — one clause, no re-narrating per-channel zeros.
+      `Stats: ${stats.responded}/${stats.total} responded, ${stats.attending} attending + ${stats.guests} guests = ${stats.headcount} headcount. Sent: ${stats.sentEmail} email / ${stats.sentSms} sms / ${stats.sentWhatsApp} whatsapp.`,
     );
     if (activity.length > 0) {
       lines.push(`${activity.length} recent activity rows attached.`);

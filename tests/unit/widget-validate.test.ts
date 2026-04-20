@@ -356,11 +356,55 @@ test("validateWidget: campaign_card minimum shape passes", () => {
         headcount: 55,
         sentEmail: 95,
         sentSms: 40,
+        // P13-D.3 — sentWhatsApp is required; the validator rejects
+        // payloads that silently drop it, so this fixture pins the
+        // happy path with a non-zero value.
+        sentWhatsApp: 12,
       },
       activity: [],
     },
   });
   assert.ok(out);
+});
+
+test("validateWidget: campaign_card rejects missing sentWhatsApp (P13-D.3)", () => {
+  // Mirror of the validateDirective regression — the hydrate path
+  // through `validateWidget` must reject the same pre-P13 blobs.
+  // Without this gate a resume-from-cache flow could paint "0w" on
+  // the detail card while the database row actually carries WhatsApp
+  // sends, which is exactly the silent-drift bug the validator is
+  // meant to catch.
+  const out = validateWidget({
+    widgetKey: "campaign_card:c-1",
+    kind: "campaign_card",
+    slot: "primary",
+    props: {
+      id: "c-1",
+      name: "Eid reception",
+      description: null,
+      status: "active",
+      event_at: null,
+      venue: null,
+      locale: "en",
+      team_id: null,
+      created_at: "2026-04-10T00:00:00Z",
+      updated_at: "2026-04-11T00:00:00Z",
+      stats: {
+        total: 100,
+        responded: 40,
+        pending: 60,
+        attending: 35,
+        declined: 5,
+        guests: 10,
+        headcount: 55,
+        sentEmail: 95,
+        sentSms: 40,
+        // sentWhatsApp intentionally omitted.
+      },
+      activity: [],
+    },
+  });
+  assert.equal(out, null);
 });
 
 test("validateWidget: contact_table minimum shape passes", () => {

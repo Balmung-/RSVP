@@ -555,7 +555,7 @@ function buildAttention(params: {
   campaign: { id: string };
   pendingApprovalRow: { recipientCount: number; channel: string } | null;
   pendingRequester: { email: string } | null;
-  atRisk: { total: number; email: number; sms: number };
+  atRisk: { total: number; email: number; sms: number; whatsapp: number };
   canDelete: boolean;
 }): AttentionItem[] {
   const out: AttentionItem[] = [];
@@ -571,12 +571,27 @@ function buildAttention(params: {
     });
   }
   if (params.atRisk.total > 0) {
+    // P13-D.3 — build the "X email · Y SMS · Z WhatsApp failing" detail
+    // line dynamically over the per-channel breakdown so we don't have
+    // to enumerate every 2^3 combination by hand. Each non-zero channel
+    // contributes one segment; the segments join with " · " for the
+    // multi-channel case. Single-channel case retains the shorter
+    // "N <channel> bouncing" wording the pre-P13 UX pinned.
+    const segments = [
+      params.atRisk.email > 0 ? `${params.atRisk.email} email` : null,
+      params.atRisk.sms > 0 ? `${params.atRisk.sms} SMS` : null,
+      params.atRisk.whatsapp > 0 ? `${params.atRisk.whatsapp} WhatsApp` : null,
+    ].filter((s): s is string => s !== null);
     const detail =
-      params.atRisk.email > 0 && params.atRisk.sms > 0
-        ? `${params.atRisk.email} email · ${params.atRisk.sms} SMS failing`
-        : params.atRisk.email > 0
-          ? `${params.atRisk.email} email bouncing`
-          : `${params.atRisk.sms} SMS bouncing`;
+      segments.length > 1
+        ? `${segments.join(" · ")} failing`
+        : segments.length === 1
+          ? `${segments[0]} bouncing`
+          : // Shouldn't reach here — total > 0 implies at least one
+            // segment — but keep a safe fallback so a rogue unknown
+            // channel (e.g. a legacy "telegram" row) doesn't crash
+            // the server render.
+            `${params.atRisk.total} failing`;
     out.push({
       key: "atrisk",
       tone: "fail",

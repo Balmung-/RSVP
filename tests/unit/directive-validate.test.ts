@@ -173,6 +173,11 @@ test("validateDirective: campaign_card — valid shape round-trips", () => {
         headcount: 55,
         sentEmail: 95,
         sentSms: 40,
+        // P13-D.3 — sentWhatsApp is required on every campaign_card
+        // blob; missing the field makes the validator reject the
+        // directive so the renderer never has to fall back on a
+        // silent zero for a field that's actually absent.
+        sentWhatsApp: 12,
       },
       activity: [
         {
@@ -215,6 +220,48 @@ test("validateDirective: campaign_card — rejects incomplete stats", () => {
         guests: 0,
         headcount: 0,
         sentEmail: 0,
+        // P13-D.3 — also missing `sentWhatsApp`. Keeping the fixture
+        // short-circuit on `sentSms` so the D.3 regression below gets
+        // its own exclusive case.
+      },
+      activity: [],
+    },
+  };
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: campaign_card — rejects missing sentWhatsApp (P13-D.3)", () => {
+  // Pre-P13 blobs carried only email+SMS counters. Now that
+  // `campaignStats` emits `sentWhatsApp` on every call, the validator
+  // rejects payloads that lack it rather than silently rehydrating a
+  // zero — a missing-field-pretending-to-be-zero would put the
+  // renderer's "0w" cell out of sync with reality. The detail card
+  // would mis-paint WhatsApp activity as "no sends" when in fact the
+  // channel was never asked about. Fail-closed is safer.
+  const d = {
+    kind: "campaign_card",
+    props: {
+      id: "c-1",
+      name: "x",
+      description: null,
+      status: "draft",
+      event_at: null,
+      venue: null,
+      locale: null,
+      team_id: null,
+      created_at: "2026-04-10T00:00:00Z",
+      updated_at: "2026-04-10T00:00:00Z",
+      stats: {
+        total: 0,
+        responded: 0,
+        pending: 0,
+        attending: 0,
+        declined: 0,
+        guests: 0,
+        headcount: 0,
+        sentEmail: 0,
+        sentSms: 0,
+        // sentWhatsApp intentionally omitted.
       },
       activity: [],
     },
@@ -241,7 +288,7 @@ test("validateDirective: campaign_card — rejects unknown tone in activity", ()
       updated_at: "2026-04-10T00:00:00Z",
       stats: {
         total: 0, responded: 0, pending: 0, attending: 0, declined: 0,
-        guests: 0, headcount: 0, sentEmail: 0, sentSms: 0,
+        guests: 0, headcount: 0, sentEmail: 0, sentSms: 0, sentWhatsApp: 0,
       },
       activity: [
         {

@@ -36,7 +36,13 @@ export type CampaignCardProps = {
     guests: number;
     headcount: number;
     sentEmail: number;
+    // P13-D.3 — sentSms / sentWhatsApp are both required; the
+    // renderer's "Delivered" cell shows every channel with a live
+    // counter on `e / s / w` pattern. Widening the type in lockstep
+    // with the validator avoids a silent-zero drift if either side
+    // is bumped alone.
     sentSms: number;
+    sentWhatsApp: number;
   };
   activity: Array<{
     id: string;
@@ -145,8 +151,15 @@ export function CampaignCard({
         </div>
         <div>
           <div className="text-slate-500">Delivered</div>
+          {/*
+            P13-D.3 — three-way split (e / s / w). Pre-P13 this was a
+            two-way `Xe / Ys` row; we intentionally keep the WhatsApp
+            column visible at 0 rather than hiding it, so the operator
+            can tell at a glance that WhatsApp WAS considered and came
+            back zero (vs. "channel isn't supported here").
+          */}
           <div className="tabular-nums text-slate-900">
-            {s.sentEmail}e / {s.sentSms}s
+            {s.sentEmail}e / {s.sentSms}s / {s.sentWhatsApp}w
           </div>
         </div>
       </div>

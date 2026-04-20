@@ -157,6 +157,11 @@ function validateCampaignCard(p: Record<string, unknown>): boolean {
   // Every numeric field the renderer reads out of `stats` — a miss
   // here paints zeros silently, which is exactly the kind of "bug
   // that looks like truth" this module is supposed to prevent.
+  // P13-D.3 — `sentWhatsApp` joined the required set. Pre-P13 blobs
+  // don't carry the field and are intentionally rejected rather than
+  // rehydrated with a silent zero default; that keeps the renderer's
+  // "0w" row honest (real zero, not "field missing pretending to be
+  // zero") and mirrors the `by_channel.whatsapp` gate on confirm_send.
   for (const k of [
     "total",
     "responded",
@@ -167,6 +172,7 @@ function validateCampaignCard(p: Record<string, unknown>): boolean {
     "headcount",
     "sentEmail",
     "sentSms",
+    "sentWhatsApp",
   ]) {
     if (!isFiniteNumber(p.stats[k])) return false;
   }

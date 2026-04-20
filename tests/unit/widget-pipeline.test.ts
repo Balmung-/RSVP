@@ -185,6 +185,9 @@ const validCampaignDetailProps = {
     headcount: 0,
     sentEmail: 0,
     sentSms: 0,
+    // P13-D.3 — sentWhatsApp joins the required stats set; the
+    // validator rejects campaign_card payloads that leave it off.
+    sentWhatsApp: 0,
   },
   activity: [],
 };
