@@ -7324,3 +7324,108 @@ Checks:
 Residual note only:
 
 - This is intentionally a temporary read-compat shim, not a schema migration. Once ops confirm old `workspace_rollup` rows have been naturally refreshed, `normalizePreP13ERollup(...)` and its compat tests should be removed in one cleanup commit.
+
+## Claude — P14-A "Pin the summary-refresh trigger wiring" (`586d5d8`)
+
+P13 is fully complete and green-lit. Starting P14 — end-to-end hardening across the pieces that only have seam-level tests today. Five slices outlined; this is slice A: test-pin the **trigger wiring** for `refreshWorkspaceSummary`.
+
+### Why this slice first
+
+`refreshWorkspaceSummary` itself is already well-tested (`tests/unit/workspace-summary.test.ts` covers the validator, the compute function under scope composition, and the refresh integration). What had **zero coverage** was the conditional logic that decides *when* to call it:
+
+- `src/app/api/chat/route.ts` — an inline `if (call.name === "draft_campaign")` branch with its own try/catch.
+- `src/app/api/chat/confirm/[messageId]/route.ts` — an inline `if (status === 200)` branch with its own try/catch.
+
+Both live inside route files that pull in the Next runtime (NextResponse, session cookies, SSE emitters) and can't be loaded from a plain node test. So the refresh firing — the actual moment the dashboard updates live after a `draft_campaign` or successful send — was pure "trust the route, hope the predicate is right" territory.
+
+Regression surface this exposes:
+
+- **Gate fails closed** (refresh stops firing on a tool it should fire on): dashboard counter strip silently goes stale until the operator triggers an unrelated mutation.
+- **Gate fails open** (refresh fires on tools it shouldn't): 4+ counter queries per chat turn, spurious `widget_upsert` frames, client re-orders the summary slot for nothing.
+- **Error-swallow regresses**: a transient prisma failure during refresh kills the in-flight chat turn (losing the model's reply mid-stream) OR surfaces as an unhandled promise rejection on the confirm route.
+- **"Invalid" outcome regresses**: a broken compute produces null → route emits a `widget_upsert` with a null payload, client blows up on `widget.widgetKey`.
+
+### Design — discriminated-union outcome + two narrow helpers
+
+Extracted the predicate + refresh + catch into two helpers alongside `refreshWorkspaceSummary` in `src/lib/ai/workspace-summary.ts`:
+
+- `tryRefreshSummaryForChatTool(deps, args, toolName)` — fires only when `toolName` is in `CHAT_TOOLS_REFRESHING_SUMMARY` (exported readonly tuple, today: just `["draft_campaign"]`).
+- `tryRefreshSummaryForConfirm(deps, args, status)` — fires only on HTTP 200.
+
+Both return:
+
+```ts
+type SummaryRefreshOutcome =
+  | { kind: "skipped" }                   // gate predicate returned false
+  | { kind: "produced"; widget: Widget }  // compute + upsert landed
+  | { kind: "invalid" }                   // upsertWidget's validateWidget rejected
+  | { kind: "error"; error: unknown };    // refreshWorkspaceSummary threw
+```
+
+Each route becomes a thin outcome-to-side-effect switch:
+
+- **Chat**: `produced` → `send("widget_upsert", widget)`; `invalid` → warn log; `error` → warn log; `skipped` → no-op.
+- **Confirm**: `error` → warn log; everything else → no-op (no SSE channel open on this route; the refreshed row lands in DB and is picked up by the next `workspace_snapshot`).
+
+Byte-for-byte behaviour preservation — same side effects on the same conditions, same log tags, same error-swallow posture. This is a pure-refactor + test-pin slice with zero production behaviour changes.
+
+### Why keep the helpers alongside `refreshWorkspaceSummary`
+
+Considered a separate file (`summary-refresh-triggers.ts`). Rejected — the full refresh lifecycle (compute → refresh → trigger-gate) is now readable in one module. A reader encountering either route's "why is this helper called here?" question lands in the same file as the compute/refresh definitions.
+
+### Implementation
+
+**`src/lib/ai/workspace-summary.ts`**
+
+- Added `SummaryRefreshOutcome` discriminated union.
+- Added `CHAT_TOOLS_REFRESHING_SUMMARY` exported tuple + `isChatToolRefreshingSummary` private type guard.
+- Added `tryRefreshSummaryForChatTool` and `tryRefreshSummaryForConfirm`. Both wrap `refreshWorkspaceSummary` with gate + try/catch + null-handling. ~15 lines each.
+
+**`src/app/api/chat/route.ts`**
+
+- Import swapped: `refreshWorkspaceSummary` → `tryRefreshSummaryForChatTool`.
+- Inline `if (call.name === "draft_campaign")` branch replaced with unconditional `tryRefreshSummaryForChatTool` call + outcome switch. The gate now lives inside the helper so the route doesn't duplicate the predicate.
+
+**`src/app/api/chat/confirm/[messageId]/route.ts`**
+
+- Import swapped: `refreshWorkspaceSummary` → `tryRefreshSummaryForConfirm`.
+- Inline `if (status === 200)` branch replaced with unconditional helper call + outcome switch. Only the `error` outcome logs (matches the pre-P14-A behaviour — confirm route never logged the null case).
+
+### Test coverage (8 new tests in `tests/unit/workspace-summary.test.ts`)
+
+All eight pins reuse the existing `makeRollupStub` harness — no new stub scaffolding. Split across the two helpers:
+
+For `tryRefreshSummaryForChatTool`:
+
+1. **`refreshes on draft_campaign, produces widget outcome`** — happy path. Asserts outcome kind + widgetKey + kind + slot, and that a row actually landed in the stub's DB so the `produced` emit is safe.
+2. **`skips any tool name not in CHAT_TOOLS_REFRESHING_SUMMARY`** — gate-negative sweep over 8 non-triggering names (`list_campaigns`, `get_campaign`, `propose_send`, `propose_import`, `send_campaign`, `commit_import`, `draft_campaign_preview`, and empty string). For each, asserts `skipped` AND that `state.calls.length === 0` — the gate short-circuits BEFORE touching prisma, which is the load-bearing half of the pin.
+3. **`captures thrown errors as { kind: 'error' } without rethrowing`** — overrides `campaign.count` to throw; asserts outcome is `error` and the raw error is preserved on `outcome.error` (so the route can log with its own prefix).
+4. **`returns { kind: 'invalid' } when upsertWidget rejects`** — uses empty `sessionId` to force `upsertWidget`'s internal guard to return null. Pins that the defensive branch is reachable and wired.
+
+For `tryRefreshSummaryForConfirm`:
+
+5. **`refreshes on status 200, produces widget outcome`** — happy path mirror.
+6. **`skips every non-200 status`** — sweep over 7 statuses the confirm route can actually produce: `0` (unset), `400` (structured refusal), `401`, `403`, `404`, `409` (already_confirmed), `500` (dispatch-throw). All must skip.
+7. **`captures thrown errors as { kind: 'error' } without rethrowing`** — mirror of #3.
+8. **`returns { kind: 'invalid' } when upsertWidget rejects`** — mirror of #4.
+
+Plus a ninth meta-pin:
+
+9. **`CHAT_TOOLS_REFRESHING_SUMMARY is the one-and-only gate list — drift catches here`** — asserts the tuple is exactly `["draft_campaign"]`. Any change to the gate list (e.g. adding `commit_import` if it ever ran on the chat route) forces a test update in the same commit. Catches the half-landed regression where someone wires the gate but forgets the positive pin.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **883/883 passing** in 3.1s (was 874/874; +9 from the new trigger-helper tests)
+- 0 `not ok` lines in TAP
+
+### What this does NOT cover (deferred to later P14 slices)
+
+- **AI runtime provider selection** — `src/lib/ai/runtime/resolver.ts` picks Anthropic vs OpenRouter based on env; there's one test but the fallback ladder isn't exhaustively pinned. P14-B.
+- **File ingest → widget refresh** — `tool-summarize-file` and `tool-review-file-import` emit widgets; the wiring from ingest result → widget props → DB is tested in isolation but not as a pipeline. P14-C.
+- **Taqnyat SMS/WhatsApp provider tests** — `taqnyat-sms` and `taqnyat-whatsapp` have unit tests; the send-plan → dispatch → webhook → status-update chain isn't pinned end-to-end. P14-D.
+- **Audit/event consistency** — `logAction` writes happen across send/import/dismiss/confirm flows; the set-of-kinds emitted per flow isn't pinned against a regression where a flow stops emitting its audit event. P14-E.
+
+Each of those stands on its own and can be audited independently. Starting with A because it's closest to freshly-landed P13-E code (refresh triggers are what `9afb3a9` + `a5fe90d` hang off of).
+
+Ready for audit.
