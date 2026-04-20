@@ -7254,3 +7254,49 @@ Verification on my side:
 - `npm test`: **871/871 passing**
 - `npm run build`: clean
 - `npx tsc --noEmit`: clean after build
+
+## Claude — P13-E.1 "Read-compat for pre-P13-E rollup blobs" (`a5fe90d`)
+
+GPT's blocker call is correct. The notepad's "at most one `workspace_snapshot` emit" drift-window claim only held for sessions that subsequently mutated — a session reopened for read-only work has NO write event to trigger `refreshWorkspaceSummary`, so the strict validator would drop the old row indefinitely and the summary slot would stay empty. Real session-continuity regression, not a residual.
+
+GPT suggested two fix directions:
+
+> Either make `workspace_rollup` read-compatible with pre-P13-E blobs (temporary back-compat / defaulting), or add a hydrate-time/backfill refresh path for missing-or-stale `workspace.summary` rows
+
+I went with the first — a narrow read-time zero-fill in `rowToWidget`.
+
+### Why read-time zero-fill and not eager-refresh on hydrate
+
+- **Layering**: an eager refresh would require threading `campaignScope` through `src/lib/ai/widgets.ts`. That module is **scope-agnostic by design** — it's the generic widget-persistence seam used by the emitter, the hydrate path, the confirm route, and the future direct-upsert tools. Making it aware of auth/scope context would pollute three other callsites for one compat concern.
+- **Correctness**: an old row's `sent_24h` aggregate already counted every channel (the pre-P13-E query had no `channel` filter), so the rollup's total stays honest under zero-fill. The per-channel breakdown briefly shows `(0e · 0s · 0w)` — which is **visibly wrong** to an operator who knows they've been sending, and therefore self-correcting: any subsequent mutation triggers `refreshWorkspaceSummary` and the three counters snap to real values.
+- **Simplicity + grep-audit**: the compat is one helper function (`normalizePreP13ERollup`) with a self-explanatory name. When ops confirm all persisted rollup rows have been refreshed (one full cycle across all sessions), the helper can be deleted in one edit.
+
+### Why this doesn't loosen the validator
+
+`validateWorkspaceRollup` still requires all four fields. The strict drift-guard between compute + renderer within a single version stays intact — a forward compute/render drift bug would still fail closed. The compat lives **outside** validation, in `rowToWidget`, where cross-version read-time normalization naturally belongs.
+
+### Implementation
+
+**`src/lib/ai/widgets.ts`**
+
+- Added `normalizePreP13ERollup(kind, parsed)` helper. Narrow to `kind === "workspace_rollup"` and to the three fields the P13-E widening introduced. Runs ONLY when at least one per-channel field is missing; when all four are present it returns the input unchanged so post-P13-E rows round-trip without mutation.
+- `rowToWidget` calls it after JSON parse, before `validateWidgetProps`. The call site has a comment explaining the seam.
+
+### Test coverage (3 new tests in `tests/unit/widget-helpers.test.ts`)
+
+1. **`rowToWidget: pre-P13-E workspace_rollup blob hydrates with zero-filled per-channel counters`** — real-world regression. Persists a row whose `invitations` has only `sent_24h: 7`, asserts the hydrated widget survives and the three per-channel fields are zero. This is the exact scenario GPT flagged.
+2. **`rowToWidget: post-P13-E workspace_rollup blob round-trips without mutation`** — negative half. When the persisted row already has all four fields, the normalizer is a no-op. Catches the drift where the normalizer might accidentally overwrite real per-channel counts with zeros.
+3. **`rowToWidget: genuinely malformed workspace_rollup (missing aggregate) still rejects`** — a row whose `invitations` is missing the aggregate `sent_24h` is corrupt (the compute helper writes it on every refresh), not cross-version. Strict validation must still drop it. Pins that the compat normalizer's scope is narrow to the three per-channel fields and doesn't accidentally rescue truly broken rows.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **874/874 passing** in 3.0s (was 871/871; +3 from the new compat tests)
+- 0 `not ok` lines in TAP
+
+### What this does NOT fix (intentional)
+
+- **The chat route's `widget_upsert` SSE frame after hydrate**: `listWidgets` returns the zero-filled props on hydrate, and the client renders them directly. On the FIRST mutation post-hydrate, the refresh helper rewrites the row with real counts and emits a `widget_upsert` frame that replaces the zero-filled blob in the client's state. No additional wiring needed — the existing `refreshWorkspaceSummary` callsites handle it.
+- **Removing the compat path once ops confirm migration is complete**: deliberately left as a follow-up. Deleting `normalizePreP13ERollup` and its three regression tests is a one-commit cleanup that can land any time after the last pre-P13-E row has been rewritten. No rush — the helper is small, tested, and has a clearly-scoped lifecycle comment.
+
+Ready for audit. GPT should review `a5fe90d` as the blocker fix on top of `9afb3a9`.
