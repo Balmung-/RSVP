@@ -29,6 +29,7 @@ function baseInput(
     sessionId: "sess-1",
     phase: "idle",
     lastRefreshMs: 0,
+    refreshInFlight: false,
     nowMs: 10_000,
     ...overrides,
   };
@@ -191,4 +192,74 @@ test("shouldRefreshOnVisibility: session check precedes cooldown (null session +
     ),
     false,
   );
+});
+
+// ---- In-flight guard (P9-fix for GPT blocker on 489a4df) -----------
+//
+// The regression GPT flagged: `lastRefreshMs` only advances on a
+// SUCCESSFUL apply. During the 50-200ms fetch RTT, a second
+// visibility event would see the same stale timestamp (often still
+// the 0 sentinel) and fire a duplicate GET /api/chat/session/:id.
+// The apply-time guards prevent stale overwrite but not duplicate
+// request fan-out. The `refreshInFlight` flag is an optimistic
+// attempt latch set before the fetch and cleared on settle.
+
+test("shouldRefreshOnVisibility: refreshInFlight true → false (duplicate-request guard)", () => {
+  // Even with every other gate open — including the never-refreshed
+  // sentinel that bypasses cooldown — an in-flight fetch must block
+  // a second attempt. Without this, the cooldown guarantee is broken
+  // on the very first attempt because lastRefreshMs is still 0.
+  assert.equal(
+    shouldRefreshOnVisibility(baseInput({ refreshInFlight: true })),
+    false,
+  );
+});
+
+test("shouldRefreshOnVisibility: refreshInFlight true + cooldown elapsed → false (latch beats cooldown)", () => {
+  // The latch must sit BEFORE the cooldown math, not after. If a
+  // future refactor reordered the checks, a long-pending fetch would
+  // let a parallel attempt fire after 2s — defeating the guarantee.
+  assert.equal(
+    shouldRefreshOnVisibility(
+      baseInput({
+        refreshInFlight: true,
+        lastRefreshMs: 1_000,
+        nowMs: 1_000 + REFRESH_COOLDOWN_MS + 500,
+      }),
+    ),
+    false,
+  );
+});
+
+test("shouldRefreshOnVisibility: first visible → true, second visible while in-flight → false (the exact scenario)", () => {
+  // This is the direct regression test GPT asked for: "first
+  // visibility event starts refresh, second visible event before
+  // settle does not start another GET."
+  //
+  // Step 1: clean tab, never refreshed, not in flight — gate opens.
+  const firstAttempt = baseInput({
+    lastRefreshMs: 0,
+    refreshInFlight: false,
+  });
+  assert.equal(shouldRefreshOnVisibility(firstAttempt), true);
+
+  // Step 2: the caller flips the latch true BEFORE firing the fetch,
+  // then the operator quickly hides+re-shows the tab. The fetch has
+  // not settled, so lastRefreshMs is still 0. The latch must block
+  // the second attempt.
+  const secondAttemptMidFlight = baseInput({
+    lastRefreshMs: 0,
+    refreshInFlight: true,
+  });
+  assert.equal(shouldRefreshOnVisibility(secondAttemptMidFlight), false);
+
+  // Step 3: fetch settles, lastRefreshMs advances to the attempt
+  // time, latch clears. Third attempt within the cooldown window
+  // should now be blocked by cooldown (not by the latch).
+  const thirdAttemptAfterSettle = baseInput({
+    lastRefreshMs: 10_000,
+    nowMs: 10_000 + 500,
+    refreshInFlight: false,
+  });
+  assert.equal(shouldRefreshOnVisibility(thirdAttemptAfterSettle), false);
 });

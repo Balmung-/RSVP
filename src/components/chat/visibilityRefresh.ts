@@ -44,6 +44,21 @@ import type { Phase } from "./types";
 // Clock-skew defense: if `lastRefreshMs > nowMs` (a test injects a
 // stale `now`, or a system clock rewinds mid-session), we treat
 // the cooldown as elapsed rather than blocking forever.
+//
+// In-flight guard (P9-fix for GPT blocker on 489a4df):
+//   - `lastRefreshMs` only advances AFTER a successful apply. The
+//     fetch has a 50-200ms RTT window. If the operator goes
+//     visible -> hidden -> visible quickly before the first GET
+//     settles, the second visibility event sees the same stale
+//     `lastRefreshMs` (often still the 0 sentinel) and the gate
+//     fires a DUPLICATE /api/chat/session/:id request.
+//   - The apply-time guards (sessionIdRef, phaseRef) prevent stale
+//     overwrite but NOT duplicate request fan-out. That breaks the
+//     cooldown's "at most one refresh per 2s" guarantee.
+//   - `refreshInFlight` is an optimistic attempt latch flipped true
+//     at attempt time (before the fetch is even sent) and cleared
+//     when the fetch settles. Second visibility event during the
+//     first fetch sees the latch and skips.
 
 export type VisibilityRefreshInput = {
   visibilityState: string;
@@ -53,6 +68,10 @@ export type VisibilityRefreshInput = {
   // refreshed. Using a numeric epoch (not a Date) keeps the helper
   // trivially serialisable and the tests deterministic.
   lastRefreshMs: number;
+  // True while a refresh fetch is pending (set before the fetch is
+  // fired, cleared when it settles). Prevents duplicate-request fan-out
+  // when the operator rapidly toggles visibility.
+  refreshInFlight: boolean;
   nowMs: number;
 };
 
@@ -64,6 +83,12 @@ export function shouldRefreshOnVisibility(
   if (input.visibilityState !== "visible") return false;
   if (!input.sessionId) return false;
   if (input.phase !== "idle") return false;
+  // In-flight guard must sit BEFORE the cooldown math. The cooldown
+  // starts from the last SUCCESSFUL apply, not the last attempt, so
+  // on a very first attempt (lastRefreshMs=0 sentinel) the cooldown
+  // gate would otherwise allow a second fetch to piggyback on the
+  // first one's in-flight window.
+  if (input.refreshInFlight) return false;
 
   // lastRefreshMs === 0 is the "never refreshed" sentinel. A fresh
   // tab mount at low nowMs (tests, or a page loaded moments after

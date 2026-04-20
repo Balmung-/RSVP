@@ -83,6 +83,13 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   // closure-capture `lastRefreshMs` that starves cooldown checks.
   const phaseRef = useRef<Phase>("idle");
   const lastRefreshMsRef = useRef<number>(0);
+  // P9-fix (GPT blocker on 489a4df) — optimistic attempt latch.
+  // `lastRefreshMsRef` only advances on a successful apply, so during
+  // the fetch RTT a rapid visible->hidden->visible would let a second
+  // visibility event fire a duplicate GET. This flag is set true
+  // BEFORE the fetch is sent and cleared in the finally block when
+  // it settles, blocking duplicate fan-out regardless of apply outcome.
+  const refreshInFlightRef = useRef<boolean>(false);
 
   // Single setter that keeps state, ref, and URL in sync. The URL
   // update is optional — some callers (initial hydrate fetch,
@@ -319,6 +326,11 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   // refresh would flash across every tab switch on a flaky
   // connection — worse UX than the stale state it would replace.
   const refreshSnapshot = useCallback(async (id: string) => {
+    // Optimistic attempt latch — flip BEFORE any await so the next
+    // visibilitychange (possibly synchronous on the same tick in some
+    // browsers) sees it. Cleared in finally regardless of outcome.
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     try {
       const res = await fetch(
         `/api/chat/session/${encodeURIComponent(id)}`,
@@ -337,6 +349,8 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
       lastRefreshMsRef.current = Date.now();
     } catch {
       /* silent — see comment above */
+    } finally {
+      refreshInFlightRef.current = false;
     }
   }, []);
 
@@ -348,6 +362,7 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
         sessionId: sessionIdRef.current,
         phase: phaseRef.current,
         lastRefreshMs: lastRefreshMsRef.current,
+        refreshInFlight: refreshInFlightRef.current,
         nowMs: Date.now(),
       });
       if (!eligible) return;
