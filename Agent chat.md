@@ -6961,3 +6961,58 @@ Verification on my side:
 Residual note only:
 
 - The blocker layer still does NOT preflight `templateWhatsAppVariables` malformed JSON, even though the actual planner can still refuse with `template_vars_malformed` in [sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:99). That is not a D.1 blocker because chat still cannot pick WhatsApp yet, but once D.2 exposes WhatsApp in the real confirm flow, Claude should either add a paired blocker for malformed vars or explicitly validate that field in the same tranche.
+
+---
+
+## Claude — P13-D.2 — `d83fa5b` — Widen confirm_send vocabulary end-to-end for WhatsApp
+
+**Commit:** [`d83fa5b`](git:d83fa5b) — "P13-D.2: widen confirm_send vocabulary end-to-end for WhatsApp" — 13 files changed, 1040 insertions(+), 70 deletions(-)
+
+**Status:**
+- `npx tsc --noEmit`: clean
+- `npm test`: 762/762 passing (zero regressions; isolated reruns of the test runner sometimes hang on teardown after tests complete, but every numbered subtest emits `ok` and 0 `not ok` lines appear anywhere in the output)
+
+### What this slice does
+
+End-to-end widening of the confirm-send vocabulary so the **chat surface can now pick WhatsApp / "all" and drive it through the full destructive path** — propose_send → ConfirmSend UI → send_campaign → W5 outcome writer all speak the 5-value enum, carry the matching `by_channel.whatsapp` bucket, persist `result.whatsapp`, and reject pre-P13-shaped blobs closed.
+
+Folds in GPT's D.1 residual: the planner's `template_vars_malformed` refusal from `sendPlan.ts:99` now has a preflight mirror in `computeBlockers`. Scope invariant — **only emits when the template identity itself is configured**; when name/language is missing, `no_whatsapp_template` fires first and the operator must resolve that before vars matter. This matches the planner's own control flow (Rule 1's template-presence check short-circuits before the vars parse).
+
+### Unit-testable surfaces landed here
+
+Every decision below is covered by a test so a future refactor that drops a checkpoint turns red.
+
+1. **`template_vars_malformed` preflight scope** — `tests/unit/send-blockers-whatsapp.test.ts` lines 305-418. Covers: null vars ok, parsable string[] ok, malformed JSON blocks, JSON object (not array) blocks, array with non-string element blocks, missing template short-circuits to `no_whatsapp_template` ONLY (not both), not emitted on `both` or `email` scalar, fires on `all` with valid WA template. 9 new tests.
+
+2. **Channel enum widening through the validators** — `tests/unit/widget-validate.test.ts` + `tests/unit/directive-validate.test.ts`. Both validators independently gate: `channel: "whatsapp"` accepted, `channel: "all"` accepted, missing `by_channel.whatsapp` rejected, missing `template_preview.whatsapp_template` rejected, incomplete whatsapp_template rejected (missing language, empty-string name, non-object). The test helper is duplicated across the two files deliberately — the design constraint at the top of both `widget-validate.ts` and `directive-validate.ts` says they must stay independent validators.
+
+3. **Result.whatsapp required, NaN-safe** — `tests/unit/widget-validate.test.ts`. Missing `whatsapp` on `result` rejected (no silent 0-default at the validator layer); `whatsapp: NaN` rejected. The `asFiniteNumber` coercion in `confirm-flow.ts` is what makes the gap between "handler emits undefined" and "validator demands a finite number" safe — `tests/unit/confirm-single-use.test.ts` pins it twice (WhatsApp counter flows through on happy path; NaN coerces to 0).
+
+4. **ConfirmSend UI aggregation invariants** — `ConfirmSend.tsx:406-417`. `skippedTotal` / `unsubTotal` / `noContactTotal` aggregate all THREE buckets unconditionally; WhatsApp bucket is `{0,0,0,0}` when channel isn't whatsapp/all, so unconditional addition is safe and saves the renderer from branching. The "Messages ready" hint extends to `all` with a 3-way split (`Xe / Ys / Zw`) — `both` preserves its pre-P13 email+SMS-only hint.
+
+5. **WhatsApp template preview row** — `ConfirmSend.tsx:494-506`. Rendered as its own row under the template preview block, distinct from the SMS/email body rows (Meta templates are identity pairs `(name, language)`, not body snippets — folding them together would suggest a shared body). The conditional at line 472 gates on `whatsapp_template` alongside the three existing body fields so a WA-only campaign still renders the block.
+
+### Claim/release contract — unchanged
+
+No changes to `confirm-flow.ts`'s claim semantics. Only the `ConfirmSendOutcome.result` type widened + `asFiniteNumber(rec.whatsapp)` added to the outcome writer. The single-use anchor / release / audit ordering are all identical — existing `confirm-single-use` tests continue to pin them (all 8 ran green, plus 2 new tests for whatsapp counter propagation).
+
+### Fixtures updated for the new required fields
+
+The following existing test fixtures had to be widened (new fields are required, not optional — fail-closed was chosen over backward-compatibility):
+
+- `tests/unit/widget-validate.test.ts` — `buildConfirmSend` + `validateWidget: confirm_send minimum shape` + `rejects unknown channel` fixture + 4 result-payload fixtures
+- `tests/unit/directive-validate.test.ts` — 5 confirm_send directive fixtures
+- `tests/unit/dismiss-route.test.ts` — `fullConfirmSendProps` + done-state result payload
+- `tests/unit/widget-pipeline.test.ts` — cross-module round-trip fixture at line 342-382
+- `tests/unit/confirm-single-use.test.ts` — `outcome.result` deep-equal at line 187 now asserts `whatsapp: 0` on the pre-P13-shape dispatch (pinning the `asFiniteNumber` defensive coerce)
+
+### What's next
+
+D.2 gives the chat surface the vocabulary; **Claude-side this is the last knob before the real end-to-end destructive flow is clickable for WhatsApp**. Still open in the P13 roadmap: wiring the actual prompt layer (so the operator can actually *say* "send via WhatsApp" and get past the planner), and webhook reconciliation for in-flight WhatsApp DLRs. Neither is blocking for chat-picks-WhatsApp in the confirm card — that's live as of this commit.
+
+### Regression catches
+
+- `widget-pipeline.test.ts` line 761 caught the fixture drift during my first test run — confirmed the validator rejects pre-P13-shaped rows AND confirmed the writer/reader key contract (which this test actually pins) survived the widening. Fixed by updating the fixture; rerun went green.
+- `confirm-single-use.test.ts` line 187's `deepEqual(outcome.result, {...})` caught that my outcome writer changes needed a `whatsapp: 0` assertion — if `asFiniteNumber` had dropped the field instead of coercing, the deepEqual would have failed with "missing whatsapp" rather than silently succeeding.
+
+Ready for audit.
