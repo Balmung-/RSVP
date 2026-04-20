@@ -12,8 +12,8 @@ import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 import { validateDirective } from "@/lib/ai/directive-validate";
 import { createWorkspaceEmitter } from "@/lib/ai/widgets";
 import { tryRefreshSummaryForChatTool } from "@/lib/ai/workspace-summary";
-import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
 import { gateRuntimeForChatRoute } from "./runtime-gate";
+import { handleToolSuccess } from "./handle-tool-success";
 import { deriveSessionTitle } from "@/lib/ai/session-title";
 import type {
   InternalAssistantContent,
@@ -523,94 +523,35 @@ export async function POST(req: Request) {
             });
 
             if (result.ok) {
-              if (directiveForStorage) {
-                // Envelope shape: `{kind, props, messageId}`. The
-                // client's DirectiveRenderer threads messageId into
-                // confirmation directives (ConfirmSend) so the
-                // button knows which row to POST against. Directives
-                // that don't need a confirm round-trip (CampaignList,
-                // ConfirmDraft) ignore the extra field.
-                //
-                // DEPRECATED path as of W3 — the six shipped kinds
-                // now emit `widget` instead (see below). This branch
-                // survives for any future tool that opts into the
-                // transient transcript-only render path.
-                send("directive", {
-                  ...(directiveForStorage as Record<string, unknown>),
-                  messageId: toolRow.id,
-                });
-              }
-              // W3 — workspace widget emission. Each of the six
-              // shipped tools returns a `widget` alongside (or
-              // instead of) a directive. We call `.upsert(...)`
-              // with the tool row id as `sourceMessageId` so
-              // ConfirmSend's POST anchor resolves the same way the
-              // old directive path's `messageId` did.
-              //
-              // `.upsert(...)` validates via validateWidget and
-              // returns null on failure; on success the emitter
-              // sends `widget_upsert` over the SSE stream. A null
-              // return means the handler produced a widget payload
-              // the validator rejected — we log and continue, same
-              // trust model as the directive branch above.
-              const r = result.result;
-              if (r.widget) {
-                const upserted = await workspace.upsert({
-                  widgetKey: r.widget.widgetKey,
-                  kind: r.widget.kind,
-                  slot: r.widget.slot,
-                  props: r.widget.props,
-                  order: r.widget.order,
-                  sourceMessageId: toolRow.id,
-                });
-                if (!upserted) {
-                  console.warn(
-                    `[chat] invalid widget from tool ${call.name}; dropped`,
-                    {
-                      widgetKey: r.widget.widgetKey,
-                      kind: r.widget.kind,
-                    },
-                  );
-                }
-              }
-
-              // W7 — refresh the workspace rollup after any tool run
-              // that can move its counters. The gate (which tool names
-              // trigger a refresh) lives in `tryRefreshSummaryForChatTool`
-              // so the predicate + compute + error-swallow posture sit
-              // under unit tests; this branch just translates the
-              // outcome into the matching side effect.
-              //
-              // We persist + emit `widget_upsert` directly rather than
-              // routing through `workspace.upsert(...)` because that
-              // emitter also fires `widget_focus`, which would pull
-              // the dashboard away from the confirm_draft card the
-              // operator just created. Errors are logged + swallowed:
-              // a failed refresh leaves stale counters on the rollup
-              // until the next mutation, which is recoverable, whereas
-              // raising would abort the chat turn and lose the model's
-              // response in-flight.
-              const summaryOutcome = await tryRefreshSummaryForChatTool(
-                { prismaLike: prisma as never },
-                { sessionId, campaignScope: ctx.campaignScope },
-                call.name,
+              // Directive emit + widget upsert + summary-rollup
+              // refresh + final `tool:ok` frame. The per-success
+              // wiring is extracted to `handle-tool-success.ts` so
+              // the frame-order contract (directive → widget →
+              // summary → tool:ok) and the drop-and-log posture on
+              // invalid widgets / rollup failures are pinned at the
+              // route-seam level in
+              // `tests/unit/chat-route-tool-success.test.ts`. The
+              // route's job here is only to pass the already-narrowed
+              // dispatch result and the persisted row id.
+              await handleToolSuccess(
+                {
+                  upsertWidget: (input) => workspace.upsert(input),
+                  refreshSummary: (toolName) =>
+                    tryRefreshSummaryForChatTool(
+                      { prismaLike: prisma as never },
+                      { sessionId, campaignScope: ctx.campaignScope },
+                      toolName,
+                    ),
+                  send,
+                },
+                {
+                  toolName: call.name,
+                  toolRowId: toolRow.id,
+                  sessionId,
+                  widget: result.result.widget ?? null,
+                  directive: directiveForStorage,
+                },
               );
-              if (summaryOutcome.kind === "produced") {
-                send("widget_upsert", summaryOutcome.widget);
-              } else if (summaryOutcome.kind === "invalid") {
-                console.warn(
-                  `[chat] workspace rollup produced invalid props; dropped`,
-                  { sessionId, widgetKey: WORKSPACE_SUMMARY_WIDGET_KEY },
-                );
-              } else if (summaryOutcome.kind === "error") {
-                console.warn(
-                  `[chat] workspace rollup refresh failed`,
-                  summaryOutcome.error,
-                );
-              }
-              // "skipped" — tool didn't match the refresh gate; no-op.
-
-              send("tool", { name: call.name, status: "ok" });
             } else {
               send("tool", {
                 name: call.name,
