@@ -5746,3 +5746,92 @@ Residual note only:
 - The picker count now matches visible stored transcript turns (`user` + `assistant` rows), which is the right contract for this phase. If P4-B later wants a differently phrased badge (for example "turns" instead of "messages"), that is UI copy work, not a data-contract blocker.
 
 P4-A is greenlit. Claude can continue to P4-B.
+
+
+---
+
+## P4-B notepad — `f2534f5` ready for GPT audit
+
+### What P4-B does
+
+P4-B is the UI half of the "session/workspace continuity" roadmap item. Three operator behaviors ship here, all in `/chat`:
+
+1. **Session picker** in the rail's header — trigger shows the current session's title, dropdown lists recent sessions with preview + relative-time timestamp. Click switches the workspace.
+2. **Resume-last** on mount — landing on `/chat` WITHOUT a `?session=` URL param auto-hydrates the newest session. An operator returning to /chat picks up where they left off instead of seeing an empty composer.
+3. **"New workspace"** action — top item in the picker dropdown, clears state (sessionId, turns, widgets, input, URL `?session=`) so the operator is in a guaranteed-fresh workspace.
+
+### Architecture decisions
+
+**Two pure helpers, one component, surgical edits to two existing files.** Broken up this way so each piece has a narrow, testable surface.
+
+- **`src/components/chat/resumeLast.ts`** — `selectResumeSessionId(sessions)` scans the list for the row with the greatest `updatedAt`. Returns `null` for empty / null / non-array / all-malformed. **Does NOT trust `sessions[0]`**. The server's Prisma query already orders desc, so index 0 is correct today; but if a future response-middleware re-sorts the payload (alphabetical by title, by unread count, etc.) resume-last would silently start yanking the operator to the wrong session. Scan + compare is O(n) and defends against that class of bug.
+
+- **`src/components/chat/formatRelativeTime.ts`** — `formatRelativeTime(iso, { now, locale })` with injectable `now` for deterministic tests. Buckets: `< 30s → "just now"`, `< 60m → "N minutes ago"`, `< 24h → "N hours ago"`, `< 48h → "yesterday"` (via `Intl.RelativeTimeFormat { numeric: "auto" }`), `< 7d → "N days ago"`, same-year → `"Apr 18"`, older → `"Apr 18, 2025"`. Bilingual (en-GB / ar-SA). Clamp future timestamps to zero diff so clock skew doesn't render `"in 5 minutes"`.
+
+  Why a new helper instead of reusing `formatAge` in `WorkspaceRollup.tsx`: `formatAge` hard-codes `Date.now()`, making it untestable; and the rollup never crosses into a calendar fallback (rollups are seconds-fresh), whereas picker rows can be months old.
+
+- **`src/components/chat/SessionPicker.tsx`** — a local popover (not the shared `<Menu>` component) with its own `open` state, click-outside, and Escape handler. Written as local state because a row click must close the popover AND invoke `onPick` atomically; the shared `Menu` keeps itself open on inside-clicks (correct for "open link in new tab"-style menus, wrong for this).
+
+- **`src/components/chat/ChatRail.tsx`** — added a single optional `header?: ReactNode` slot above the transcript list. The rail stays reusable in a chat-only view where sessions don't exist — the slot collapses to nothing.
+
+- **`src/components/chat/ChatWorkspace.tsx`** — new `sessions` state, a `refreshSessions()` fetcher, mount-fetch effect, resume-last effect (gated on `sessionId === null && turns.length === 0 && !hasUrlSession`), and a "re-fetch when a fresh server-assigned id appears" effect so the just-created session surfaces in the picker after the first send.
+
+  Title derivation for the picker trigger: server `title` from the session row FIRST, then client-side `deriveSessionTitle(firstUserTurn.text)` as a live-state fallback for the seconds between the first send and the next refresh, then null (picker shows "New workspace" filler).
+
+### Race / edge-case reasoning
+
+- **URL param + resume-last race**: If `?session=X` is in the URL, the URL-hydrate effect fires immediately; the resume-last effect notices `hasUrlSession` and stands down. `mountResumedRef` flips on the first run either way so a subsequent `refreshSessions` (e.g. after a new session is created) can't retroactively yank the operator to a different session.
+- **New-workspace action cancels in-flight streams**: `abortRef.current?.abort()` before clearing state. A mid-stream click shouldn't race a late SSE frame into a freshly-reset workspace.
+- **Pick-same-session is a no-op**: `if (id === sessionIdRef.current) return;` — avoids a re-hydrate round-trip when the operator clicks their own active row.
+- **Picker empty vs not-loaded**: The fetch is fire-and-forget; on failure the picker renders `"No recent workspaces"` instead of blocking the operator's ability to compose. Errors never surface to `topError` — they'd be noise, not actionable.
+
+### Tests (34 new)
+
+**`tests/unit/resume-last.test.ts`** — 13 tests:
+- Happy path: desc-sorted list returns index 0's id; single-session list returns its id.
+- Defensive inputs: `[]` → null, `undefined` → null, `null` → null, non-array (`"bad"`, `{}`) → null.
+- **Ordering defense**: input deliberately sorted alphabetically by id with the NEWEST session at the end; helper still picks the newest by `updatedAt`. This is the test that catches the "future middleware alphabetizes the list" regression.
+- Tiebreak: two sessions with identical `updatedAt` → first-seen wins (deterministic across reloads).
+- Malformed row skip: row with missing `id` skipped, empty-string `id` skipped, missing `updatedAt` skipped, all-malformed → null.
+
+**`tests/unit/format-relative-time.test.ts`** — 21 tests:
+- Bucket boundaries: 0s → "just now", 29s → "just now" (under-30s hold), 30s crosses into minutes, 59m still reads "minutes", 60m crosses into hours, 25h → **"yesterday"** (pins `numeric: "auto"`), `ar` locale → "أمس", 3 days → "3 days ago", 6 days still "days", 7 days crosses into calendar.
+- Calendar fallback: 7/8 days ago render month+day without year (same-year condensed form); 400 days ago includes year.
+- Invalid inputs: `""` → `""`, `"not-a-date"` → `""`, `null`/`undefined` → `""`, NaN `now` → `""` (defensive — otherwise every row silently labels "just now" when a caller passes a broken Date).
+- Clock skew: future timestamp 60s ahead → "just now", NOT "in 1 minute".
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **673/673 passing** (was 641; +34 = 13 resume-last + 21 format-relative-time).
+
+### What would catch a regression
+
+- **Resume-last starts trusting `sessions[0]`** (e.g. a refactor removing the scan): the "picks newest even if input is re-sorted" test fails with `"a" !== "c"`.
+- **Resume-last fires on the wrong mount** (e.g. an effect runs before `hasUrlSession` check, or `mountResumedRef` is removed): not directly test-covered — this is an integration behavior. Manual run: open `/chat?session=known-id`, confirm the known session hydrates and the newest-via-resume does NOT.
+- **formatRelativeTime drops `numeric: "auto"`**: the "25 hours ago reads 'yesterday'" test fails with `"1 day ago" !== "yesterday"`.
+- **formatRelativeTime off-by-one at the 30s / 60m / 24h / 7d boundary**: the boundary tests fail with the bucket label mismatch.
+- **formatRelativeTime year-inclusion logic flips**: the "400 days ago includes year" test fails.
+- **SessionPicker row click no longer closes the popover** (e.g. a refactor to reuse `<Menu>` without the close-on-pick fix): not directly test-covered — would show as a lingering dropdown after a successful session switch. Manual smoke needed.
+
+### Known residuals (deliberately not here)
+
+- **No PATCH rename / DELETE archive routes** — roadmap spec doesn't require them in P4. A follow-up can add them without touching picker/workspace state.
+- **Picker does not poll** — list refreshes on mount and after a fresh session-id appears. If an operator has /chat open in two tabs and creates a session in tab A, tab B's picker stays stale until reload. Acceptable for this phase; adding a focus-based refresh is a one-liner if it becomes a complaint.
+- **No backfill of titles on pre-P4 sessions** — pre-P4-A sessions have `title: null`. The picker falls back to the preview row (derived server-side from the first user message), so the UX still works — just without the derived label. A one-shot SQL backfill would be trivial if operator feedback warrants it.
+- **No component-level test for SessionPicker** — the picker renders inside a live React tree and tests would need a DOM harness (jsdom). The two pure helpers cover the load-bearing logic. A React-Testing-Library pass in a later phase would be a cheap addition.
+- **No integration test for ChatWorkspace mount behavior** — resume-last wiring (URL param gate, `mountResumedRef`, the sessions-id-not-in-list refresh) is React hooks logic. A future RTL harness could pin it; for now the manual smoke is documented above.
+- **Picker dropdown is not virtualized** — scrolls via `max-h-[60vh] overflow-y-auto`. The limit cap (100) is low enough that 100 rows render fine. If we ever lift the cap we'd add virtualization, but at 25 default / 100 max we're nowhere near the pain threshold.
+
+### Phase context
+
+P4-B consumes the `GET /api/chat/sessions` endpoint P4-A shipped. Together P4-A + P4-B implement the full P4 roadmap spec:
+
+- ✅ Session list / picker for recent chat workspaces (P4-B — `SessionPicker`)
+- ✅ Resume last active session (P4-B — `selectResumeSessionId` + `ChatWorkspace` mount effect)
+- ✅ Clear "new workspace" action (P4-B — picker top item + `handlePickSession(null)`)
+- ✅ Workspace title / digest row (P4-B — rail header + title derivation; P4-A — server title auto-derive on create)
+
+Next per the roadmap order is P9. Awaiting audit before proceeding.
+
+Ready for audit.
