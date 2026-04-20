@@ -5477,3 +5477,85 @@ Same-key re-write is still an UPDATE-in-place on the upsert line, and the evicti
 - Remove the self-filter in the eviction loop: the single-write tests in `composition-eviction.test.ts` fail because the just-installed row gets evicted.
 
 Ready for re-audit.
+
+## P8-B shipped (`2d2f692`) — for GPT audit
+
+**P8 closes here.** P8-A (green-lit at `5407d29`) established the slot-composition policy; P8-B layers the "seed next action" affordance the roadmap specified: a chip rendered below primary/secondary widget cards that seeds a suggested prompt into the chat composer. Clicking the chip does NOT send the message — it drops text into the textarea and focuses it, so the operator can review, edit, or fire with Enter.
+
+### Why this completes the P8 spec
+
+The roadmap (Agent chat.md lines 4192-4207) defines P8 as:
+- explicit slot policy ✓ (P8-A: `SLOT_POLICY`)
+- replacement vs coexistence rules per kind ✓ (P8-A: `SLOT_COMPOSITION` + `upsertWidget` eviction)
+- **one "seed next action" affordance from primary/secondary widgets into the chat input** ← P8-B
+- Done when: "the dashboard reads like one workspace, not a vertical pile of cards."
+
+With P8-B, every primary/secondary hero card offers the operator a natural next-step affordance — the dashboard feels like a workspace with forward momentum, not a passive read-only surface.
+
+### The three layers
+
+**1. Per-kind prompt resolver** — [src/lib/ai/next-action-prompts.ts](src/lib/ai/next-action-prompts.ts)
+
+Pure function `getNextAction(widget, locale) -> NextAction | null`. A `NextAction` is `{ label: string; prompt: string }` — the label is what the chip shows, the prompt is what seeds into the composer. Split so the chip can stay short ("Send invites") while the seeded prompt can be more explicit ("Send invites for Summer Gala").
+
+Switch is exhaustive over `WidgetKind`; the `never` fallback makes a new kind added to `WIDGET_KINDS` without a case here fail to compile. Four kinds return chips (all primary/secondary): `campaign_list`, `campaign_card`, `contact_table`, `import_review`. The six remaining kinds return `null` — action-slot confirms have their own buttons, `workspace_rollup` is a passive summary, `activity_stream` and `file_digest` have no obvious forward action that wouldn't just repeat the card's own content.
+
+`campaign_card` parameterizes on `props.name` via a safe `readString` guard — "Send invites for Summer Gala 2026" when the name is present, "Send invites for this campaign" as a fallback when the name is missing, empty, or the wrong type. The validator already rejects malformed props at the DB boundary, but the guard keeps the resolver a pure no-throw function even against pathological input.
+
+**2. CustomEvent transport** — [src/components/chat/seedComposerPrompt.ts](src/components/chat/seedComposerPrompt.ts)
+
+`seedComposerPrompt(prompt, target?)` dispatches a `chat:seed-prompt` CustomEvent. The target is injectable: production omits it and dispatches on `window`; tests pass a fresh `EventTarget` so the dispatch + receive roundtrip is observable without a DOM (Node 20+ has both `CustomEvent` and `EventTarget` as globals; package.json already requires Node >=20).
+
+`isSeedPromptEvent(e)` is the listener-side type guard — checks `e.type`, `e instanceof CustomEvent`, and `detail.prompt` is a non-empty string. Two defence layers mean:
+- Empty/whitespace/non-string prompts never fire an event (guard in the dispatcher).
+- If a third-party script fires a same-named event with a malformed detail, the listener's guard rejects it before the composer's setInput runs.
+
+Why CustomEvent vs React context: context would require every widget renderer to sit inside a provider and would trigger re-renders on every provider state change. We need one-shot push-style notification, not a subscription — EventTarget is the exact shape.
+
+**3. Chip component** — [src/components/chat/NextActionChip.tsx](src/components/chat/NextActionChip.tsx)
+
+Small button matching the existing inline-action visual language (slate palette, `text-xs`, subtle hover, focus ring). Direction arrow flips between `arrow-right` (en) and `arrow-left` (ar). `aria-label` and `title` explain the action so screen-reader users understand it doesn't send — it "Drops this suggestion into the chat composer."
+
+### Wiring
+
+- **ChatWorkspace** ([src/components/chat/ChatWorkspace.tsx](src/components/chat/ChatWorkspace.tsx)) mounts a window listener for `chat:seed-prompt`; handler calls `setInput(detail.prompt)`. Overwrite behavior matches the industry pattern for suggested-prompt chips (ChatGPT, Linear) — clicking a chip is an explicit opt-in, not a silent append.
+- **ChatRail** ([src/components/chat/ChatRail.tsx](src/components/chat/ChatRail.tsx)) mounts a SIBLING listener; handler focuses the textarea via a new ref + `setTimeout(..., 0)`. The defer is load-bearing: without it, a fast click can focus the textarea a tick before React flushes the `setInput` state update, leaving the caret at position 0 of an empty string. The deferred focus lands after the state flush, caret at end-of-text, ready for an Enter-to-send.
+- **WidgetRenderer** ([src/components/chat/WidgetRenderer.tsx](src/components/chat/WidgetRenderer.tsx)) calls `getNextAction(widget, locale)` per render; if non-null, renders `<NextActionChip>` in a right-aligned row BELOW the directive card, inside the same dashboard wrapper so the focus-ring-on-flash (W4) hugs both the card and the chip as one visual unit.
+
+### Testing
+
+Two new test files, 25 total assertions, wired into `npm test` alongside the existing 577:
+
+**`tests/unit/next-action-prompts.test.ts`** — 10 tests:
+- Exhaustive over `WIDGET_KINDS` in both EN and AR (every kind returns either null or a NextAction with non-empty label + non-empty prompt).
+- The eligible-kind set derived from resolver return values exactly matches the `ELIGIBLE_KINDS` sentinel — catches drift between the resolver and the test's expected shape.
+- The null-kind set (action confirms, workspace_rollup, activity_stream, file_digest) returns null in both locales.
+- `campaign_card` interpolates `props.name` into both label and prompt (EN + AR).
+- `campaign_card` fallback: empty name doesn't produce "Send invites for " with trailing space; missing name doesn't produce "undefined" artifact; wrong-type name (number/null/object/array/boolean) doesn't leak `42` or `[object Object]` into the chip text.
+
+**`tests/unit/seed-composer-prompt.test.ts`** — 13 tests:
+- Dispatch roundtrip on a plain `EventTarget` (no DOM): happy path, empty prompt, whitespace-only prompt, non-string prompt (number/null/undefined), SSR-safe (no window, no target).
+- Type guard: accepts well-formed CustomEvent; rejects wrong-type event, plain Event (no detail), missing prompt field, empty-string prompt, non-string prompt, no detail at all.
+- End-to-end integration: dispatch via helper, narrow via guard, read payload — matches the production ChatWorkspace listener pattern exactly.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **602/602 passing** (was 577; +25 new).
+- `npm run build`: clean, no new warnings.
+
+### What would catch a regression
+
+- Add a new kind to `WIDGET_KINDS` without a case in the resolver: TypeScript compile fails (the `never` exhaustiveness trap). Same kind added with an explicit `return null;` passes the compiler but fails the "eligible kinds match ELIGIBLE_KINDS sentinel" test — forcing you to decide whether the new kind should have a chip.
+- Changing `campaign_card`'s prompt to drop `props.name`: the parameterization test fails with "label does not match /Summer Gala 2026/".
+- Regression in the empty/whitespace dispatcher guard: the "empty prompt is a no-op" test fails with `received.length === 1` instead of 0.
+- Regression in the type guard (e.g. accepting `detail.prompt: ""`): the "rejects empty-string prompt" test fails.
+- Listener regression in ChatWorkspace (e.g. skipping `isSeedPromptEvent` and trusting a raw `Event.detail`): not covered by unit tests (requires React harness), but the type guard test file is grep-auditable — any consumer of `SEED_PROMPT_EVENT` that doesn't import `isSeedPromptEvent` is immediately suspicious.
+
+### Known residuals (deliberately not here)
+
+- **No Arabic campaign name transliteration** — if a campaign's `name` is "Summer Gala" in English, the AR chip reads `إرسال دعوات Summer Gala` (the AR prefix + the raw English name). We don't have a per-campaign AR name field; forcing a translation here would be wrong more often than helpful. The seeded prompt is still actionable.
+- **No chip text truncation for very long campaign names** — the chip has `truncate max-w-[20ch]` so a 100-character name displays as "Send invites for Very L…" rather than breaking layout. The seeded `prompt` is NOT truncated (the composer can handle long strings). If a future UX review wants the chip to show the full name, the `max-w` tweak is a one-line change.
+- **No chip-hides-on-hydrate suppression** — if a widget hydrates before the composer finishes mounting, clicking the chip fires an event no one is listening for. Functionally harmless (the click is idempotent and the operator can click again); worth a follow-up if telemetry shows it happening.
+
+Ready for audit.
