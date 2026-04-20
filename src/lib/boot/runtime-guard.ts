@@ -74,3 +74,47 @@ export function guardRuntimeOnBoot(opts: GuardOptions = {}): GuardResult {
   logger.error(`${msg} — non-production boot continues`);
   return { probe, mode, action: "warned" };
 }
+
+// Next.js 14 contract: throws from `register()` are CAUGHT by the
+// server and logged as "Failed to prepare server", but the process
+// stays alive and every request returns 500. That's not fail-fast —
+// it's a live container with no healthy code path, which looks like
+// a working deploy to naive uptime checks.
+//
+// `registerBootGuard` is the Next-facing wrapper that the
+// instrumentation hook actually calls. It runs the pure guard, and
+// when the guard throws in production it ALSO hard-exits so the
+// platform (Railway / Vercel / plain Docker) sees a crash loop and
+// surfaces the failed deploy.
+//
+// The exit function is injectable so unit tests can assert it was
+// called without the test runner itself exiting.
+
+export type BootExit = (code: number) => void;
+
+export type RegisterOptions = {
+  guard?: (opts?: GuardOptions) => GuardResult;
+  exit?: BootExit;
+  env?: GuardOptions["env"];
+};
+
+export function registerBootGuard(opts: RegisterOptions = {}): void {
+  const guard = opts.guard ?? guardRuntimeOnBoot;
+  const exit: BootExit = opts.exit ?? ((code) => process.exit(code));
+  const env = opts.env ?? (process.env as Record<string, string | undefined>);
+  try {
+    guard({ env });
+  } catch (err) {
+    // The guard only throws in production + misconfigured. Next.js
+    // catches this throw and keeps serving 500s, so we hard-exit
+    // after logging. In non-production the guard doesn't throw, so
+    // this catch block is unreachable there.
+    if (env.NODE_ENV === "production") {
+      exit(1);
+    }
+    // Re-throw is a belt-and-suspenders for test doubles whose
+    // `exit` stub does not actually terminate. In real prod, exit(1)
+    // kills the process first and this throw never runs.
+    throw err;
+  }
+}

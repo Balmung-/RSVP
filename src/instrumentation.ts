@@ -1,11 +1,22 @@
-import { guardRuntimeOnBoot } from "@/lib/boot/runtime-guard";
+import { registerBootGuard } from "@/lib/boot/runtime-guard";
 
 // Next.js 14.2 instrumentation hook. Called once per server process
-// on startup. The runtime guard validates AI backend env and throws
-// in NODE_ENV=production when the selected backend is missing keys —
-// so a broken deploy fails to start instead of booting into a state
-// where every /api/chat request 503s. Non-production boot continues
-// with a warning so dev can iterate on non-chat surfaces.
+// on startup.
+//
+// Requires `experimental.instrumentationHook: true` in next.config.js —
+// without the flag Next 14 silently skips this module and the guard
+// never runs. (Stable / default-on in Next 15.)
+//
+// `registerBootGuard` runs the AI-runtime config check and, in
+// production, hard-exits on misconfig. Throwing alone isn't enough:
+// Next 14 catches register()'s throw, logs "Failed to prepare
+// server", and keeps the process alive serving 500s for every
+// request — worse than the silent-503 it's meant to prevent. Hard
+// exit lets the platform (Railway/Vercel/Docker) see a crash loop
+// and surface the failed deploy.
+//
+// Non-production boot warns and continues so local dev can iterate
+// on non-chat surfaces without an AI key.
 export function register() {
-  guardRuntimeOnBoot();
+  registerBootGuard();
 }

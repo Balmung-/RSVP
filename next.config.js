@@ -17,6 +17,12 @@ const nextConfig = {
   output: "standalone",
   poweredByHeader: false,
   experimental: {
+    // Next 14 requires this flag for src/instrumentation.ts register()
+    // to be invoked on server start. Without it the boot-time runtime
+    // guard is silently skipped and a misconfigured prod deploy boots
+    // into the silent-503 state the guard is meant to prevent.
+    // Stable (default-on) in Next 15; required in 14.x.
+    instrumentationHook: true,
     serverActions: {
       bodySizeLimit: "4mb",
       allowedOrigins: allowedOrigins.length ? allowedOrigins : undefined,

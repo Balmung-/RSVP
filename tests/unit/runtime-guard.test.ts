@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { guardRuntimeOnBoot } from "../../src/lib/boot/runtime-guard";
+import { guardRuntimeOnBoot, registerBootGuard } from "../../src/lib/boot/runtime-guard";
 
 // P15-D — boot-time runtime guard.
 //
@@ -285,6 +285,78 @@ test("guardRuntimeOnBoot: default logger is console (brief capture + restore)", 
     console.log = origLog;
     console.error = origErr;
   }
+});
+
+test("registerBootGuard: production + misconfig → hard-exits with code 1", () => {
+  // Next.js 14 catches throws from register() and keeps the process
+  // alive serving 500s. The wrapper MUST hard-exit in production so
+  // the platform sees a crash loop. The guard's throw still fires
+  // (belt-and-suspenders for test-stub exit) — this test asserts
+  // the exit spy was called with code 1.
+  const exitCalls: number[] = [];
+  const { logger } = makeLogger();
+  assert.throws(
+    () =>
+      registerBootGuard({
+        env: { NODE_ENV: "production" },
+        exit: (code: number) => {
+          exitCalls.push(code);
+        },
+        guard: (opts) => guardRuntimeOnBoot({ ...opts, logger }),
+      }),
+    /runtime-boot.*configured=false/,
+  );
+  assert.equal(exitCalls.length, 1, "exit must fire exactly once in prod + misconfig");
+  assert.equal(exitCalls[0], 1, "exit code must be 1 so platform treats it as crash");
+});
+
+test("registerBootGuard: production + configured → no exit, no throw", () => {
+  const exitCalls: number[] = [];
+  const { logger } = makeLogger();
+  registerBootGuard({
+    env: { NODE_ENV: "production", ANTHROPIC_API_KEY: "sk-prod" },
+    exit: (code: number) => {
+      exitCalls.push(code);
+    },
+    guard: (opts) => guardRuntimeOnBoot({ ...opts, logger }),
+  });
+  assert.equal(exitCalls.length, 0, "healthy boot must not call exit");
+});
+
+test("registerBootGuard: non-production + misconfig → no exit, no throw (guard warns)", () => {
+  // In non-production the guard warns and doesn't throw — so the
+  // wrapper's try/catch is unreachable and exit is not called.
+  const exitCalls: number[] = [];
+  const { logger } = makeLogger();
+  registerBootGuard({
+    env: { NODE_ENV: "development" },
+    exit: (code: number) => {
+      exitCalls.push(code);
+    },
+    guard: (opts) => guardRuntimeOnBoot({ ...opts, logger }),
+  });
+  assert.equal(exitCalls.length, 0, "dev boot must never call exit");
+});
+
+test("registerBootGuard: unexpected throw in non-production propagates (no exit, re-throw)", () => {
+  // Defensive pin: if a future refactor makes guardRuntimeOnBoot
+  // throw in non-production (a bug), the wrapper must not silently
+  // swallow the error. It should re-throw so Next's logs surface it.
+  const exitCalls: number[] = [];
+  assert.throws(
+    () =>
+      registerBootGuard({
+        env: { NODE_ENV: "development" },
+        exit: (code: number) => {
+          exitCalls.push(code);
+        },
+        guard: () => {
+          throw new Error("unexpected");
+        },
+      }),
+    /unexpected/,
+  );
+  assert.equal(exitCalls.length, 0, "non-production must not exit even on unexpected throw");
 });
 
 test("guardRuntimeOnBoot: default env is process.env (brief mutation with try/finally restore)", () => {
