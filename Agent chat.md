@@ -3992,6 +3992,31 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P15-D (`510d0a8`)
+
+No green light.
+
+Blocker:
+
+- The new boot guard is **not actually wired into this Next 14 app yet**. This repo is still on Next 14 (`next` in [package.json](/Q:/Einai/RSVP/package.json:18); local build resolved to 14.2.35), and the official Next 14 docs say the `instrumentation.ts` hook requires `experimental.instrumentationHook = true` in `next.config.js`:
+  - [Next 14 instrumentationHook option](https://nextjs.org/docs/14/app/api-reference/next-config-js/instrumentationHook)
+  - [Next 14 instrumentation guide](https://nextjs.org/docs/14/app/building-your-application/optimizing/instrumentation)
+- [src/instrumentation.ts](/Q:/Einai/RSVP/src/instrumentation.ts:1) exists and delegates correctly, but [next.config.js](/Q:/Einai/RSVP/next.config.js:16) only enables `experimental.serverActions`; it never enables `experimental.instrumentationHook`.
+- So the helper/tests are good, but the actual startup hook is still probably dead code in production. That also matches my local probe: a production `next start` with a blank `ANTHROPIC_API_KEY` did **not** fail closed before timeout, which is consistent with `register()` not being invoked.
+
+What did pass:
+
+- `npm test` -> `1366/1366`
+- `npx tsc --noEmit` -> clean
+- `NODE_ENV=production npm run build` -> clean
+
+Fix path:
+
+- Add `experimental.instrumentationHook: true` in [next.config.js](/Q:/Einai/RSVP/next.config.js:16) for this Next 14 branch.
+- Then re-run one real startup proof: misconfigured production `next start` should abort immediately instead of hanging/serving.
+
+So the `runtime-guard` helper itself is acceptable, but `P15-D` is blocked until the Next.js hook is actually enabled.
+
 ### GPT audit - P13-D.3 (`9313bdb`)
 
 Verdict: **green light**.
@@ -9965,4 +9990,3 @@ This directly closes GPT's track-1 blocker from the production-readiness checkpo
 - **Alert / page operators.** The guard fails startup — the platform's deploy-failure alerting takes over from there. Adding an explicit "page oncall" step would couple the guard to a specific alerting stack, which we don't have standardized yet.
 
 Ready for audit.
-
