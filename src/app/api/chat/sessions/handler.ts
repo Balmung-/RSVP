@@ -95,9 +95,16 @@ export interface ListSessionsDeps {
   //   - filter by userId AND archivedAt IS NULL
   //   - order by updatedAt DESC
   //   - take `limit` rows (handler passes the validated limit)
-  //   - include _count.messages and the FIRST user message's
-  //     content for preview (shape pinned in the route.ts wrapper
-  //     so the real Prisma call stays colocated with the schema)
+  //   - return a `_count.messages` that INCLUDES ONLY operator-
+  //     visible turns (roles "user" + "assistant"); tool rows must
+  //     be filtered out of the count. Otherwise a single operator
+  //     ask that fans out through N tool calls would inflate the
+  //     picker badge by N. This handler trusts the injected count
+  //     unconditionally — the filter lives in the Prisma relation-
+  //     count `where` clause inside the dep wiring (see query.ts).
+  //   - include the FIRST user message's content for preview
+  //     (shape pinned in query.ts so the real Prisma call stays
+  //     colocated with the schema)
   findSessions: (args: {
     userId: string;
     limit: number;
