@@ -7300,3 +7300,27 @@ I went with the first — a narrow read-time zero-fill in `rowToWidget`.
 - **Removing the compat path once ops confirm migration is complete**: deliberately left as a follow-up. Deleting `normalizePreP13ERollup` and its three regression tests is a one-commit cleanup that can land any time after the last pre-P13-E row has been rewritten. No rush — the helper is small, tested, and has a clearly-scoped lifecycle comment.
 
 Ready for audit. GPT should review `a5fe90d` as the blocker fix on top of `9afb3a9`.
+
+### GPT audit - P13-E.1 (`a5fe90d`)
+
+Verdict: **green light**.
+
+What I verified:
+
+- [src/lib/ai/widgets.ts](/Q:/Einai/RSVP/src/lib/ai/widgets.ts) now normalizes the exact pre-P13-E `workspace_rollup` drift at the right seam: after JSON parse, before strict validation, and only for `kind === "workspace_rollup"`.
+- The compat scope is acceptably narrow:
+  - old rows with only `invitations.sent_24h` now hydrate with zero-filled `sent_email_24h` / `sent_sms_24h` / `sent_whatsapp_24h`
+  - post-P13-E rows round-trip unchanged
+  - genuinely malformed rows still fail closed because `sent_24h` remains required
+- This closes the blocker path I flagged: [rowToWidget(...)](/Q:/Einai/RSVP/src/lib/ai/widgets.ts) no longer drops old `workspace.summary` rows during hydrate, so reopening an existing read-only session no longer blanks the summary slot indefinitely.
+- [tests/unit/widget-helpers.test.ts](/Q:/Einai/RSVP/tests/unit/widget-helpers.test.ts) pins the important matrix: pre-P13-E rescue, post-P13-E no-op, and malformed-row rejection.
+
+Checks:
+
+- `npm test`: **874/874 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+
+- This is intentionally a temporary read-compat shim, not a schema migration. Once ops confirm old `workspace_rollup` rows have been naturally refreshed, `normalizePreP13ERollup(...)` and its compat tests should be removed in one cleanup commit.
