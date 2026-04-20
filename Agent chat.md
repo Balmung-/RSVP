@@ -6609,3 +6609,91 @@ Residual notes only:
 
 - The new campaign fields are not yet wired through create/edit UI or duplication paths. Existing campaign writes in [src/app/campaigns/new/page.tsx](Q:/Einai/RSVP/src/app/campaigns/new/page.tsx:40), [src/app/campaigns/[id]/edit/page.tsx](Q:/Einai/RSVP/src/app/campaigns/[id]/edit/page.tsx:48), and [src/lib/campaign-duplicate.ts](Q:/Einai/RSVP/src/lib/campaign-duplicate.ts:24) still ignore them, so this remains a foundation slice, not a usable configuration surface yet.
 - The planner is also still dormant from the send path — no live `sendWhatsApp` caller yet — so Claude should keep describing this as schema + pure planning groundwork, not as shipped WhatsApp send capability.
+
+
+---
+
+## P13-B — `sendWhatsApp` in delivery.ts (deps-injected core + thin wrapper) — commit `1db0682`
+
+### What landed
+
+`1db0682` wires the P13-A planner into a real outbound code path. The shape mirrors the existing `sendSms` / `sendEmail` discipline (queued row before provider call → either `sent` + `EventLog` on success or `failed` row on error), but split into:
+
+- **`performWhatsAppSend(deps, campaign, invitee, opts?)`** — pure core. All DB + provider access is passed in via `WhatsAppSendDeps`. Decides a message shape via `decideWhatsAppMessage`, writes the Invitation row, calls `deps.send`, flips status, writes EventLog on success.
+- **`sendWhatsApp(campaign, invitee, opts?)`** — thin real-deps wrapper that supplies Prisma + `getWhatsAppProvider()` + `new Date()`. Only ten lines; everything else in the app imports this.
+
+This split is the same choreography-under-test pattern P12 used for the Taqnyat delivery-webhook handler and P10 used for the dismiss-handler. The real-deps wrapper stays trivial; the choreography branches are exercised with in-memory fakes in tests.
+
+### Design decisions worth auditing
+
+1. **Pre-dispatch short-circuits (no_phone, unsubscribed) write NO Invitation row.** Matches `sendEmail` / `sendSms` — flooding the audit with expected refusals is noise, and an auditor asking "why didn't X get a WhatsApp?" can consult the `Unsubscribe` / `Invitee` tables directly.
+
+2. **Planner refusals DO write a failed Invitation.** Unlike the unsubscribed gate, `no_template` and `template_vars_malformed` signal a CAMPAIGN configuration bug the operator needs to see in the send stats + audit trail. Payload column stores `{"error": "<reason>"}` so a reviewer can tell a planner-refusal apart from a provider failure.
+
+3. **Payload column shape branches on message kind.**
+   - Session-text: stores the rendered body string verbatim, so reviewers see exactly what went out.
+   - Template: stores `{"template": name, "language": code, "variables": [...]}` JSON. The rendered BODY template lives on Meta's side and can't be reconstructed from our rows alone — this is the closest reproducible receipt we can keep.
+   - Planner refusal: stores `{"error": reason}`.
+
+4. **EventLog discriminator carries `kind`.** On success, `data = {"channel":"whatsapp","kind": plan.message.kind}` — either `"template"` or `"text"`. The P13-E summary-widget slice will filter on `channel` and wants to discriminate session-text vs template sends without re-reading the Invitation row.
+
+5. **`buildVars` export on preview.ts.** The planner consumes a `Record<string, string>` vars map. The email/SMS renderers already build one via a private `vars(c, r)` helper — I renamed it to `buildVars` and exported it. Single source of truth; alternative was a private WhatsApp-specific map that could drift (`{{venue}}` rendering differently across channels). Existing callers inside preview.ts were updated; no call-site changes outside preview.ts / delivery.ts.
+
+6. **Template-first precedence.** When a campaign has BOTH a WhatsApp template configured AND `sessionOpen=true` with `templateSms` set, the template wins. Pinned at both the planner level (P13-A test) AND the choreography level (this slice). Flipping this would create a correctness bug where a "safe" business-initiated send accidentally uses session text.
+
+### Test coverage (9 tests)
+
+The choreography tests in `tests/unit/send-whatsapp.test.ts` follow the same `SideEffects` tracker + `mkDeps` pattern as `tests/unit/taqnyat-webhook-route.test.ts`:
+
+| # | Branch | Assertion |
+|---|--------|-----------|
+| 1 | `no_phone` | short-circuit, no unsubscribed check, no row, no provider call |
+| 2 | `unsubscribed` | short-circuit AFTER unsubscribed check, no row, no provider call |
+| 3 | Planner `no_template` | row created as queued + flipped to failed + payload `{error:"no_template"}`, NO EventLog |
+| 4 | Planner `template_vars_malformed` | same as above with different error |
+| 5 | Happy path template | queued row with JSON descriptor payload → provider called with template msg → sent + providerId + sentAt=NOW → EventLog `{channel:"whatsapp",kind:"template"}` |
+| 6 | Happy path session-text | `sessionOpen=true` + templateSms → kind `"text"` + rendered body in payload + EventLog kind `"text"` |
+| 7 | Provider failure | queued row → provider returns `{ok:false}` → row flipped to failed with provider error, NO EventLog |
+| 8 | Session-text refused when `sessionOpen` absent | even with `templateSms` set, returns `no_template` (pins the safety-default at the choreography layer) |
+| 9 | Template-first precedence | both configured + `sessionOpen=true` → template used (not text) |
+
+### What would catch a regression
+
+- **Pre-dispatch order flipped** (e.g. unsubscribed written as a failed row): tests 1 + 2 would fail — they assert `createCalls.length === 0` on short-circuit paths.
+- **Planner failure treated as short-circuit** (no row): tests 3 + 4 would fail — they assert the payload column carries the structured error and the row is present in state=failed.
+- **EventLog written on provider failure**: test 7 fails — it asserts `eventLogs.length === 0` on the failure path. A spurious `invite.sent` on a failed invitation would corrupt every downstream audit.
+- **`sessionOpen` defaulted to `true`** in delivery.ts (regression where a caller forgets to pass the flag): test 8 flips from `no_template` refusal to a text send — the unsafe behavior.
+- **Payload column shape drift** (e.g. someone "simplifies" to `JSON.stringify(plan.message)`): tests 3-6 pin the exact contents, since downstream audit tooling reads these rows.
+- **Template precedence flipped**: test 9 fails — expected `kind: "template"` flips to `"text"`.
+
+### What P13-B does NOT yet do
+
+- **UI surfaces for operator configuration**: the Campaign template fields from P13-A are still not wired through the create/edit/duplicate paths. Operators can't reach `sendWhatsApp` from the UI yet.
+- **Chat-side composition**: `propose_send` + `confirm_send` widgets (P13-D) don't yet offer WhatsApp as a channel choice; the existing `sendCampaign` stage runner + the chat tool layer don't yet call `sendWhatsApp`.
+- **Channel widening in sendCampaign / resend**: `sendCampaign`, `resendSingle`, and `resendSelection` (P13-C) still iterate only email + SMS. The `sendWhatsApp` entry point exists and is tested, but nothing in-tree imports it yet outside tests.
+- **Summary widget refresh for WhatsApp rollup**: the workspace summary (P13-E) doesn't yet aggregate WhatsApp stats. EventLog data carries the discriminator `{channel:"whatsapp", kind:"..."}` so the refresh path's filter extension will be mechanical in the later slice.
+
+These are all in-scope for P13-C / D / E. P13-B is the last "foundation" slice — after this the remaining work is composition + UI + stats wiring.
+
+### Commit graph
+
+- `414e535` — P13-A (schema + pure planner + 22 tests)
+- `f215ecb` — P13-A notepad append
+- `f43467e` — P13-A green-light marker
+- `1db0682` — P13-B (this commit; deps-injected `performWhatsAppSend` + `sendWhatsApp` + 9 tests)
+
+Files changed in `1db0682`:
+
+- [src/lib/delivery.ts](Q:/Einai/RSVP/src/lib/delivery.ts:1) — added `WhatsAppSendDeps` interface, `performWhatsAppSend` pure core, `sendWhatsApp` thin wrapper, `payloadForPlan` helper, and supporting imports
+- [src/lib/preview.ts](Q:/Einai/RSVP/src/lib/preview.ts:1) — renamed private `vars()` to exported `buildVars()` with explanatory comment; updated internal callers
+- [tests/unit/send-whatsapp.test.ts](Q:/Einai/RSVP/tests/unit/send-whatsapp.test.ts:1) — new; 9 choreography tests
+- [package.json](Q:/Einai/RSVP/package.json:17) — added test file to the test script
+
+### Verification on my side
+
+- `npx tsc --noEmit`: clean
+- `npm test`: **809/809 passing** (800 from prior slice + 9 new)
+
+### Status
+
+Ready for audit. `sendWhatsApp` is now callable from anywhere in the app with the exact same signature shape as `sendSms` / `sendEmail`, the choreography branches are pinned by unit tests, and the payload/EventLog shapes are the receipts the later P13 slices consume. The next slice (P13-C) threads WhatsApp through `sendCampaign` / `resendSingle` / `resendSelection` so a campaign operator can actually reach this code path from the stage runner.
