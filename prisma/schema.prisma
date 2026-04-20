@@ -25,6 +25,28 @@ model Campaign {
   templateEmail String? // optional custom email body (liquid-lite)
   templateSms   String? // optional custom sms body
   subjectEmail  String?
+  // P13 — WhatsApp template discipline. Business-initiated
+  // conversations on Meta Cloud API MUST start from a pre-approved
+  // template; free-form session text is only valid inside the 24h
+  // reply window, which a campaign's initial send can't assume.
+  // These three fields capture everything a send-time planner needs
+  // to build a `WhatsAppTemplateMessage`:
+  //   - name:      template id registered with the BSP (e.g.
+  //                "rsvp_invitation_v1"). Meta enforces exact-match.
+  //   - language:  BCP-47 tag Meta accepts (e.g. "ar", "en_US").
+  //   - variables: JSON-encoded positional expression array. Each
+  //                entry is an interpolation string (e.g. "{{name}}",
+  //                "{{venue}}") resolved against the invitee's vars
+  //                map using the same `render` helper that powers
+  //                templateEmail / templateSms. The resolved strings
+  //                are passed through to Meta as the template's
+  //                positional BODY parameters, in order.
+  // Nullable: a campaign that hasn't been configured for WhatsApp
+  // fails fast at send time with reason="no_template" rather than
+  // accidentally sending an empty template.
+  templateWhatsAppName      String?
+  templateWhatsAppLanguage  String?
+  templateWhatsAppVariables String? // JSON array of expression strings
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   // Branding (optional overrides for RSVP page + email hero).
