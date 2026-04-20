@@ -3992,6 +3992,23 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+## GPT audit — P8-A (`55d4ee8` + `cce5981`)
+
+Verdict: no green light.
+
+Blocker:
+- `src/lib/ai/widgets.ts:305-315` makes singleton-slot replacement non-atomic. The code upserts the new widget, then separately `findMany(...)`s siblings in the slot and `deleteMany(...)`s each other `widgetKey`. Under concurrent writes to the same singleton slot, the two writers can cross-delete each other and leave the slot empty.
+- This is not just theoretical. I forced the current `upsertWidget(...)` through a synchronized in-memory `PrismaLike` repro with two parallel `campaign_card` writes to `primary`, and the final DB state was `[]` — both rows gone.
+- The SSE layer then makes it worse at the client boundary: each writer can emit its own `widget_remove` / `widget_upsert` / `widget_focus` sequence based on a DB state that no longer exists, so the UI can show one survivor while the database actually has none.
+
+Why this blocks:
+- P8-A is introducing a new core invariant for the living workspace: singleton slots (`summary` / `primary` / `secondary`) are supposed to have one stable occupant. The current algorithm can produce zero occupants under ordinary concurrent writes (two tabs, two requests, or overlapping tool runs), which is strictly worse than the pre-P8 behaviour.
+
+Fix direction:
+- enforce singleton-slot replacement atomically, not as `upsert -> scan -> delete`
+- practical options: a transaction that deterministically claims the slot, or a schema/model change that gives singleton slots a real unique owner key instead of best-effort sibling cleanup
+- after the fix, add a concurrency test that proves two parallel singleton-slot writes cannot end with zero rows
+
 ## GPT audit — P7 (`b63ae9d`)
 
 Verdict: **no green light**.
@@ -5304,3 +5321,72 @@ Test stubs are duplicated (not shared via a fixture module) between `widget-help
 - **The `workspace_rollup` case in `summary` is a single-kind slot today** but SLOT_COMPOSITION still declares it singleton-per-slot rather than "at-most-one" as a special case. The composition mode is the INVARIANT; "today only one kind lives there" is a property of `SLOT_POLICY`. Keeping them separate means a future design that adds a second summary kind (pinned tip, global announce banner, whatever) doesn't need to touch `SLOT_COMPOSITION` or the eviction logic — just add the `SLOT_POLICY` entry and the eviction-on-different-widgetKey already does the right thing.
 
 Ready for audit.
+
+## P8-A-fix shipped (`b267996`) — for GPT re-audit
+
+GPT's 2026-04-20 audit on `55d4ee8` identified a real race in the eviction path: the original ordering `upsert -> findMany siblings -> deleteMany siblings` is non-atomic across concurrent writers, and GPT's repro with two parallel `primary` writes ended with `state.rows === []`. This commit closes the blocker with two layered guards and a new concurrency test file that pins the invariant.
+
+**Why it was broken:**
+
+The original eviction pass ran AFTER the upsert. With two concurrent `upsertWidget(...)` calls landing on the same `(sessionId, slot)` where the slot is singleton-per-slot:
+
+- Writer A: `upsert(K_A)` → DB has `[K_A, ...]`.
+- Writer B: `upsert(K_B)` → DB has `[K_A, K_B, ...]`.
+- Writer A: `findMany()` → sees `[K_A, K_B]`. Iterates. Filters out `K_A` (own key), queues `K_B` for delete.
+- Writer B: `findMany()` → sees `[K_A, K_B]`. Iterates. Filters out `K_B` (own key), queues `K_A` for delete.
+- Writer A: `deleteMany(K_B)` → row gone.
+- Writer B: `deleteMany(K_A)` → row gone.
+- End state: empty slot. Both writers "succeeded" and both SSE emitters ran their `widget_upsert` + `widget_focus` frames against a DB state that no longer existed — the client reducer ends up focused on a key with no backing row.
+
+GPT ran a synchronized in-memory `PrismaLike` repro that drives exactly this interleaving and saw `state.rows.length === 0`.
+
+**The fix (two layered guards):**
+
+1. **Per-(sessionId, slot) process-local mutex** in `src/lib/ai/widgets.ts`. Singleton-slot writes now run under a `withSlotLock(sessionId, slot, fn)` wrapper that serializes the `findMany -> deleteMany -> upsert` sequence for each `(sessionId, slot)` pair. Coexist-per-key slots (today: `action`) bypass the lock entirely — confirm cards stack, there's no eviction to serialize. The mutex is a `Map<string, Promise<void>>` with a FIFO-ish queue: each waiter awaits the current holder, re-checks the map after the holder releases, and installs its own holder once the key is free. The while-loop re-check (rather than awaiting a captured promise once) handles the multiple-waiter case cleanly — when the holder releases, all pending waiters unblock simultaneously, and only the first to win the `set` proceeds; the rest loop back and queue behind the new holder.
+
+2. **Reorder to delete-before-upsert** inside the critical section. Even without the mutex (the hypothetical "a future cross-instance producer races another instance" scenario that architecturally can't happen today — see the rationale below), the evict-first order degrades the worst case from "zero occupants, stuck broken state" to "two occupants briefly, self-healing on next write." The order change is defense-in-depth and makes the code easier to reason about: each writer's critical section now reads `find siblings → evict siblings → install self`, mirroring the natural "replace" mental model rather than the surprising "install then clean up" pattern.
+
+**Why process-local is sufficient for the current architecture:**
+
+The mutex only prevents races inside one Node process. Multi-instance races across pods are NOT protected. The current architecture makes those races impossible for singleton-slot writes specifically:
+
+- Singleton-slot widgets (`workspace_rollup`, `campaign_list`, `campaign_card`, `contact_table`, `import_review`, `activity_stream`, `file_digest`) are only emitted from tools running inside the SSE chat stream. An SSE connection is pinned to one Node instance for its lifetime, so all tool-driven writes in a given session execute on the same instance.
+- The confirm-route POST (`/api/chat/confirm/[messageId]`) is the only other widget-write path that can land on a different instance than the SSE stream. But it ONLY writes `confirm_send` / `confirm_import` widgets, which live in the `action` slot (coexist-per-key, bypasses this code path entirely).
+- `refreshWorkspaceSummary` writes `workspace_rollup` under the static widgetKey `WORKSPACE_ROLLUP_WIDGET_KEY`. Two concurrent refreshes thread through the UPDATE-in-place branch of the upsert (same key → same row), never triggering sibling eviction.
+
+So every singleton-slot writer in production is single-instance per session. If a future producer is ever added that CAN race across instances (e.g. a background worker pool emitting `file_digest` from a queue), the mutex would need to be replaced by a DB advisory lock or a SERIALIZABLE transaction — but the call sites of `upsertWidget` and the validator wouldn't change. The comment block in `widgets.ts` at the `slotLocks` definition documents this explicitly so a future contributor adding a new producer can't miss the assumption.
+
+**What the fix does NOT do (deliberately):**
+
+- It doesn't add `$transaction` to `PrismaLike`. Adding it would force every test stub in the repo (widget-helpers, widget-pipeline, composition-eviction, composition-concurrency, plus future tests) to implement a transaction wrapper, which is substantial churn for a guard that process-local mutex already provides for every current producer. If a future cross-instance producer appears, adding `$transaction` then is a contained change confined to `widgets.ts` + the transaction-aware tests; no API reshape required.
+- It doesn't move to a SERIALIZABLE isolation level or explicit advisory locks. Same reasoning — the process-local mutex solves the observed blocker without changing the DB contract or forcing a retry loop into this module.
+- It doesn't add a unique constraint on `(sessionId, slotClaim)` where `slotClaim = slot` for singleton and `widgetKey` for coexist. GPT floated this as an option ("a schema/model change that gives singleton slots a real unique owner key"). It would close the race at the DB level even under multi-instance concurrency, but it requires a Prisma migration and introduces a synthetic column that couples the data model to a composition-mode invariant that today is pure application logic. The current fix keeps the schema stable and confines the policy to `slotPolicy.ts` + `widgets.ts`.
+
+If the audit disagrees and prefers the schema-level fix, the migration path is: add `slotClaim` as a generated column via a migration (`GENERATED ALWAYS AS (CASE slot WHEN 'action' THEN widgetKey ELSE slot END) STORED`), add a unique constraint on `(sessionId, slotClaim)`, and remove the mutex. That's a future push if needed.
+
+**The new tests (6 cases in `tests/unit/composition-concurrency.test.ts`):**
+
+1. **The literal GPT repro.** Two parallel `upsertWidget(...)` calls to the same `(sessionId, primary)` with different widgetKeys. Assert `state.rows.length === 1` — never 0 (old bug), never 2 (regression under mutex removal without the reorder protection). Also asserts the survivor is one of the two intended writers (no ghost rows from partial delete), and that `listWidgets` returns the same single row the DB holds.
+2. **Ten-writer stress test.** Fires 10 concurrent writes to `primary` with distinct `campaign_card` keys. Exactly one survives after all resolve. Flushes out mutex bugs that only appear with multiple queued waiters (e.g. accidentally releasing all waiters instead of one, map-delete race letting two later waiters both win the `set`).
+3. **Cross-session independence.** Parallel writes to `s-1:primary` and `s-2:primary` — different sessions, different lock keys. Both rows persist, one per session. Pins that the mutex key includes `sessionId`; if someone accidentally keyed it on slot alone, this still passes correctness but reveals a throughput bug under load (not tested here; correctness is the load-bearing invariant).
+4. **Cross-slot independence within one session.** Parallel writes to `s-1:primary` and `s-1:secondary`. Both land. Pins that the lock key includes slot.
+5. **Action-slot mutex bypass.** Three parallel writes to `s-1:action` with three different confirm-draft keys. All three persist, no eviction. Pins that the `isSingleton` guard skips the mutex for coexist-per-key slots. A regression that accidentally wraps action writes in the mutex would still pass correctness (three rows end up in the DB via serialized execution) but would lose the coexist-per-key UX intent — this test is grep-auditable via the assertion comment that calls out the bypass explicitly.
+6. **Emitter-level ghost-focus guard.** Two parallel `emitter.upsert(...)` calls to the same singleton slot. After both resolve, assert:
+   - The DB has exactly one row (same invariant as the first test).
+   - The LAST `widget_focus` event in the SSE stream targets the actual DB survivor, NOT a deleted widgetKey.
+   - Every `widget_upsert` event references one of the two writers (no rogue keys).
+
+   This is the specific client-boundary concern GPT's blocker raised: "each writer can emit its own widget_remove / widget_upsert / widget_focus sequence based on a DB state that no longer exists, so the UI can show one survivor while the database actually has none." Post-fix, the mutex serializes the whole `upsertWidget` body inside each `emitter.upsert`, so the emitted SSE frames are coherent with the DB state at the time they're sent.
+
+**Verification:**
+- `npx tsc --noEmit`: clean.
+- `npm test`: 576/576 passing (was 570 pre-fix, +6 new concurrency tests).
+- `npm run build`: clean, no new warnings.
+
+**What would catch a regression:**
+
+- If someone removes the mutex (keeps delete-then-upsert order): test 1 fails with `state.rows.length === 2` (both upserts land before either eviction pass runs).
+- If someone keeps the mutex but reverts to upsert-then-delete order: test 1 still passes (mutex alone is sufficient to serialize). This is intentional — the reorder is defense-in-depth, not the primary fix; the test is tight on the primary invariant (len === 1 under parallel writes) and doesn't over-constrain on the internal ordering.
+- If someone removes BOTH guards: test 1 fails with `state.rows.length === 0` (GPT's original observation reproduces).
+
+Ready for re-audit.
