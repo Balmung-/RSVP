@@ -6094,3 +6094,95 @@ Files changed:
 ### Status
 
 Ready for audit. The cross-tab consistency gap for /confirm, /dismiss, and import-widget mutations is closed at the narrowest seam that solves it. Every gate is pinned by a test that names the regression it catches.
+
+### GPT audit — P9 (`489a4df`)
+
+**Verdict: no green light.**
+
+Blocker:
+
+- The new visibility-refresh cooldown is keyed only off `lastRefreshMsRef`, and that ref advances only after a successful apply in [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:337). The listener gate in [lines 346-356](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:346) does not track an in-flight refresh at all. So if the operator does `visible -> hidden -> visible` quickly before the first GET settles, `shouldRefreshOnVisibility(...)` sees the same old timestamp (often still the `0` sentinel) and fires a second `/api/chat/session/:id` fetch immediately. That defeats the exact cooldown guarantee P9 says it adds ("rapid alt-tab ... would otherwise fire N requests per second"). The apply-time guards stop stale overwrites, but they do not stop duplicate request fan-out.
+
+Fix direction:
+
+- Add an in-flight refresh guard (for example `refreshInFlightRef`) or equivalent optimistic attempt-latching so only one visibility-triggered snapshot fetch can be outstanding per tab/session at a time.
+- Then add a regression test for the real race: first visibility event starts a refresh, second visible event before the first settles does **not** start another GET.
+
+Verification on my side:
+
+- `npm test`: **701/701 passing**
+- `npx tsc --noEmit`: clean
+
+This is a request-amplification / cooldown-contract bug, not a compile failure.
+
+---
+
+## P9-fix — in-flight refresh guard (`b74e776`)
+
+### GPT's blocker, verified
+
+GPT's read is correct. `lastRefreshMsRef.current = Date.now()` only runs in the apply path — after the fetch has resolved AND passed the session/phase guards. That means during the 50-200ms RTT window, `lastRefreshMsRef` is still whatever it was before the attempt (on a first attempt, still the `0` sentinel). A second `visibilitychange` event in that window runs `shouldRefreshOnVisibility(...)`, sees the never-refreshed sentinel, and the gate opens a second time — fanning out a duplicate `/api/chat/session/:id` fetch.
+
+The apply-time guards in `refreshSnapshot` (the `sessionIdRef !== id` / `phaseRef !== "idle"` checks at lines 333-334) catch the tail case — they prevent the later-settling fetch from clobbering state. What they do NOT do is prevent the request itself from leaving the wire. So the cooldown's stated contract ("at most one refresh per 2s") was broken on the first attempt, exactly as GPT described.
+
+### The fix: optimistic attempt latch
+
+A single new ref: `refreshInFlightRef`. Set to `true` at the top of `refreshSnapshot`, BEFORE any `await`; cleared in a `finally` block so it's released on success, rejection, or exception. The listener's gate call now passes `refreshInFlightRef.current` alongside the existing inputs, and the pure helper has a new input field + check:
+
+```ts
+if (input.refreshInFlight) return false;
+```
+
+Placed BEFORE the cooldown math. The ordering matters — the cooldown math uses `lastRefreshMs` which advances only on successful apply, so a parallel attempt during an outstanding fetch would otherwise see the same stale lastRefreshMs and pass cooldown. Putting the latch first short-circuits all that.
+
+### Why optimistic (set before the fetch, not after)
+
+GPT's fix direction explicitly called for an "optimistic attempt latch." This matters — a pessimistic version that flips the latch only after the fetch starts (e.g. in a `.then()` continuation) would still have a synchronous race window where both the first and second listener fires pass the gate before either has latched. Flipping `refreshInFlightRef.current = true` synchronously, BEFORE the `await fetch(...)`, closes that window entirely. The second listener fires after the first has already latched.
+
+### Double-safety inside refreshSnapshot
+
+The function still checks `if (refreshInFlightRef.current) return;` as its very first line. This is belt-and-suspenders — the listener gate already checks it — but the seam is the right place to enforce the invariant. If `refreshSnapshot` ever gets called from a second path (e.g. a manual operator "refresh now" action on a rail button, or a reconnect handler), the invariant holds regardless of whether the caller remembered to check.
+
+### Tests — 3 new (704/704 total)
+
+All in [tests/unit/visibility-refresh.test.ts](Q:/Einai/RSVP/tests/unit/visibility-refresh.test.ts:1):
+
+1. **`refreshInFlight true → false (duplicate-request guard)`** — the baseline. Even with every other gate open (including the never-refreshed sentinel that bypasses cooldown), an in-flight fetch MUST block a second attempt. Catches removal of the latch check.
+2. **`refreshInFlight true + cooldown elapsed → false (latch beats cooldown)`** — pins the ORDERING. The latch must sit before the cooldown math. A refactor that moved the cooldown check before the latch would let a long-pending fetch allow a parallel attempt after 2s. This test fails in that scenario with `false !== true`.
+3. **`first visible → true, second visible while in-flight → false (the exact scenario)`** — GPT's requested regression test spelled out as a sequence:
+   - Step 1: clean tab, never refreshed, not in flight → gate opens.
+   - Step 2: caller flips the latch true, operator hides+re-shows → gate blocks.
+   - Step 3: fetch settles, `lastRefreshMs` advances, latch clears → cooldown now carries the "no second attempt within 2s" guarantee (blocked by cooldown, not by latch).
+
+The sequence test also pins the LATCH-THEN-COOLDOWN handoff: different gates enforce the invariant at different phases of the attempt lifecycle, and both must work for the cooldown contract to hold.
+
+Baseline input in the helper (`baseInput`) updated to include `refreshInFlight: false` so every existing test keeps passing. The 15 prior gates (visibility, session, phase, cooldown, sentinel, clock-skew, precedence) all remain valid — they exercise the non-inflight path, which the latch check passes through unchanged when `refreshInFlight === false`.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **704/704 passing** (was 701; +3 new).
+
+### What would catch a regression
+
+- **Latch check removed**: `refreshInFlight true → false` fails with `true !== false`. A duplicate fetch would fan out.
+- **Latch checked AFTER cooldown**: `refreshInFlight true + cooldown elapsed → false` fails. A long-pending fetch (>2s) would let parallel attempts fire.
+- **Latch set after await instead of before (pessimistic)**: not directly unit-testable at the pure-function level. Caught by reading `refreshSnapshot`: the `refreshInFlightRef.current = true` assignment is on the line BEFORE the `try` block, not inside a `.then()` continuation.
+- **Latch not cleared on error path**: not directly unit-testable. Caught by reading the `finally` block. Without it, a fetch rejection would leave `refreshInFlight === true` forever and block all future refreshes.
+- **Listener stops passing the ref to the gate**: the regression sequence test (`first visible → true, second visible while in-flight → false`) fails only on the Step 2 assertion; the first-ever fire case (`never-refreshed (lastRefreshMs=0) always allows refresh`) still passes because the baseline input has `refreshInFlight: false`. This is subtle — the wire-up from ChatWorkspace to the gate is what actually uses the field, and that connection is tested indirectly by the sequence test working when driven with the same input shape the listener produces.
+
+### Commit graph
+
+- `489a4df` — P9 (original; had the duplicate-fetch bug)
+- `f29db27` — P9 notepad for GPT audit
+- (GPT's blocker append by user; lines 6098-6116 in notepad)
+- `b74e776` — P9-fix (this commit; refreshInFlight optimistic latch + 3 new tests)
+
+Files changed in `b74e776`:
+- [src/components/chat/visibilityRefresh.ts](Q:/Einai/RSVP/src/components/chat/visibilityRefresh.ts:1) (new input field + latch check)
+- [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:1) (new ref + set-before-await + finally clear + listener passes ref to gate)
+- [tests/unit/visibility-refresh.test.ts](Q:/Einai/RSVP/tests/unit/visibility-refresh.test.ts:1) (baseline update + 3 new tests)
+
+### Status
+
+Ready for re-audit. The duplicate-fetch race GPT flagged is closed at the listener gate AND inside `refreshSnapshot` as belt-and-suspenders. The optimistic latch pattern matches GPT's recommended fix direction, and the sequence test directly models the "first visibility event starts refresh, second before settle does not start another GET" invariant.
