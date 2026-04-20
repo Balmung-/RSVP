@@ -5291,6 +5291,190 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+### GPT checkpoint - current platform state after P1-P14
+
+High-level position:
+
+- The 14-phase roadmap is now complete as written.
+- The platform is **usable for an internal beta / controlled operator pilot**.
+- The architecture risk is mostly gone; remaining work is now mainly product completion, polish, and operational hardening beyond the original roadmap.
+
+What the platform can do right now:
+
+- `/chat` is the main working surface, not just a transcript:
+  - persistent session-backed workspace
+  - session picker + resume-last + new-workspace flow
+  - persisted widgets with hydrate-on-reload
+  - summary / primary / secondary / action dashboard composition
+  - stable widget keys, update-in-place, focus, dismiss, and cross-tab refresh-on-visibility
+- AI tool surface is real and wired into the workspace:
+  - campaign list / campaign detail
+  - contact search
+  - recent activity
+  - draft campaign
+  - propose send + confirm send
+  - file summarize
+  - file import review + import commit
+- File workflows are usable:
+  - uploads create ingest records
+  - chat can summarize uploaded files
+  - chat can review CSV/TSV imports
+  - chat can confirm imports through the same anchored confirm-flow discipline
+- Delivery/provider surfaces are materially in place:
+  - Anthropic + OpenRouter runtime seam exists
+  - Gmail OAuth + send adapter exist
+  - Taqnyat SMS provider exists
+  - Taqnyat WhatsApp provider/planner/orchestration are largely wired through chat/runtime paths
+  - Taqnyat delivery webhooks are normalized and update invitation state safely by channel
+- Route/test hardening is now strong:
+  - runtime-selection route seam pinned
+  - file-ingest -> widget-refresh route seam pinned
+  - confirm/dismiss/import/send flows heavily pinned
+  - P14 closed with 1335 passing tests
+
+What is still *not* finished if the target is a broad production platform:
+
+- Durable memory is still the biggest missing product capability.
+  - Sessions persist, but there is still no fully-realized long-horizon memory layer for operator preferences, reusable facts, or provenance-backed recall across conversations.
+- Some non-chat/admin surfaces still lag the new chat-first model.
+  - Not every legacy send/stats/admin surface is widened to the same WhatsApp / workspace-first semantics yet.
+- Inbound reply threading is not fully closed as an operator feature.
+  - Delivery loops are stronger than inbound conversation loops.
+- Launch-grade polish is still separate from roadmap completion.
+  - observability
+  - final UX composition polish
+  - cleanup of compat shims / deferred marginal items
+  - environment-specific rollout work
+
+Practical readiness framing:
+
+- **Internal pilot / controlled team use:** ready
+- **Broad production launch:** not yet, but now blocked by product completion and operations work more than by missing architecture
+
+If new work starts from here, the most sensible next tranches are:
+
+1. Durable memory / recall
+2. Final chat operator-surface polish and composition
+3. Remaining non-chat/admin/WhatsApp parity work
+4. Inbound reply threading if product wants true two-way console behavior
+5. Launch hardening / cleanup
+
+### GPT correction - runtime readiness depends on env being actually configured
+
+Important practical correction based on the live `/chat` screenshot:
+
+- In **this environment**, chat is **not ready to use yet** because the AI runtime is not configured.
+- The current runtime selector in [src/lib/ai/runtime/index.ts](/Q:/Einai/RSVP/src/lib/ai/runtime/index.ts:47) defaults to **Anthropic** when `AI_RUNTIME` is unset.
+- So a missing `AI_RUNTIME` + missing `ANTHROPIC_API_KEY` produces the exact `/chat` error the screenshot shows: `anthropic_not_configured`.
+- OpenRouter is **implemented in code**, but it is **not auto-selected**. To run chat on OpenRouter, env must be set explicitly:
+  - `AI_RUNTIME=openrouter`
+  - `OPENROUTER_API_KEY=...`
+  - `OPENROUTER_MODEL=...`
+
+So readiness needs to be framed carefully:
+
+- **Codebase / architecture readiness:** strong
+- **Current local environment readiness:** not yet, until the runtime env is configured
+
+That means the next immediate practical step for a real operator demo is not more feature work first; it is setting the runtime env correctly and verifying `/chat` against the chosen backend.
+
+### GPT checkpoint - what is still left before client rollout / production readiness
+
+If the bar is **"we can roll this out to paying clients safely"**, the remaining work is not mainly "more tools". It is productionization.
+
+I would separate it into **hard blockers before rollout** vs **important follow-up after first client pilot**.
+
+#### Hard blockers before external client rollout
+
+1. **Runtime/deployment setup must actually be real**
+   - The current environment still is not chat-ready until the chosen runtime is configured.
+   - Need a production env standard for one live backend:
+     - Anthropic OR OpenRouter
+     - secrets management
+     - prod/staging parity
+     - restart / deploy procedure
+   - This is not optional; the screenshot already proved local readiness and code readiness are different things.
+
+2. **Durable memory / recall layer**
+   - The roadmap built persistent sessions, not full durable memory.
+   - If the product promise is "AI operator with persistent memory / remarkable flow", this is still the biggest missing product feature.
+   - Need:
+     - memory model / provenance
+     - write policy
+     - retrieval policy
+     - tenant-safe scoping
+     - UI/audit posture for what the assistant "remembers"
+
+3. **Client-facing operator UX pass**
+   - `/chat` works as an internal console, but client rollout needs a stricter UX bar:
+     - cleaner error states
+     - clear loading / retry / partial-failure behavior
+     - onboarding cues
+     - tighter dashboard composition rules
+     - fewer "engineering-shaped" messages in the surface
+   - Right now the product is still more "power user console" than "finished client-facing workspace".
+
+4. **Operational reliability / observability**
+   - Before real clients, need production ops basics:
+     - structured error monitoring
+     - alerting on provider failures / webhook failures / send failures
+     - delivery dashboard sanity checks
+     - DB backup / restore confidence
+     - job/retry visibility
+     - deploy rollback discipline
+
+5. **Full channel parity where the product promises it**
+   - WhatsApp runtime/path is now materially wired, but client rollout still needs clarity on what surfaces are officially supported:
+     - chat send flow
+     - admin/manual send
+     - stats/reporting
+     - template configuration UI
+     - support/debug visibility
+   - If you sell "email + SMS + WhatsApp", the non-chat surfaces cannot lag ambiguously.
+
+6. **Inbound reply threading decision**
+   - If the product promise is a true two-way AI-operated console, inbound reply handling is still not fully closed.
+   - If product scope is outbound-first with limited inbound handling, this can be deferred.
+   - But it needs to be an explicit launch decision, not an accidental hole.
+
+#### Strongly recommended before or immediately after first pilot
+
+1. **Browser-level / route-level end-to-end smoke coverage**
+   - P14 hardened the codebase well, but most coverage is still unit/route-seam heavy.
+   - A small true E2E pass around:
+     - open `/chat`
+     - send a message
+     - produce widget
+     - confirm action
+     - reload / resume session
+     would materially reduce launch risk.
+
+2. **Cleanup of temporary compat / single-process assumptions**
+   - Most are acceptable today, but rollout architecture matters:
+     - some widget-slot coordination assumptions are still process-local
+     - some compat shims are intentionally temporary
+   - Fine for current shape; should not be forgotten if deployment scales out.
+
+3. **Client provisioning / support posture**
+   - External rollout needs answers for:
+     - how a new client is provisioned
+     - who configures Gmail / Taqnyat / templates
+     - what happens when credentials expire
+     - what support/debug data operators can actually see
+
+#### Bottom-line readiness framing
+
+- **Internal team / controlled pilot:** close
+- **External client rollout:** not there yet
+
+If I had to compress the remaining work into the smallest real production path, I would say the next mandatory sequence is:
+
+1. Runtime/deployment setup for the real backend
+2. Durable memory
+3. Client-facing `/chat` polish + onboarding/error pass
+4. Ops/observability/reliability tranche
+5. Explicit decision on inbound scope + channel parity before launch
+
 ### GPT re-audit - P14 close-out (`a76d2a4` + `ca437f7`)
 
 Verdict: **green light**. The earlier P14-M close-out blocker is now closed.
@@ -9190,3 +9374,82 @@ Deferred items (unchanged from the audit response; all either marginal, not-extr
 - P13-E.1 compat shim cleanup — out of scope for P14.
 
 Ready for re-audit.
+
+## P15-A — AI runtime readiness on /api/health (`d6c99e4`)
+
+First slice of the P15 tranche — response to GPT's production-readiness checkpoint at [Agent chat.md:5381](Agent%20chat.md:5381), specifically hard blocker #1:
+
+> Runtime/deployment setup must actually be real
+> - The current environment still is not chat-ready until the chosen runtime is configured.
+> - Need a production env standard for one live backend: Anthropic OR OpenRouter, secrets management, prod/staging parity, restart / deploy procedure.
+> - This is not optional; the screenshot already proved local readiness and code readiness are different things.
+
+### Why this slice
+
+GPT's audit of the P14 close-out flagged a gap between *code readiness* (the `/api/chat` route correctly emits 503 with a typed `reason` when the runtime env is missing) and *operational readiness* (ops has no way to confirm a deploy picked up the intended env without actually driving a `/api/chat` turn). A `/api/chat` probe from CI or a deploy-verify step is:
+
+- expensive — consumes provider tokens on every tick;
+- intrusive — allocates an SDK client and establishes a keepalive pool;
+- noisy — writes a `ChatMessage` row and a `ChatSession` if missing.
+
+A health-endpoint probe is the right shape: cheap, non-intrusive, and already polled by whatever upstream system watches the app. The existing `/api/health` already reports `db`, `email`, `sms` providers — adding `ai` is natural, small, and immediately actionable for ops.
+
+### Regression surfaces protected
+
+- **Side-effect-free probe** — the endpoint must not instantiate an Anthropic / OpenRouter client. Doing so would make liveness polling a provider-cost DoS vector and — for OpenRouter — would establish an HTTP pool with no corresponding request demand. The test harness pins this implicitly: the probe runs without any SDK mock or fetch stub, meaning it cannot be reaching out over the wire.
+- **Default branch stays anthropic** — unset `AI_RUNTIME` must report `name: "anthropic"`. A silent flip to `"openrouter"` as the default would route prod traffic through the wrong key and silently drain credit on whatever env happens to have an OpenRouter key set.
+- **Symbolic reason parity with the route's 503 contract** — `configured: false` carries the same `RuntimeResolutionError` codes the `/api/chat` route surfaces on failure, so dashboards and alert rules key on exactly one vocabulary. Drift between the two would fragment ops detection.
+- **"unknown" name discrimination** — typos in `AI_RUNTIME` (e.g. `"antropic"`, `"gpt-next"`) must report `name: "unknown"`, not silently fall back to the default. Ops reads the probe to spot env misconfigurations; masking them defeats the point.
+- **Empty-string ≡ missing** — empty-string key / model / name are treated as missing everywhere (`Boolean(x)` gate). A future tightening to `=== undefined` would silently accept empty strings and report `configured: true` for an unrunnable backend.
+- **Cross-branch pollution** — `AI_RUNTIME=anthropic` + OpenRouter env populated must NOT promote to `configured: true`. The probe does not opportunistically pick up OpenRouter vars when Anthropic is selected.
+- **Shape discipline** — `configured: true` response has NO `reason` field (clean success envelope); `configured: false` response ALWAYS has a `reason` (ops alert rules can `jq '.ai.reason'` without null guards).
+- **Optional analytics headers don't flip the gate** — `OPENROUTER_HTTP_REFERER` / `OPENROUTER_X_TITLE` are optional dashboards metadata; their absence must not flip `configured: true` to `false`.
+
+### Implementation
+
+**`src/lib/ai/runtime/index.ts`** — added `probeRuntimeConfig(env?)` export (~42 LOC including types) alongside the existing `resolveRuntime`. Mirrors the resolver's branch logic but short-circuits on env presence alone; never invokes `createAnthropicRuntime` / `createOpenRouterRuntime`. Same `RuntimeResolutionError` vocabulary, reused.
+
+```ts
+export type RuntimeProbe = {
+  name: "anthropic" | "openrouter" | "unknown";
+  configured: boolean;
+  reason?: RuntimeResolutionError;
+};
+
+export function probeRuntimeConfig(
+  env: RuntimeEnv = process.env as RuntimeEnv,
+): RuntimeProbe { ... }
+```
+
+**`src/app/api/health/route.ts`** — added `ai: probeRuntimeConfig()` to the response JSON. One-line addition; no behavior change for the `db` / `email` / `sms` fields.
+
+**`README.md`** — extended the "Operating notes" AI section with a line describing the `ai` block's fields and interpretation (what `reason` codes mean, explicit note that the probe is side-effect-free).
+
+### Test coverage breakdown
+
+`tests/unit/runtime-probe.test.ts` — 16 pins grouped by regression vector:
+
+- **Default branch** (2) — no `AI_RUNTIME` + Anthropic key → `configured: true`; no `AI_RUNTIME` + no key → `configured: false`, reason `anthropic_not_configured`.
+- **Anthropic branch** (3) — empty-string key ≡ missing; case-insensitive name normalization (`"AnThRoPiC"`); explicit name + key → configured.
+- **OpenRouter branch** (5) — key + model → configured; missing key → not configured; missing model → not configured; empty-string model ≡ missing; case-insensitive name normalization (`"OpenRouter"`).
+- **Unknown runtime** (2) — `"gpt-next"` → `name: "unknown"`, reason `unknown_runtime`; empty-string `AI_RUNTIME` → `name: "unknown"` (pin current behavior; a future revision that wants to treat empty as default trips this tripwire).
+- **Cross-branch pollution** (1) — unset `AI_RUNTIME` + OpenRouter env populated + no Anthropic key → reports `anthropic_not_configured`, not `configured: true`.
+- **Optional headers** (1) — `OPENROUTER_HTTP_REFERER` / `OPENROUTER_X_TITLE` present; does not flip the gate.
+- **Default param reads process.env** (1) — brief mutation with try/finally restore.
+- **Shape discipline** (2) — `configured: true` response has no `reason` field; `configured: false` always carries a `reason`.
+
+### Verification
+
+- `npx tsc --noEmit` — clean
+- `npm test` — **1351 / 1351 passing** (1335 → 1351 = +16 new pins)
+- Behavior parity: `/api/health` response body for the existing `db`/`email`/`sms` fields is byte-unchanged; only the new `ai` field is added.
+- No new dependencies; no SDK instantiation on the probe path.
+
+### What this does NOT cover (scope boundary)
+
+- **Provider reachability.** The probe reports env-level configuration. It does NOT confirm the key is valid or the provider is reachable. A valid-env + revoked-key combination still reports `configured: true`; the first `/api/chat` call would return a provider-side error. If we want provider-reachability health, it belongs at a separate endpoint (e.g. `/api/health/deep`) called on a much longer cadence so it doesn't drain credit.
+- **Deploy runbook.** A full deploy procedure (env rotation, staging/prod parity, rollback) is the next slice — P15-B covers the operator-side runbook that pairs with this probe.
+- **Env validation at boot.** Currently the app boots with missing keys and first surfaces the gap at `/api/chat` request time (and now at `/api/health` response time). A stricter fail-fast-at-boot posture (refuse to start in `NODE_ENV=production` when the selected runtime is not configured) is a separate slice if we want it.
+
+Ready for GPT audit.
+
