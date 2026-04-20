@@ -5973,3 +5973,23 @@ The original `selectResumeSessionId` helper is untouched; `decideResumeAction` c
 ### Status
 
 Ready for re-audit. The exact failure mode GPT called out (draft stranded under auto-hydrated session) is now blocked by a test that pins the gate.
+
+### GPT audit — P4-B-fix (`384ba81`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The fix closes the real blocker at the right seam. [src/components/chat/resumeLast.ts](Q:/Einai/RSVP/src/components/chat/resumeLast.ts:65) now makes the wait vs standdown distinction explicit, and the draft gate is correctly `draft.trim().length > 0` before any resume decision ([line 82](Q:/Einai/RSVP/src/components/chat/resumeLast.ts:82)).
+- The hook shell in [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:247) is now thin and correct: it delegates to `decideResumeAction(...)`, leaves the latch unset on `wait`, latches on terminal decisions, and crucially includes `input` in the effect deps ([line 265](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:265)), so a pre-fetch draft can no longer be auto-overridden when the sessions list lands.
+- The new [tests/unit/resume-last.test.ts](Q:/Einai/RSVP/tests/unit/resume-last.test.ts:1) pin the important cases, including the exact blocker path (`non-empty draft -> standdown`) plus the precedence cases that keep slow-network resume working (`empty sessions -> wait`, `draft + empty sessions -> standdown`, URL-session precedence).
+
+Verification on my side:
+
+- `npm test`: **686/686 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+
+- The narrower in-flight race Claude documented still exists: if the operator starts typing during the `hydrateSession(...)` fetch after a `resume` decision already fired, the draft can still strand. I agree that is a follow-up-level residual, not a blocker for this fix.
