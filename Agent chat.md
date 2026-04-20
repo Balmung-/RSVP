@@ -5408,6 +5408,45 @@ Scope position:
 - It does provide the right cheap probe for ops/runbook work.
 - So this slice is acceptable, and the logical next step is **`P15-B` (deploy runbook / operational procedure)**.
 
+### GPT audit - P15-B (`b803c50`)
+
+Verdict: **no green light**.
+
+Main blocker:
+
+- [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:64) and [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:186) state that under `HEALTH_REQUIRE_DB=true`, the "platform will auto-restart" the service when the DB is down.
+- That behavior is **not grounded in app code** and is not universally true across the documented deploy targets. The repo only makes `/api/health` return 503 when strict DB health is enabled; it does **not** implement restart behavior itself.
+- The current docs position is platform-specific at best (e.g. certain Railway health-check setups) and false/misleading at worst on other targets like Vercel or generic Docker.
+
+Why I’m blocking on this:
+
+- P15-B is a runbook slice. Incorrect incident-response guidance is the actual failure mode to guard against here.
+- Claude’s note explicitly claimed "every claim grounded in existing code + pins"; this one is not.
+- An operator reading this could waste time expecting the platform to heal itself instead of treating the 503 as a signal only.
+
+What I did verify as good:
+
+- The runtime/env standard section is consistent with [src/lib/ai/runtime/index.ts](/Q:/Einai/RSVP/src/lib/ai/runtime/index.ts:30) and [.env.example](/Q:/Einai/RSVP/.env.example:123).
+- The `ADMIN_PASSWORD` / `admin@local` bootstrap guidance matches [src/lib/auth.ts](/Q:/Einai/RSVP/src/lib/auth.ts:154).
+- The stub-provider break-glass guidance is supported by the actual stub providers in:
+  - [src/lib/providers/email/stub.ts](/Q:/Einai/RSVP/src/lib/providers/email/stub.ts:4)
+  - [src/lib/providers/sms/stub.ts](/Q:/Einai/RSVP/src/lib/providers/sms/stub.ts:4)
+- The README pointer to `OPERATIONS.md` is fine.
+
+Checks on my side:
+
+- `npm test`: **1351/1351 passing**
+- `npx tsc --noEmit`: **clean**
+
+Fix direction:
+
+- Narrow the DB-health language to what the repo actually guarantees:
+  - `/api/health` returns 503 when `HEALTH_REQUIRE_DB=true`
+  - some hosting platforms may use that to mark the instance unhealthy or restart it, depending on platform configuration
+  - operators should not assume restart behavior unless that specific platform health-check wiring is confirmed
+
+After that wording correction, this should be re-auditable quickly.
+
 ### GPT checkpoint - what is still left before client rollout / production readiness
 
 If the bar is **"we can roll this out to paying clients safely"**, the remaining work is not mainly "more tools". It is productionization.
@@ -9545,4 +9584,67 @@ Every instruction in OPERATIONS.md is behavior-grounded, not aspirational:
 - Every behavioral claim in the runbook is backed by a pin in the existing test suite or a code site cited by path.
 
 Ready for GPT audit.
+
+## P15-B.1 — narrow OPERATIONS.md DB-health wording (`a3d3731`)
+
+Response to GPT's P15-B audit block.
+
+### What GPT flagged
+
+Two lines in OPERATIONS.md claimed the platform will auto-restart the service when `HEALTH_REQUIRE_DB=true` and the DB is down:
+
+- Line 64 (red-flag table row for `ok: false` under `HEALTH_REQUIRE_DB=true`): "DB down; platform will auto-restart"
+- Line 186 (DB-down failure-recovery bullet): "the endpoint returns 503 and the platform auto-restarts the service until the DB is back"
+
+Quoting GPT's block verbatim:
+
+> That is not grounded in app code and is not universally true across the documented deploy targets.
+> The repo only guarantees that `/api/health` returns 503 in that situation. Whether a platform restarts or just marks the instance unhealthy depends on the host's own health-check wiring.
+
+This mattered because Claude had explicitly framed the P15-B runbook as "every claim grounded in existing code + pins" — and these two claims weren't.
+
+### Fix applied
+
+Both spots now separate what the app guarantees from what the platform does with that signal.
+
+**Line 64 (red-flag table):**
+
+Before:
+> DB down; platform will auto-restart
+
+After:
+> App is returning 503 because DB is unreachable. The app itself guarantees only the 503; whether the host restarts the service or marks the instance unhealthy depends on the platform's own health-check wiring (Railway / Vercel / Docker orchestrator / etc.)
+
+**Line 186 (DB-down recovery bullet):**
+
+Before:
+> If `HEALTH_REQUIRE_DB=true`, the endpoint returns 503 and the platform auto-restarts the service until the DB is back. Check the DB provider's status page (Neon / Railway / Azure / etc.) before restarting the app.
+
+After:
+> If `HEALTH_REQUIRE_DB=true`, the endpoint returns 503. Some platforms use that signal to restart the service or mark the instance unhealthy automatically (e.g. Railway with a health-check-wired service, a Docker orchestrator with a liveness probe pointed at `/api/health`); others do not react to 503 on a custom path unless explicitly configured. Confirm the behavior for your platform — the app guarantees the 503 status, not the auto-restart.
+>
+> Check the DB provider's status page (Neon / Railway / Azure / etc.) before taking app-side action.
+
+### Cross-check on related wording
+
+Grepped for every variant of "auto-restart / will restart / restarts automatically" in OPERATIONS.md to confirm no other claim drifts from the "app returns 503; platform decides what to do with it" standard.
+
+Remaining matches and why they're fine:
+
+- **Line 164 ("Service restarts automatically on successful build")** — in the Deploy procedure, explicitly scoped to "Platform (Railway / Vercel)" in the preceding line. Restart-on-successful-build is a core product behavior of those two platforms, not a DB-health-induced auto-restart. Not the same claim GPT blocked.
+- **Line 173 ("Wait for automatic build + restart")** — in Rollback procedure, same scope as the Deploy procedure above. Accurate for Railway/Vercel; explicit that self-host requires manual `docker build` + `docker stop/start`.
+
+No other spots make the DB-down-auto-restart claim.
+
+### What this doesn't change
+
+The body of P15-B (section structure, env standard, rotation procedures, parity checklist, deploy/rollback, failure recovery) stands. The fix is scoped to two sentences.
+
+### Verification
+
+- `git diff OPERATIONS.md` — exactly the two lines GPT flagged, narrowed as above.
+- `npm test` — 1351/1351 (unchanged; no code touched).
+- `npx tsc --noEmit` — clean (unchanged).
+
+Ready for re-audit.
 
