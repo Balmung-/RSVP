@@ -45,15 +45,21 @@ Stub mode logs outgoing messages to the server console — the full send/track/R
 
 Everything runs in `stub` mode by default. Flip one env var, redeploy:
 
-| Channel | `EMAIL_PROVIDER` / `SMS_PROVIDER` | Required env                                                |
-| ------- | --------------------------------- | ----------------------------------------------------------- |
-| Email   | `sendgrid`                        | `SENDGRID_API_KEY`                                          |
-| Email   | `resend`                          | `RESEND_API_KEY`                                            |
-| SMS     | `twilio`                          | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`    |
-| SMS     | `unifonic` (SA)                   | `UNIFONIC_APP_SID`, `UNIFONIC_SENDER_NAME`                  |
-| SMS     | `msegat` (SA)                     | `MSEGAT_API_KEY`, `MSEGAT_USERNAME`, `SMS_SENDER_ID`        |
+| Channel  | `EMAIL_PROVIDER` / `SMS_PROVIDER` / `WHATSAPP_PROVIDER` | Required env                                                |
+| -------- | ------------------------------------------------------- | ----------------------------------------------------------- |
+| Email    | `sendgrid`                                              | `SENDGRID_API_KEY`                                          |
+| Email    | `resend`                                                | `RESEND_API_KEY`                                            |
+| SMS      | `twilio`                                                | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`    |
+| SMS      | `unifonic` (SA)                                         | `UNIFONIC_APP_SID`, `UNIFONIC_SENDER_NAME`                  |
+| SMS      | `msegat` (SA)                                           | `MSEGAT_API_KEY`, `MSEGAT_USERNAME`, `SMS_SENDER_ID`        |
+| SMS      | `taqnyat` (SA)                                          | `TAQNYAT_SMS_TOKEN`, `TAQNYAT_SMS_SENDER`                   |
+| WhatsApp | `taqnyat` (SA)                                          | `TAQNYAT_WHATSAPP_TOKEN`, optional `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` |
 
-Add a new provider: one file in `src/lib/providers/{email,sms}/<name>.ts` implementing the interface, one case in `src/lib/providers/index.ts`.
+WhatsApp runs as its own channel via `WHATSAPP_PROVIDER` (default `stub`), separate from `SMS_PROVIDER`. The `SMS_PROVIDER=whatsapp-twilio` legacy alias sends session-text-only over the Twilio WhatsApp number and is retained for pre-P11 callers.
+
+Taqnyat delivery-status callbacks hit `/api/webhooks/taqnyat/delivery/{sms,whatsapp}` — wire `TAQNYAT_WEBHOOK_SECRET` (`openssl rand -hex 32`) as the shared bearer and configure the matching webhook in the Taqnyat console.
+
+Add a new provider: one file in `src/lib/providers/{email,sms,whatsapp}/<name>.ts` implementing the interface, one case in `src/lib/providers/index.ts`.
 
 ## Deployment — alternatives
 

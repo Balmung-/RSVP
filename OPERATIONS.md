@@ -98,7 +98,7 @@ Encrypts Gmail OAuth tokens at rest. Rotating invalidates every stored token —
 3. Restart.
 4. Notify admins to re-connect.
 
-### Webhook secrets (`WEBHOOK_SIGNING_SECRET`, `INBOUND_WEBHOOK_SECRET`, `CRON_SECRET`)
+### Webhook secrets (`WEBHOOK_SIGNING_SECRET`, `INBOUND_WEBHOOK_SECRET`, `TAQNYAT_WEBHOOK_SECRET`, `CRON_SECRET`)
 
 Each secret has a provider-side relay that must be updated in lockstep. Schedule rotation during low-traffic hours — requests signed with the old secret between app restart and relay update will be dropped.
 
@@ -106,8 +106,9 @@ Each secret has a provider-side relay that must be updated in lockstep. Schedule
 2. Update the platform secret.
 3. Restart.
 4. Update the provider-side sender:
-   - `WEBHOOK_SIGNING_SECRET` → delivery-status relay (SendGrid/Resend/Twilio event webhook wrapper).
-   - `INBOUND_WEBHOOK_SECRET` → inbound-parse sender (SendGrid Inbound Parse header, Taqnyat webhook `x-inbound-secret` or `?key=`).
+   - `WEBHOOK_SIGNING_SECRET` → generic delivery-status relay at `/api/webhooks/delivery` (SendGrid/Resend/Twilio event webhook wrapper that re-signs the body with HMAC).
+   - `INBOUND_WEBHOOK_SECRET` → generic inbound-parse sender at `/api/webhooks/inbound/{email,sms}` (SendGrid Inbound Parse header, inbound SMS webhook `x-inbound-secret` or `?key=`).
+   - `TAQNYAT_WEBHOOK_SECRET` → Taqnyat DLR webhook configured at `/api/webhooks/taqnyat/delivery/{sms,whatsapp}`. Distinct from the two above — validates Taqnyat's delivery callbacks via bearer, fails closed (503 not_configured) if unset. Update the corresponding webhook URL + secret in the Taqnyat console.
    - `CRON_SECRET` → scheduler (Railway cron command, Vercel cron, GH Actions, cron-job.org).
 
 ---
@@ -119,7 +120,7 @@ Environments **should** differ in exactly these vars:
 - `DATABASE_URL` — separate DBs
 - `APP_URL` — different hostnames
 - `SESSION_SECRET`, `OAUTH_ENCRYPTION_KEY` — distinct random values (compromise in one does not compromise the other)
-- `WEBHOOK_SIGNING_SECRET`, `INBOUND_WEBHOOK_SECRET`, `CRON_SECRET` — distinct random values
+- `WEBHOOK_SIGNING_SECRET`, `INBOUND_WEBHOOK_SECRET`, `TAQNYAT_WEBHOOK_SECRET`, `CRON_SECRET` — distinct random values
 - Possibly `EMAIL_FROM` and `SMS_SENDER_ID` if you want staging sends visibly marked
 
 Everything else **should** be identical between staging and prod:
