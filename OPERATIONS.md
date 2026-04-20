@@ -61,7 +61,7 @@ Red-flag rules (all indicate a deploy problem, not a runtime bug):
 | `ai.configured: false`, `reason: "openrouter_not_configured"` | Missing `OPENROUTER_API_KEY` or `OPENROUTER_MODEL` (both required) | Set both secrets, restart, recheck |
 | `ai.configured: false`, `reason: "unknown_runtime"` | `AI_RUNTIME` is set to a typo (resolver is strict, case-insensitive) | Valid values: `anthropic`, `openrouter`, or unset (defaults to `anthropic`). Correct + restart |
 | `db: "down"` with error | Network to Postgres is broken, or `DATABASE_URL` has drifted | Verify `DATABASE_URL` in platform secrets matches the live DB. If DB rotated password, update secret + restart |
-| `ok: false` under `HEALTH_REQUIRE_DB=true` | DB down; platform will auto-restart | Address the DB before investigating the app |
+| `ok: false` under `HEALTH_REQUIRE_DB=true` | App is returning 503 because DB is unreachable. The app itself guarantees only the 503; whether the host restarts the service or marks the instance unhealthy depends on the platform's own health-check wiring (Railway / Vercel / Docker orchestrator / etc.) | Address the DB before investigating the app |
 
 The AI probe is **side-effect-free** — it reports env presence only, not provider reachability. `ai.configured: true` + real `/api/chat` 5xx means the key is present but invalid or the provider is unreachable (see §6).
 
@@ -183,7 +183,8 @@ The app has no forward-only runtime state; a code rollback is safe.
 ### DB down
 
 - `/api/health` reports `db: "down"` with `dbError` populated.
-- If `HEALTH_REQUIRE_DB=true`, the endpoint returns 503 and the platform auto-restarts the service until the DB is back. Check the DB provider's status page (Neon / Railway / Azure / etc.) before restarting the app.
+- If `HEALTH_REQUIRE_DB=true`, the endpoint returns 503. Some platforms use that signal to restart the service or mark the instance unhealthy automatically (e.g. Railway with a health-check-wired service, a Docker orchestrator with a liveness probe pointed at `/api/health`); others do not react to 503 on a custom path unless explicitly configured. Confirm the behavior for your platform — the app guarantees the 503 status, not the auto-restart.
+- Check the DB provider's status page (Neon / Railway / Azure / etc.) before taking app-side action.
 - If the DB is reachable from a laptop but not from the app, check for `DATABASE_URL` drift: different network, wrong password after rotation, pooled vs direct URL mix-up.
 
 ### AI provider down
