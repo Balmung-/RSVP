@@ -141,6 +141,14 @@ export const proposeSendTool: ToolDef<Input> = {
         subjectEmail: true,
         templateEmail: true,
         templateSms: true,
+        // WhatsApp template discipline: `computeBlockers` needs
+        // both fields to emit `no_whatsapp_template` when the
+        // channel set includes WhatsApp and the template is not
+        // fully configured. Harmless for the email/SMS paths —
+        // the blocker helper only reads these when the channel
+        // set includes whatsapp.
+        templateWhatsAppName: true,
+        templateWhatsAppLanguage: true,
         teamId: true,
       },
     });
@@ -224,6 +232,8 @@ export const proposeSendTool: ToolDef<Input> = {
         status: campaign.status,
         templateEmail: campaign.templateEmail,
         templateSms: campaign.templateSms,
+        templateWhatsAppName: campaign.templateWhatsAppName,
+        templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
       },
       audience,
       channel,

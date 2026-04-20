@@ -122,6 +122,15 @@ export const sendCampaignTool: ToolDef<Input> = {
         name: true,
         templateEmail: true,
         templateSms: true,
+        // Needed by `computeBlockers` to emit `no_whatsapp_template`
+        // when the channel set includes WhatsApp. Selected
+        // unconditionally here (rather than gated on channel) so
+        // the blocker helper's server-side re-check is complete
+        // regardless of what `channel` the caller asked for — a
+        // forged/rehydrated POST asking for "whatsapp" still hits
+        // the blocker path correctly.
+        templateWhatsAppName: true,
+        templateWhatsAppLanguage: true,
       },
     });
     if (!campaign) {
@@ -193,6 +202,8 @@ export const sendCampaignTool: ToolDef<Input> = {
         status: campaign.status,
         templateEmail: campaign.templateEmail,
         templateSms: campaign.templateSms,
+        templateWhatsAppName: campaign.templateWhatsAppName,
+        templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
       },
       audience,
       channel,

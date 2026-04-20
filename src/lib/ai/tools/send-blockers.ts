@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { channelSetFor, type SendCampaignChannel } from "@/lib/campaigns";
 
 // Shared blocker truth for the propose_send → ConfirmSend →
 // send_campaign path.
@@ -30,14 +31,29 @@ import { prisma } from "@/lib/db";
 // It takes pre-loaded data so the caller can batch the audience
 // load with its other reads.
 
-export type Channel = "email" | "sms" | "both";
+// Channel vocabulary matches `SendCampaignChannel` — single source
+// of truth. See `src/lib/campaigns.ts` for the type + the
+// `channelSetFor(...)` resolver. Narrower callers (e.g. an older
+// AI tool that still only accepts "email" | "sms" | "both") pass
+// a subtype through; the helper stays channel-shape-agnostic.
+export type Channel = SendCampaignChannel;
 
 // Narrow campaign shape — only the fields this helper reads.
 // Callers select these explicitly so the Prisma cost is visible.
+//
+// WhatsApp fields (templateWhatsAppName + templateWhatsAppLanguage)
+// are both required for the planner to take the template path. We
+// treat the campaign as "WhatsApp-configured" iff both are set and
+// non-empty — matches `decideWhatsAppMessage`'s Rule 1 predicate.
+// Stored here rather than derived from a boolean so the blocker
+// code can stay stateless, and so the tool layer's Prisma selects
+// are visible in one place.
 export type CampaignForBlockers = {
   status: string;
   templateEmail: string | null;
   templateSms: string | null;
+  templateWhatsAppName: string | null;
+  templateWhatsAppLanguage: string | null;
 };
 
 // Narrow invitee shape. `invitations` is an array of
@@ -111,14 +127,30 @@ function hasReadyMessage(args: {
   onlyUnsent: boolean;
 }): boolean {
   const { invitees, unsubEmails, unsubPhones, channel, onlyUnsent } = args;
-  const wantsEmail = channel === "email" || channel === "both";
-  const wantsSms = channel === "sms" || channel === "both";
+  // Use the shared channel-set resolver so "both" / "all" / scalar
+  // channels all collapse to the same concrete Set the real send
+  // would use. A drift here would mean the blocker says "ready" but
+  // the send finds no jobs, or vice versa.
+  const chans = channelSetFor(channel);
+  const wantsEmail = chans.has("email");
+  const wantsSms = chans.has("sms");
+  // WhatsApp shares phoneE164 + the unsubscribed-phone set with SMS.
+  // The unsubscribe table doesn't distinguish SMS-vs-WhatsApp today
+  // (one `phoneE164` column, no `channel` discriminator), so an
+  // invitee who opts out via SMS STOP is considered unsubscribed for
+  // WhatsApp too. That's the conservative default: a recipient who
+  // asked not to receive messages on their phone shouldn't be
+  // switched to a different channel hitting the same phone.
+  const wantsWhatsApp = chans.has("whatsapp");
   for (const inv of invitees) {
     const hasEmailSent = inv.invitations.some(
       (x) => x.channel === "email" && x.status !== "failed",
     );
     const hasSmsSent = inv.invitations.some(
       (x) => x.channel === "sms" && x.status !== "failed",
+    );
+    const hasWhatsAppSent = inv.invitations.some(
+      (x) => x.channel === "whatsapp" && x.status !== "failed",
     );
     if (
       wantsEmail &&
@@ -132,6 +164,14 @@ function hasReadyMessage(args: {
       wantsSms &&
       inv.phoneE164 &&
       !(onlyUnsent && hasSmsSent) &&
+      !unsubPhones.has(inv.phoneE164)
+    ) {
+      return true;
+    }
+    if (
+      wantsWhatsApp &&
+      inv.phoneE164 &&
+      !(onlyUnsent && hasWhatsAppSent) &&
       !unsubPhones.has(inv.phoneE164)
     ) {
       return true;
@@ -162,8 +202,10 @@ export function computeBlockers(args: {
   onlyUnsent: boolean;
 }): string[] {
   const { campaign, audience, channel, onlyUnsent } = args;
-  const wantsEmail = channel === "email" || channel === "both";
-  const wantsSms = channel === "sms" || channel === "both";
+  const chans = channelSetFor(channel);
+  const wantsEmail = chans.has("email");
+  const wantsSms = chans.has("sms");
+  const wantsWhatsApp = chans.has("whatsapp");
   const sendableStatuses = new Set(["draft", "active"]);
 
   const blockers: string[] = [];
@@ -188,6 +230,20 @@ export function computeBlockers(args: {
   }
   if (wantsSms && !campaign.templateSms) {
     blockers.push("no_sms_template");
+  }
+  // WhatsApp "configured" means BOTH name and language are set and
+  // non-empty — mirrors `decideWhatsAppMessage`'s Rule 1 predicate
+  // (`src/lib/providers/whatsapp/sendPlan.ts:92-96`). Emitting
+  // `no_whatsapp_template` when either is missing matches what the
+  // planner would actually do at send time: refuse with
+  // `reason: "no_template"`. Surfacing the blocker here means the
+  // operator sees the problem in the ConfirmSend card rather than
+  // getting a wall of failed Invitation rows after clicking.
+  if (
+    wantsWhatsApp &&
+    (!campaign.templateWhatsAppName || !campaign.templateWhatsAppLanguage)
+  ) {
+    blockers.push("no_whatsapp_template");
   }
   return blockers;
 }
