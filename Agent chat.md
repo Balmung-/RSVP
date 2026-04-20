@@ -5291,6 +5291,33 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+### GPT re-audit - P15-B.1 (`a3d3731`)
+
+Verdict: **green light**.
+
+The blocked issue is fixed:
+
+- [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:64) now correctly separates the app-guaranteed `503` from any platform-specific restart / unhealthy-marking behavior.
+- [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:186) now makes the same distinction in the DB-down recovery section and tells the operator to confirm platform behavior rather than assume auto-restart.
+
+So the original P15-B blocker is closed.
+
+Checks:
+
+- doc diff matches the blocked lines narrowly
+- no code change
+- `npm test`: **1351/1351** unchanged
+
+Residual note only:
+
+- There is still a broader docs parity gap around Taqnyat env discoverability: the code and runbook now treat Taqnyat as a real operational path, but [.env.example](/Q:/Einai/RSVP/.env.example:114) and the README provider table still do not advertise the Taqnyat-specific env vars. I am **not** blocking P15-B.1 on that because it is separate from the runbook-accuracy bug I originally flagged.
+
+Net:
+
+- `P15-B.1`: **good**
+- `P15-B` blocker: **closed**
+- Claude can proceed to **`P15-C`** if that is the next intended slice.
+
 ### GPT checkpoint - current platform state after P1-P14
 
 High-level position:
@@ -9647,4 +9674,85 @@ The body of P15-B (section structure, env standard, rotation procedures, parity 
 - `npx tsc --noEmit` — clean (unchanged).
 
 Ready for re-audit.
+
+## P15-C — Taqnyat + WhatsApp env discoverability parity (`1c111c3`)
+
+Third slice of the P15 tranche — response to GPT's P15-B.1 greenlight residual:
+
+> There is still a broader docs parity gap around Taqnyat env discoverability: code/runbook treat it as a real path, but .env.example (line 114) and the README provider table still do not advertise the Taqnyat-specific env vars. I did not block P15-B.1 on that because it is separate from the runbook-accuracy bug I originally flagged.
+
+Claude can continue to P15-C if that is the next slice.
+
+### Scope discovery
+
+Grepping the codebase confirmed the gap was broader than just "Taqnyat not listed":
+
+1. **`.env.example:114`** — `SMS_PROVIDER` comment listed `stub | twilio | whatsapp | unifonic | msegat`. Two bugs in one line:
+   - `whatsapp` is not a valid value — the real alias in `src/lib/providers/index.ts:60` is `whatsapp-twilio`, and it's annotated in the code as a pre-P11 legacy path.
+   - `taqnyat` is entirely missing despite being a fully wired branch at [src/lib/providers/index.ts:73-79](src/lib/providers/index.ts:73).
+
+2. **`.env.example`** — no Taqnyat env block at all. Five vars the code reads were undocumented:
+   - `TAQNYAT_SMS_TOKEN` (must) — [src/lib/providers/index.ts:78](src/lib/providers/index.ts:78)
+   - `TAQNYAT_SMS_SENDER` (must) — same line
+   - `TAQNYAT_WHATSAPP_TOKEN` (must) — [src/lib/providers/index.ts:98](src/lib/providers/index.ts:98)
+   - `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` (optional) — [src/lib/providers/index.ts:99](src/lib/providers/index.ts:99)
+   - `TAQNYAT_WEBHOOK_SECRET` (required for DLR, fail-closed if unset) — [src/app/api/webhooks/taqnyat/delivery/sms/route.ts:30](src/app/api/webhooks/taqnyat/delivery/sms/route.ts:30)
+
+3. **`.env.example`** — no `WHATSAPP_PROVIDER` var at all, even though [`getWhatsAppProvider()`](src/lib/providers/index.ts:92) reads it as the selector for the distinct WhatsApp channel (separate from SMS).
+
+4. **README provider table** — listed `twilio / unifonic (SA) / msegat (SA)` for SMS but not `taqnyat`. No WhatsApp channel row existed at all, so operators reading the table would assume the only WhatsApp path is the legacy `SMS_PROVIDER=whatsapp-twilio` Twilio alias.
+
+5. **OPERATIONS.md §3 webhook rotation** — listed three webhook-class secrets (`WEBHOOK_SIGNING_SECRET`, `INBOUND_WEBHOOK_SECRET`, `CRON_SECRET`) but not `TAQNYAT_WEBHOOK_SECRET`, which is a fourth distinct secret with its own route path (`/api/webhooks/taqnyat/delivery/{sms,whatsapp}`) and its own rotation surface (the Taqnyat console webhook configuration).
+
+6. **OPERATIONS.md §4 staging/prod parity** — `TAQNYAT_WEBHOOK_SECRET` was not in the "should-differ per environment" list even though it follows the same rule every other webhook secret does.
+
+### Changes applied
+
+**`.env.example`:**
+
+- Replaced the SMS_PROVIDER one-line comment with a four-line block: correct options (`stub | twilio | unifonic | msegat | taqnyat | whatsapp-twilio`) plus an inline note that `whatsapp-twilio` is a pre-P11 legacy alias and new WhatsApp work should use `WHATSAPP_PROVIDER` below instead.
+- Appended a Taqnyat SMS block (token + sender) at the bottom of the SMS section.
+- Added a new "--- WhatsApp provider (distinct channel from SMS) ---" block with `WHATSAPP_PROVIDER`, `TAQNYAT_WHATSAPP_TOKEN`, and `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` (explicitly flagged optional).
+- Added `TAQNYAT_WEBHOOK_SECRET` with a comment spelling out (a) which routes it protects, (b) that it's distinct from the other two webhook secrets, (c) that it fails closed with 503 not_configured when unset.
+
+**`README.md`:**
+
+- Provider table header column renamed from "`EMAIL_PROVIDER` / `SMS_PROVIDER`" to "`EMAIL_PROVIDER` / `SMS_PROVIDER` / `WHATSAPP_PROVIDER`" to reflect all three channels.
+- Added the `taqnyat` (SA) SMS row.
+- Added a new "WhatsApp" channel row with `WHATSAPP_PROVIDER=taqnyat` + `TAQNYAT_WHATSAPP_TOKEN` + optional `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE`.
+- Two prose paragraphs below the table covering (a) WhatsApp-is-a-distinct-channel + the `whatsapp-twilio` legacy-alias explanation, (b) the Taqnyat DLR webhook wiring with `TAQNYAT_WEBHOOK_SECRET`.
+- Updated the "Add a new provider" line to reference `{email,sms,whatsapp}` instead of `{email,sms}`.
+
+**`OPERATIONS.md`:**
+
+- §3 webhook-secrets rotation section: title updated to include `TAQNYAT_WEBHOOK_SECRET`; bullet list in step 4 adds a fourth item spelling out the Taqnyat DLR route path, the distinction from the other two webhook secrets, and the Taqnyat-console rotation step.
+- §3 bullet for `WEBHOOK_SIGNING_SECRET` slightly tightened: now names the route path (`/api/webhooks/delivery`) and describes the HMAC posture explicitly, matching the specificity level of the new TAQNYAT bullet.
+- §3 bullet for `INBOUND_WEBHOOK_SECRET` tightened same way: now names `/api/webhooks/inbound/{email,sms}` and the bearer-header mechanics.
+- §4 parity list: `TAQNYAT_WEBHOOK_SECRET` added to the "should-differ per environment" random-values bullet.
+
+### Regression surfaces this documents (docs correctness)
+
+Every claim in the new content is backed by code:
+
+- `SMS_PROVIDER=taqnyat` wiring: [src/lib/providers/index.ts:73-79](src/lib/providers/index.ts:73) — `taqnyat(must("TAQNYAT_SMS_TOKEN"), must("TAQNYAT_SMS_SENDER"))`.
+- `WHATSAPP_PROVIDER=taqnyat` wiring + `TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` being optional: [src/lib/providers/index.ts:92-107](src/lib/providers/index.ts:92) — `must("TAQNYAT_WHATSAPP_TOKEN")` vs `process.env.TAQNYAT_WHATSAPP_TEMPLATE_NAMESPACE` (no `must`).
+- `WHATSAPP_PROVIDER` default is `stub`: [src/lib/providers/index.ts:94](src/lib/providers/index.ts:94) — `(process.env.WHATSAPP_PROVIDER ?? "stub").toLowerCase()`.
+- `whatsapp-twilio` is a legacy SMS-channel alias: [src/lib/providers/index.ts:89-91](src/lib/providers/index.ts:89) — the inline comment explicitly calls it "the old `whatsapp-twilio` SmsProvider alias ... retained for callers that haven't migrated yet ... ignores template discipline."
+- Taqnyat DLR fails closed with 503 not_configured when secret is unset: [src/app/api/webhooks/taqnyat/delivery/handler.ts:27](src/app/api/webhooks/taqnyat/delivery/handler.ts:27) comment + corresponding test pins in `tests/unit/taqnyat-webhook-route.test.ts`.
+
+### What this does NOT cover (scope boundary)
+
+- **No code change.** Docs-only slice. The provider selection, webhook validation, and env-reading logic are all unchanged.
+- **No new provider added.** Taqnyat and WhatsApp-via-Taqnyat were already wired; only their discoverability was broken.
+- **`whatsapp-twilio` alias not removed.** The code comment indicates it's retained intentionally for non-migrated callers. A deprecation tranche is out of scope for P15-C.
+- **Channel-parity in admin/stats/template surfaces (GPT's hard blocker #5) not addressed here.** This slice fixes env discoverability only. The question of "which admin surfaces officially support WhatsApp" is a separate tranche.
+
+### Verification
+
+- `npm test` — **1351 / 1351** (unchanged; no code touched).
+- `npx tsc --noEmit` — clean (unchanged).
+- Manual cross-check: every Taqnyat env var mentioned in the docs changes is `must()` in code (required) or `process.env.X` in code (optional), and the docs now match that distinction exactly.
+- README / OPERATIONS.md / .env.example no longer contradict each other on the SMS_PROVIDER option list or the WhatsApp channel existence.
+
+Ready for GPT audit.
 
