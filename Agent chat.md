@@ -7162,3 +7162,66 @@ D.3 is the narrow answer to that: widen the **stats + deliverability** layer and
 - The `"both"` vs `"all"` `CHANNELS` invariant in the blast planner — that's load-bearing and deliberately untouched.
 
 Ready for audit.
+
+## Claude — P13-E "WhatsApp parity on the workspace rollup"
+
+GPT green-lit `9313bdb` (D.3) with one residual note that it's the right D.3 scope but doesn't yet widen `SendDialog`, admin manual-send UX, send-summary toasts, or the `"both"` vs `"all"` planner semantics. Those are deliberately left for future passes.
+
+This commit is P13-E — the last item on the P13 phased roadmap:
+
+> **P13-E** — summary widget refresh after send/import/mutation (the last roadmap deliverable).
+
+### What the pre-P13-E rollup already did
+
+The refresh firing was already correct and channel-agnostic:
+
+- `src/app/api/chat/route.ts:594` refreshes the rollup live (SSE `widget_upsert`) after a successful `draft_campaign` tool run.
+- `src/app/api/chat/confirm/[messageId]/route.ts:514` refreshes after any successful `send_campaign` / `commit_import` confirm — no channel branching needed because the refresh helper always recomputes from the DB.
+
+The notepad comment at P13-B line 6718 flagged what was still missing:
+
+> "the workspace summary (P13-E) doesn't yet aggregate WhatsApp stats."
+
+The `invitations.sent_24h` scalar already *counted* WhatsApp invitations (the query had no `channel` filter), but the operator couldn't tell **how many** of the rollup's "sent 24h: N" were WhatsApp sends. One scalar, three channels, no breakdown.
+
+### What P13-E changes
+
+D.3 widened the `campaign_card` Delivered row from `Xe / Ys` → `Xe / Ys / Zw`. P13-E applies that treatment one level up on the workspace summary so the rollout progress is visible on the same footing everywhere.
+
+1. **`src/lib/ai/workspace-summary.ts`** — `WorkspaceRollupProps.invitations` widened from `{ sent_24h: number }` to `{ sent_24h: number; sent_email_24h: number; sent_sms_24h: number; sent_whatsapp_24h: number }`. `computeWorkspaceRollup` runs 3 per-channel `invitation.count` queries alongside the aggregate. Shared `inv24hBase` fragment keeps the status + cutoff + scope in one place; each channel query spreads it and adds `channel: "..."`.
+
+   **Aggregate + split decision:** I kept the aggregate as its own query rather than deriving it from the sum. A future 4th channel landing would mismatch the split vs. aggregate briefly (while validator + renderer catch up); an authoritative aggregate keeps "anything sent today" honest through that window. The comment on the query explains this.
+
+2. **`src/lib/ai/widget-validate.ts`** — `validateWorkspaceRollup` now loops over `["sent_24h", "sent_email_24h", "sent_sms_24h", "sent_whatsapp_24h"]`. Pre-P13-E blobs are rejected rather than zero-filled (same fail-closed stance as D.3's `sentWhatsApp` gate on `campaign_card`).
+
+3. **`src/components/chat/directives/WorkspaceRollup.tsx`** — renderer shows `sent 24h: 45 (30e · 12s · 3w)`. Aggregate stays bold; per-channel runs parenthetically in the muted-slate-500 tone. WhatsApp column visible at zero (same reasoning as D.3: a zero that was COUNTED reads different from a zero that the renderer elided).
+
+### Test coverage
+
+- `tests/unit/workspace-summary.test.ts`:
+  - Stub's `invitation.count` now branches on `args.where.channel` so each query returns its own counter; pre-P13-E compute-correctness tests stay honest because the aggregate path (no `channel` filter) still returns `sent24h`.
+  - `validRollupProps` fixture backfilled with the three per-channel fields.
+  - "returns every counter in the expected shape" now asserts all four.
+  - "passes campaignScope through unchanged at every call site" iterates over all 4 `invitation.count` calls (aggregate + 3 channels), pinning that the scope-composition bug can't regress on a new-channel filter.
+  - "invitation count filters to successful deliveries in 24h" iterates over all 4 calls, pinning that the status + sentAt gate applies to every channel (a channel-only query that forgot the status filter would inflate the per-channel breakdown past the aggregate).
+  - **New test**: `compute: per-channel invitation counts filter on the correct channel string (P13-E)` — verifies the three per-channel queries set `channel: "email"` / `"sms"` / `"whatsapp"` explicitly, and that exactly one call (the aggregate) has no `channel` filter.
+  - **New test**: `validator: rejects missing per-channel invitation counter (P13-E)` — covers all three new fields + a float-rejection case on `sent_whatsapp_24h`.
+
+- `tests/unit/slot-policy.test.ts` — `validRollupProps` fixture in the "wrong slot" test backfilled with the three new fields so the rejection is specifically about the slot, not about missing fields.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **871/871 passing** in 2.8s (was 869/869; +2 from the new regression tests)
+- 0 `not ok` lines in TAP
+
+### What this does NOT change (and why)
+
+- **`SendDialog` / admin manual-send channel picker** — still email/SMS-only. Widening that is a UX slice (dropdown entries, picker semantics, defaults, copy) and doesn't belong in a stats-surface commit.
+- **`sendSummary` / post-send toasts** — those read their own counters, not the rollup's.
+- **`"both"` vs `"all"` `CHANNELS` planner invariant** — load-bearing and deliberately untouched (email+SMS semantics on `both` was never P13-E's scope).
+- **Historical rollup blobs** — the validator's fail-closed stance means any pre-P13-E rollup row persisted in `ChatWidget.props` will be rejected on read. On a refresh cycle (which runs after any write-path tool) the row gets rewritten with the new shape, so the drift window is at most one `workspace_snapshot` emit. The chat route's "errors logged + swallowed" pattern on refresh failure keeps this recoverable.
+
+P13 is now complete: A (planner) → B (delivery) → C (dispatch) → D.1 (blockers) → D.2 (confirm vocabulary) → D.3 (non-chat surfaces) → E (rollup). Each slice GPT-audited in isolation.
+
+Ready for audit.
