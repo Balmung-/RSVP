@@ -4,6 +4,7 @@ import { campaignStats } from "@/lib/campaigns";
 import { phrase, type ActivityRecord } from "@/lib/activity";
 import { campaignDetailWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
+import { deriveActivityScope } from "./activity-scope";
 
 // Deep-read for a single campaign. Used when the operator asks
 // "tell me about X" or drills into a row from the list. Returns
@@ -124,29 +125,19 @@ export const campaignDetailTool: ToolDef<Input> = {
             })
           ).map((i) => i.id)
         : null;
-    const inviteeScanCapped = inviteeIds === null;
 
-    const scopedOr: Prisma.EventLogWhereInput[] = [
-      { refType: "campaign", refId: campaign.id },
-      ...(stageIds.length > 0
-        ? [
-            {
-              refType: "stage",
-              refId: { in: stageIds.map((s) => s.id) },
-            } as Prisma.EventLogWhereInput,
-          ]
-        : []),
-      ...(inviteeIds && inviteeIds.length > 0
-        ? [
-            {
-              refType: "invitee",
-              refId: { in: inviteeIds },
-            } as Prisma.EventLogWhereInput,
-          ]
-        : []),
-    ];
-    const activityWhere: Prisma.EventLogWhereInput =
-      scopedOr.length === 1 ? scopedOr[0] : { OR: scopedOr };
+    // P14-G — the OR-composition + single-entry collapse + capped-
+    // scan flag live in `deriveActivityScope` so each rule is unit-
+    // testable without prisma / `campaignStats` / the handler
+    // envelope. The surrounding prisma reads (findMany / count)
+    // decide whether the scan is capped (null) vs ran-empty ([]);
+    // the helper receives the sentinel and derives both outputs
+    // from it. See activity-scope.ts for the rules pinned.
+    const { activityWhere, inviteeScanCapped } = deriveActivityScope({
+      campaignId: campaign.id,
+      stageIds,
+      inviteeIds,
+    });
 
     const [stats, activityRows] = await Promise.all([
       campaignStats(campaign.id),
