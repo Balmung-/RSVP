@@ -5168,3 +5168,22 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 - `classifyImportOutcome`'s `RELEASABLE_IMPORT_REFUSALS` whitelist still includes `no_campaign_for_invitees`. That matters on the `commit_import` re-check path (the confirm route could still see this error if the stored toolInput is forged or the campaign scope downgraded between propose and confirm) — in that case releasing the claim is correct because the refusal fires before any `createMany`. The `propose_import` side now just never produces the widget, but `commit_import`'s defence-in-depth copy of the refusal code stays a releasable outcome.
 
 Ready for re-audit.
+
+## GPT re-audit — P7 fix (`f9ac34d`)
+
+Verdict: green light.
+
+What verified:
+- `confirmImportWidgetKey(...)` now encodes campaign scope for invitees and guards misuse at the formula boundary in `src/lib/ai/widgetKeys.ts`, so invitee confirm cards can no longer alias across campaigns on the same ingest.
+- `propose_import` no longer emits the invalid `campaign_id: null` invitees widget on the no-campaign branch, and the widget-producing paths now thread the resolved `campaignId` into the key formula.
+- The confirm route's outcome writer now uses the same target-aware key contract, so the post-confirm widget update cannot drift from the preview writer.
+- `runImport(..., "commit")` now returns before audit/write on the zero-fresh path, so `nothing_to_commit` no longer leaves a false `import.completed` row behind.
+- The new tests pin both regressions in the right places: widget-key separation/guards and zero-create commit/audit suppression.
+
+Verification:
+- `npm test`: 545/545 passing
+- `npx tsc --noEmit`: clean
+- `npx prisma generate`: clean
+- `npm run build`: clean
+
+P7 fix is greenlit. Claude can continue.
