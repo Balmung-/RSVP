@@ -5,6 +5,7 @@ import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
 import { SessionPicker } from "./SessionPicker";
 import { decideResumeAction } from "./resumeLast";
+import { shouldRefreshOnVisibility } from "./visibilityRefresh";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 import type { SessionListItem } from "@/app/api/chat/sessions/handler";
@@ -74,6 +75,14 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   // the send() callback kicks off a fetch that outlives a re-render.
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // P9 — mirrors of `phase` and the last successful snapshot refresh
+  // time. Both are read from inside async/event handlers (the
+  // visibilitychange listener, the refresh apply-time guard) where
+  // a stale state closure would cause correctness issues — applying
+  // a snapshot to a tab that's since started streaming, or a pre-
+  // closure-capture `lastRefreshMs` that starves cooldown checks.
+  const phaseRef = useRef<Phase>("idle");
+  const lastRefreshMsRef = useRef<number>(0);
 
   // Single setter that keeps state, ref, and URL in sync. The URL
   // update is optional — some callers (initial hydrate fetch,
@@ -107,6 +116,13 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
       abortRef.current?.abort();
     };
   }, []);
+
+  // Keep phaseRef in sync with phase state. Read by the
+  // visibilitychange listener's gate + by refreshSnapshot's
+  // apply-time check so we never act on a stale closure's phase.
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   useEffect(() => {
     // Read `?session=` once on mount. We deliberately don't use
@@ -274,6 +290,74 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     if (sessions.some((s) => s.id === sessionId)) return;
     void refreshSessions();
   }, [sessionId, sessions, refreshSessions]);
+
+  // P9 — cross-tab snapshot refresh. Re-fetches the current session
+  // from GET /api/chat/session/:id and replaces turns + widgets
+  // with the server's authoritative view. Runs only when triggered
+  // by the visibilitychange listener below, which gates on
+  // `shouldRefreshOnVisibility` (visibility + session + phase +
+  // cooldown).
+  //
+  // Why replace both turns AND widgets:
+  //   - /confirm, /dismiss, and tool-triggered widget creation all
+  //     change widgets — the obvious cross-tab gap.
+  //   - A second tab whose user sent a message in tab A is ALSO
+  //     out of sync on turns; a widgets-only refresh would leave
+  //     stale turns next to fresh widgets, which reads worse than
+  //     the old-state-everywhere baseline.
+  //
+  // Apply-time guards (can race against state changes during the
+  // fetch RTT — 50-200ms window):
+  //   - sessionIdRef !== id: the operator switched sessions while
+  //     the fetch was in flight. Dropping the response avoids
+  //     clobbering the new session's state.
+  //   - phaseRef !== "idle": a send or hydrate started during the
+  //     fetch. Don't overwrite an active stream's growing state.
+  //
+  // Errors are swallowed on purpose: a focus refresh is silent
+  // background work. Surfacing an error banner for a failed
+  // refresh would flash across every tab switch on a flaky
+  // connection — worse UX than the stale state it would replace.
+  const refreshSnapshot = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(
+        `/api/chat/session/${encodeURIComponent(id)}`,
+        { method: "GET", credentials: "same-origin" },
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        session: { id: string };
+        turns: Turn[];
+        widgets: ClientWidget[];
+      };
+      if (sessionIdRef.current !== id) return;
+      if (phaseRef.current !== "idle") return;
+      setTurns(data.turns);
+      setWidgets(data.widgets);
+      lastRefreshMsRef.current = Date.now();
+    } catch {
+      /* silent — see comment above */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handler = () => {
+      const eligible = shouldRefreshOnVisibility({
+        visibilityState: document.visibilityState,
+        sessionId: sessionIdRef.current,
+        phase: phaseRef.current,
+        lastRefreshMs: lastRefreshMsRef.current,
+        nowMs: Date.now(),
+      });
+      if (!eligible) return;
+      const id = sessionIdRef.current;
+      if (!id) return; // narrowing — eligibility already checked it
+      void refreshSnapshot(id);
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [refreshSnapshot]);
 
   // ---- send -------------------------------------------------------
 
