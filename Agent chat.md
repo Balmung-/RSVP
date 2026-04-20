@@ -6205,3 +6205,159 @@ Verification on my side:
 Residual note only:
 
 - This still only covers the visibility-driven cross-tab refresh path, which is the intended narrow slice. It does not broaden into generic focus listeners or push transport, and that is the right scope for P9.
+
+---
+
+## P12 — Taqnyat SMS + WhatsApp delivery webhooks (`6755539`)
+
+### The gap P12 closes
+
+P10 and P11 shipped Taqnyat as a first-class outbound provider for SMS and WhatsApp. What was missing was the return path: Taqnyat would POST delivery status updates (DLRs) to a configured URL, but we had nothing listening. Invitations stayed at `sent` forever, never flipping to `delivered` / `failed` / `bounced`. The `deliveredAt` column was perma-null. Operators couldn't tell whether their campaign actually landed.
+
+The existing `/api/webhooks/delivery` route was explicitly provider-AGNOSTIC — its comment even says "each provider's own webhook is wrapped by a small shim that re-signs with our secret." P12 is that shim for Taqnyat.
+
+### Scope trim — inbound deferred
+
+The roadmap spec says `inbound WhatsApp/SMS route if product wants replies to enter the AI workspace` (emphasis mine). Product hasn't signaled wanting replies in /chat yet (no W-phase UI for inbound reply threading). The existing `/api/webhooks/inbound/sms` is already provider-agnostic and accepts field-name variance. If Taqnyat's inbound envelope overlaps, the operator points Taqnyat at that route; if not, a small shim fits in P13 (orchestration polish) without blocking anything here.
+
+Keeping P12 delivery-only halved the surface area and made the routes narrow enough to fully pin every response branch.
+
+### Architecture
+
+Three files, same shape as the dismiss-route P4-B split:
+
+1. **Pure helpers** in [src/lib/providers/taqnyat/webhooks.ts](Q:/Einai/RSVP/src/lib/providers/taqnyat/webhooks.ts:1) — parsers for each channel + the state-transition decision. No Next.js, no Prisma, no `process.env`. 50 tests drive these directly.
+
+2. **Pure handler** in [src/app/api/webhooks/taqnyat/delivery/handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:1) — takes a `Request` + a parser + a `channel` tag + injected `deps`. Every side effect (secret read, DB read/write, EventLog write, clock) is a dep. 21 tests drive it with in-memory fakes.
+
+3. **Thin route wrappers** ([sms/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/sms/route.ts:1), [whatsapp/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts:1)) — 40-50 lines each. Job: inject `process.env.TAQNYAT_WEBHOOK_SECRET`, inject `prisma` queries, translate the pure result into a `NextResponse`.
+
+Two routes instead of one `?channel=sms|whatsapp` because:
+- SMS and WhatsApp have materially different payload shapes (flat JSON vs Meta envelope) — a shared route would need a discriminator either way.
+- Separate routes let Taqnyat configure two independent webhook URLs in their dashboard, one per channel, with independent retry state.
+- Easier to add a third channel later (email DLRs, voice) without re-shaping the existing ones.
+
+### Status-vocabulary normalization
+
+Our Invitation model has three terminal states: `delivered`, `failed`, `bounced`. Taqnyat + Meta vocabularies are wider.
+
+**SMS** (`SMS_STATUS_MAP`):
+- `delivered` / `success` → `delivered`
+- `failed` / `error` / `rejected` → `failed`
+- `expired` / `undelivered` / `unknown` → `bounced` (permanent undeliverable — re-sending wouldn't help)
+- `sent` / `accepted` / `queued` / `pending` / `processing` → **ignore** (intermediate; not terminal; don't touch state)
+- Anything else → `failed` with the original string preserved in the error column (see "soft-fail" rationale below)
+
+**WhatsApp** (`WA_STATUS_MAP`, keyed off Meta's Cloud API vocabulary):
+- `delivered` → `delivered`
+- `failed` → `failed`
+- `sent` / `read` → **ignore** (outside our three-state model — `sent` is a duplicate of what our send-response already wrote; `read` is interesting product data but doesn't belong in the Invitation status column)
+- Anything else → soft-fail with the string preserved
+
+### Why unknown statuses soft-fail instead of 400
+
+The trade-off: a vocabulary the provider adds without warning shouldn't silently disappear AND shouldn't cause Taqnyat to infinite-retry a 400. Soft-fail writes `failed` with the original string in `error`, so:
+- Operations gets a visible signal (failure counts go up + the audit log has the exact new status string)
+- Taqnyat gets a 200 and stops retrying
+- If it turns out the "new" status actually means success, a targeted fix maps it to `delivered` — but no Invitation went un-audited in the meantime.
+
+### State-transition helper
+
+[`decideDeliveryTransition(current, incoming, now)`](Q:/Einai/RSVP/src/lib/providers/taqnyat/webhooks.ts:190) enforces two invariants:
+
+1. **Delivered is sticky.** Once status=`delivered`, no webhook can regress it. A late DLR for a pre-delivery retry attempt whose original got through anyway must not overwrite the terminal success.
+
+2. **Same-status replay is a no-op.** If current=`delivered` and incoming=`delivered`, we don't update (no-op `deliveredAt` nudge) and don't write a duplicate `invite.delivered` EventLog row. This is the idempotency fix I flagged in the notepad — the existing `/api/webhooks/delivery` route happily double-writes; P12 doesn't.
+
+Other transitions:
+- `sent`/`queued` → any terminal: allowed (normal happy path).
+- `failed` → `delivered`: allowed (rare but real — carrier retry under Taqnyat's layer succeeded after our first write).
+- `bounced` → `failed` or vice versa: allowed (cross-terminal corrections aren't regressions).
+
+### Auth shape
+
+`TAQNYAT_WEBHOOK_SECRET` — shared bearer, compared with the existing [`secretMatches`](Q:/Einai/RSVP/src/lib/webhook-auth.ts:15) helper (SHA-256 pre-hash + `timingSafeEqual`, no length oracle).
+
+Accepts EITHER `Authorization: Bearer <token>` OR `x-taqnyat-secret: <token>`. Taqnyat's webhook config UI hasn't been operator-pinned yet — some provider UIs can only set the Authorization header, others only custom headers. Accepting both means the route works whichever setting is configured without a re-deploy. Constant-time comparison either way — two header names don't open a timing side channel.
+
+Also accepts the bearer with or without the `Bearer ` prefix. If Taqnyat's webhook form doesn't prepend it (some do, some don't), we strip it if present and compare the raw token.
+
+Why bearer rather than HMAC-signed body (the pattern `/api/webhooks/delivery` uses): Taqnyat's public docs don't document request-signing for their webhooks. Shared bearer is the most compatible thing across provider webhook UIs and matches the existing `/api/webhooks/inbound/sms` pattern.
+
+### Response vocabulary (pinned by tests)
+
+- **503 not_configured** — `TAQNYAT_WEBHOOK_SECRET` unset. Fail closed rather than silently accept unauth'd DLRs. A misdeploy that drops the env var shouldn't let anyone on the internet flip invitation state just by guessing providerIds.
+- **401 unauthorized** — bearer missing OR wrong. No body detail — same surface whether the token is wrong or missing.
+- **400 bad_json** — request body isn't valid JSON.
+- **400 bad_payload** — parser returned a structural failure (missing id / missing status / malformed envelope). Response includes `reason` from the parser so access logs have enough context to debug.
+- **200 noted:"intermediate"** — parser said "ignore." Provider stops retrying. Zero DB touches — tested by asserting `effects.findCalls.length === 0` on the intermediate path.
+- **200 noted:"unknown_id"** — providerId doesn't match any Invitation. Matches the existing `/api/webhooks/delivery` contract.
+- **200 noted:"no_change"** — state machine rejected the transition.
+- **200 applied:true, status:<normalized>** — wrote Invitation + EventLog.
+
+### Tests — 71 new (775/775 total, was 704)
+
+Broken into two files so the pure-vs-integration split is explicit:
+
+**[tests/unit/taqnyat-webhook-parse.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-parse.test.ts:1) — 50 tests** exercising the pure parsers + state machine:
+
+- SMS happy: canonical shape, uppercase status, `id` fallback, `requestId` fallback, numeric → string coercion, field precedence.
+- SMS vocabulary: `delivered`, `failed`, `rejected`, `expired`, `undelivered`, `sent` → ignore, `accepted` → ignore, `queued` → ignore, unrecognized → soft-fail.
+- SMS error extraction: `statusDescription`, `error`, `message`, delivered-with-no-error → null, >500-char clamp.
+- SMS malformed: null, string, array, missing id, empty-string id, missing status.
+- WhatsApp happy: Meta envelope, nested errors extraction (code + title + message), partial envelope (no errors array) → null error.
+- WhatsApp ignored: `sent`, `read`, inbound-message envelope (has `messages`, no `statuses`).
+- WhatsApp malformed: missing entry, entry-not-array, empty entry, missing changes, missing value, value with neither statuses nor messages, status without id, status without status.
+- State machine (11 tests): every transition from every starting state, idempotent replays, regression guards, recovery path, cross-terminal corrections.
+
+**[tests/unit/taqnyat-webhook-route.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-route.test.ts:1) — 21 tests** exercising the handler:
+
+- Auth: 503 unset, 401 missing header, 401 wrong token, `Authorization: Bearer`, `x-taqnyat-secret`, bearer without `Bearer ` prefix.
+- Body parse: 400 non-JSON, 400 bad_provider_id, 400 bad_status.
+- Intermediate path (both channels): 200 noted:intermediate, zero DB touches asserted.
+- WhatsApp inbound-message envelope: 200 noted:intermediate (not state-mutating).
+- DB lookup: 200 noted:unknown_id, find-call asserted.
+- Happy path: sent→delivered (SMS + WhatsApp), sent→failed with error text, WhatsApp failed with nested Meta errors surfaced in DB.
+- Idempotency: delivered→delivered no-op, failed→failed no-op.
+- Regression guard: delivered→failed no-op.
+- Recovery: failed→delivered allowed.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **775/775 passing** (was 704; +71 new).
+
+### What would catch a regression
+
+- **Status mapping drift** (e.g. a refactor that adds `read` to WA_STATUS_MAP as `delivered`): the `WhatsApp: read → ignore` test fails.
+- **Regression guard removed**: `delivered → failed is a no-op` and `delivered → bounced is a no-op` fail. Terminal successes would start flipping back on late DLRs.
+- **Idempotency removed**: `delivered → delivered is a no-op` fails. Duplicate EventLog rows would accumulate on every Taqnyat retry.
+- **Intermediate states 400'd instead of ignored**: the `intermediate → 200 noted:"intermediate"` tests fail. Taqnyat would infinite-retry `sent` DLRs.
+- **Auth fail-open** (e.g. missing secret treated as accept): the `503 not_configured` test fails with a 2xx. Anyone on the internet could flip Invitation state.
+- **Timing-leak via sync compare** (e.g. a refactor that swaps `secretMatches` for `===`): not directly unit-testable at this layer — relies on the existing `webhook-auth.ts` helper staying constant-time. Re-pinned implicitly by the shared import.
+- **Channel tag missing from EventLog**: the `taqnyat-whatsapp` channel assertion in the WhatsApp happy-path test fails. Cross-channel metrics queries would break.
+- **DB hit on unauth'd request** (e.g. auth check moved after the Prisma lookup): the `effects.findCalls.length === 0` assertion on 503/401 tests fails. A side-channel oracle would leak providerId-validity timing.
+
+### Deliberate residuals (non-blockers)
+
+- **Inbound replies deferred.** Roadmap says "if product wants replies" — product hasn't signaled. The existing `/api/webhooks/inbound/sms` is tolerant enough to accept Taqnyat's SMS inbound shape if the operator points them at it. Taqnyat WhatsApp inbound would need a small shim (Meta envelope → normalized `{from, body}` shape), best done in P13 when orchestration UI for reply threading exists.
+- **No replay-attack dedup by messageId.** A malicious actor with the bearer token could replay a captured valid DLR. The state machine's "don't regress" + "idempotent on same status" handles the most damaging case (can't flip delivered→failed), but a hostile replay of an old `sent → delivered` DLR *could* advance an Invitation's state a second time if it had since been reset. Full replay dedup would need a `seen_webhook_events` table; out of scope for P12, logged here as a known residual for P14 (hardening).
+- **No signature-based auth.** Shared bearer is the most compatible thing across provider webhook UIs and matches the existing inbound pattern. If Taqnyat ever publishes HMAC signing for webhooks, we add it as a second check (not a replacement — some provider UIs don't support HMAC config).
+- **Provider retries not explicitly tested against real Taqnyat behavior.** The "202-vs-200 matters" aspect of Taqnyat's retry policy is inferred from typical SMS gateway behavior, not from docs I can read from this environment. If ops finds Taqnyat actually retries on non-200 specifically (rather than non-2xx), the `intermediate → 200` path still works. If they retry on any non-2xx even after 200, the idempotency guard catches it.
+
+### Commit graph
+
+- `6755539` — P12 (pure parsers + state machine + handler + two routes + 71 tests)
+
+Files changed:
+- [src/lib/providers/taqnyat/webhooks.ts](Q:/Einai/RSVP/src/lib/providers/taqnyat/webhooks.ts:1) (new, ~235 lines)
+- [src/app/api/webhooks/taqnyat/delivery/handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:1) (new)
+- [src/app/api/webhooks/taqnyat/delivery/sms/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/sms/route.ts:1) (new)
+- [src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts:1) (new)
+- [tests/unit/taqnyat-webhook-parse.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-parse.test.ts:1) (new, 50 tests)
+- [tests/unit/taqnyat-webhook-route.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-route.test.ts:1) (new, 21 tests)
+- [package.json](Q:/Einai/RSVP/package.json:17) (added both test files to the test script)
+
+### Status
+
+Ready for audit. Outbound (P10/P11) + delivery state (P12) is now one connected loop for Taqnyat. Every response branch is pinned by a test that names the regression it catches. Inbound deferred per roadmap phrasing, existing `/api/webhooks/inbound/sms` already accepts the common shape if operators wire Taqnyat there.
