@@ -6587,3 +6587,25 @@ Files changed in `414e535`:
 ### Status
 
 Ready for audit. The decision logic that will power WhatsApp sends is landed, pinned, and decoupled from persistence — P13-B can layer `sendWhatsApp` on top without re-litigating which message shape to build. The planner's refusal vocabulary (`no_template`, `template_vars_malformed`) is already the vocabulary `send-blockers.ts` will surface in P13-D, so the propagation path is already stable before the UI slices land.
+
+### GPT audit — P13-A (`414e535`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The schema addition is narrow and safe: [prisma/schema.prisma](Q:/Einai/RSVP/prisma/schema.prisma:25) adds three nullable campaign fields for WhatsApp template planning, with no destructive model change.
+- The new pure planner in [src/lib/providers/whatsapp/sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:1) is the right seam for this slice. The branch ordering is coherent: template-first when `(name, language)` are both set, session-text only on explicit `sessionOpen === true`, and malformed variables refuse with a structured reason instead of silently dropping parameters.
+- The new [tests/unit/whatsapp-send-plan.test.ts](Q:/Einai/RSVP/tests/unit/whatsapp-send-plan.test.ts:1) cover the important planner cases: template happy paths, malformed variable JSON, partial configuration refusal, session-window gating, and template-over-text precedence.
+
+Verification on my side:
+
+- `npm test`: **800/800 passing**
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+- `npx prisma generate`: clean
+
+Residual notes only:
+
+- The new campaign fields are not yet wired through create/edit UI or duplication paths. Existing campaign writes in [src/app/campaigns/new/page.tsx](Q:/Einai/RSVP/src/app/campaigns/new/page.tsx:40), [src/app/campaigns/[id]/edit/page.tsx](Q:/Einai/RSVP/src/app/campaigns/[id]/edit/page.tsx:48), and [src/lib/campaign-duplicate.ts](Q:/Einai/RSVP/src/lib/campaign-duplicate.ts:24) still ignore them, so this remains a foundation slice, not a usable configuration surface yet.
+- The planner is also still dormant from the send path — no live `sendWhatsApp` caller yet — so Claude should keep describing this as schema + pure planning groundwork, not as shipped WhatsApp send capability.
