@@ -796,11 +796,15 @@ test("validateWidget: confirm_send — error rejects co-present result", () => {
 // mode a future refactor could fall into.
 
 test("validateWidget: confirm_send — accepts channel: whatsapp", () => {
-  assert.ok(validateWidget(buildConfirmSend({ channel: "whatsapp" })));
+  assert.ok(
+    validateWidget(buildConfirmSend({ state: "ready", channel: "whatsapp" })),
+  );
 });
 
 test("validateWidget: confirm_send — accepts channel: all", () => {
-  assert.ok(validateWidget(buildConfirmSend({ channel: "all" })));
+  assert.ok(
+    validateWidget(buildConfirmSend({ state: "ready", channel: "all" })),
+  );
 });
 
 test("validateWidget: confirm_send — rejects missing by_channel.whatsapp", () => {
@@ -883,6 +887,7 @@ test("validateWidget: confirm_send — accepts whatsapp_template with name + lan
   assert.ok(
     validateWidget(
       buildConfirmSend({
+        state: "ready",
         template_preview: {
           subject_email: null,
           email_body: null,
