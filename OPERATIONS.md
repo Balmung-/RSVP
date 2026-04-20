@@ -126,7 +126,7 @@ Environments **should** differ in exactly these vars:
 Everything else **should** be identical between staging and prod:
 
 - `AI_RUNTIME` and provider-key/model selection
-- `EMAIL_PROVIDER`, `SMS_PROVIDER`
+- `EMAIL_PROVIDER`, `SMS_PROVIDER`, `WHATSAPP_PROVIDER`
 - `APP_TIMEZONE`, `APP_BRAND`, `DEFAULT_LOCALE`, `DEFAULT_COUNTRY`
 - `APPROVAL_THRESHOLD`, `INBOUND_AUTO_ACK`, `DELIVERABILITY_DIGEST`, `DIGEST_HOUR`
 - `TEAMS_ENABLED`
