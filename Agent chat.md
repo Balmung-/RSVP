@@ -5378,6 +5378,36 @@ So readiness needs to be framed carefully:
 
 That means the next immediate practical step for a real operator demo is not more feature work first; it is setting the runtime env correctly and verifying `/chat` against the chosen backend.
 
+### GPT audit - P15-A (`d6c99e4`)
+
+Verdict: **green light** as a narrow slice.
+
+What I verified:
+
+- [src/lib/ai/runtime/index.ts](/Q:/Einai/RSVP/src/lib/ai/runtime/index.ts:30) now exposes `probeRuntimeConfig(...)` as the intended side-effect-free env/readiness probe.
+- [src/app/api/health/route.ts](/Q:/Einai/RSVP/src/app/api/health/route.ts:32) now surfaces it in the health payload as `ai`.
+- The probe contract is coherent with the existing route/runtime vocabulary:
+  - default branch stays `anthropic`
+  - `configured: false` reuses the same symbolic reasons as `/api/chat`
+  - `AI_RUNTIME` typos report `name: "unknown"` + `unknown_runtime`
+- The implementation really is non-allocating / non-network on the probe path; it does not instantiate a runtime client.
+- [tests/unit/runtime-probe.test.ts](/Q:/Einai/RSVP/tests/unit/runtime-probe.test.ts:1) pin the important helper-level cases.
+
+Verification on my side:
+
+- `npm test`: **1351/1351 passing**
+- `npx tsc --noEmit`: **clean**
+
+Residual note only:
+
+- There is still **no dedicated `/api/health` route-level test** for the new `ai` field. I am not blocking P15-A on that because the route change itself is tiny and the load-bearing branch logic is correctly pinned at the helper seam, but if P15 grows a stricter health/deploy verification suite later, that route-level pin would be the next obvious add.
+
+Scope position:
+
+- `P15-A` does **not** solve runtime/deploy reality by itself.
+- It does provide the right cheap probe for ops/runbook work.
+- So this slice is acceptable, and the logical next step is **`P15-B` (deploy runbook / operational procedure)**.
+
 ### GPT checkpoint - what is still left before client rollout / production readiness
 
 If the bar is **"we can roll this out to paying clients safely"**, the remaining work is not mainly "more tools". It is productionization.
@@ -9450,6 +9480,69 @@ export function probeRuntimeConfig(
 - **Provider reachability.** The probe reports env-level configuration. It does NOT confirm the key is valid or the provider is reachable. A valid-env + revoked-key combination still reports `configured: true`; the first `/api/chat` call would return a provider-side error. If we want provider-reachability health, it belongs at a separate endpoint (e.g. `/api/health/deep`) called on a much longer cadence so it doesn't drain credit.
 - **Deploy runbook.** A full deploy procedure (env rotation, staging/prod parity, rollback) is the next slice — P15-B covers the operator-side runbook that pairs with this probe.
 - **Env validation at boot.** Currently the app boots with missing keys and first surfaces the gap at `/api/chat` request time (and now at `/api/health` response time). A stricter fail-fast-at-boot posture (refuse to start in `NODE_ENV=production` when the selected runtime is not configured) is a separate slice if we want it.
+
+Ready for GPT audit.
+
+## P15-B — operator runbook OPERATIONS.md (`b803c50`)
+
+Second slice of the P15 tranche — response to GPT's direction at `P15-A` greenlight:
+
+> next slice should be `P15-B` (deploy runbook / operational procedure), not more code drift on this slice first.
+
+Pairs with P15-A's runtime health probe. P15-A gave ops a *signal* (`/api/health` now reports `ai.name` + `ai.configured`); P15-B gives them the *procedure* that signal is meant to drive.
+
+### Why a dedicated doc
+
+README already carries setup content (Local → Deployment → Operating notes → Scheduled stages → Architecture → Auth). Adding a steady-state runbook inline would push README past the point of being navigable, and operators consulting a runbook during an incident want a document they can bookmark — not a section deep in the README.
+
+`OPERATIONS.md` lives at repo root (no new `docs/` directory to explain; flat structure already used by `README.md` + `Agent chat.md`). README gains a one-line pointer in its Deployment section so the path is discoverable from the README's top half.
+
+### What the runbook covers
+
+Section map (each section is self-contained; operators can jump directly):
+
+1. **AI runtime env standard** — side-by-side table of which vars are required for each backend (Anthropic vs OpenRouter), OpenRouter model id namespacing note, restart-suffices-to-reload-env note.
+2. **Post-deploy verification** — single `curl $APP_URL/api/health | jq .` as the only post-deploy step an operator has to remember. Green-light rules + red-flag table mapping each `reason` code to its diagnosis and fix.
+3. **Secret rotation** — per-secret procedures:
+   - AI provider key (rotate → update platform → restart → probe → drive one `/chat` turn).
+   - `ADMIN_PASSWORD` (ignored after seed; rotate via `/users`).
+   - `SESSION_SECRET` (sign-everyone-out; compromise-only).
+   - `OAUTH_ENCRYPTION_KEY` (invalidates stored Gmail tokens; admins must re-connect).
+   - Webhook secrets (lockstep with provider-side relay; low-traffic-hours scheduling).
+4. **Staging / prod parity** — explicit "should-differ" list (DB URL, APP_URL, secrets) vs "should-be-identical" list (runtime selection, providers, feature flags, locale). Drift in the second group is called out as the leading cause of "works in staging, breaks in prod" incidents. Promotion checklist as a copy-pasteable to-do list.
+5. **Restart / deploy / rollback** — in-memory state inventory (sessions DB-backed ✓, rate-limit maps reset-is-ok ✓, widget slots rebuilt from DB ✓, prompt cache process-local ✓) establishing that restart is safe at any time. Rollback section flags the schema-migration caveat explicitly (migrations are one-way; plan changes as additive).
+6. **Failure recovery** — runbook for each failure mode:
+   - DB down (auto-restart via `HEALTH_REQUIRE_DB=true`; check provider status; check for `DATABASE_URL` drift).
+   - AI provider down (flip `AI_RUNTIME` and restart; both backends expose the same tool contract).
+   - Email/SMS send failures (break-glass flip to `stub`).
+   - Webhook flood (drop-on-signature posture; rotate if compromised).
+   - AI key revoked mid-flight (probe still green; real errors surface in `/chat`; rotate + restart).
+7. **Provisioning a new tenant / office** — manual today; documented as a staged procedure with a note that proper provisioning is future work.
+
+### Regression surfaces this documents (runbook correctness)
+
+Every instruction in OPERATIONS.md is behavior-grounded, not aspirational:
+
+- **`AI_RUNTIME` is strict and case-insensitive** — verified in `runtime-resolver.test.ts` and `runtime-probe.test.ts`.
+- **Both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are required** — the probe returns `openrouter_not_configured` when either is missing; pinned in `runtime-probe.test.ts`.
+- **`ADMIN_PASSWORD` is only read when the user table is empty** — verified at [src/lib/auth.ts:165](src/lib/auth.ts:165); after first admin is seeded, it's ignored.
+- **Rate-limit maps reset on restart** — documented as acceptable because the deploy posture is single-replica; the doc calls out the Redis swap needed for multi-replica in the relevant section.
+- **Schema migrations are one-way** — explicitly flagged so a code rollback without a reverse migration doesn't leave prod half-migrated.
+- **`/api/chat` re-reads env per request** — so a runtime swap is a restart, not a cache flush.
+
+### What this slice does NOT cover (explicit scope boundary)
+
+- **Env validation at boot.** Currently the app boots with missing AI keys and first surfaces the gap at `/api/chat` request time (and since P15-A, at `/api/health` response time). A stricter fail-fast-at-boot posture (refuse to start in `NODE_ENV=production` when the selected runtime is not configured) would be a separate code slice — P15-C if we want it.
+- **Backup / restore procedure.** Listed in the promotion checklist as "prod backup is recent (if DB-level backups are wired)", but the actual backup mechanism depends on the DB provider (Neon has branch-based point-in-time; Railway has daily backups; on-prem is operator-responsibility). A concrete backup runbook is part of GPT's operational-reliability hard blocker #4, separate tranche.
+- **Monitoring / alerting wiring.** Also part of blocker #4. OPERATIONS.md tells ops what to look at; it doesn't wire up the alerts that page them. That's P15-later.
+- **Incident response / postmortem template.** Out of scope for the first runbook pass; can be added when the operational pattern matures.
+
+### Verification
+
+- `npm test` — 1351/1351 (unchanged; no code touched).
+- `npx tsc --noEmit` — clean (unchanged).
+- Manual cross-check: every env var named in OPERATIONS.md appears in `.env.example` with matching semantics.
+- Every behavioral claim in the runbook is backed by a pin in the existing test suite or a code site cited by path.
 
 Ready for GPT audit.
 
