@@ -6832,3 +6832,110 @@ Residual notes only:
 
 - This is still runtime groundwork, not a full operator-visible WhatsApp rollout. Several surrounding surfaces still report only email/SMS today — for example [campaignStats](Q:/Einai/RSVP/src/lib/campaigns.ts:108), [liveFailureCount](Q:/Einai/RSVP/src/lib/deliverability.ts:86), and the current campaign/admin UI paths remain two-channel.
 - So Claude should keep describing P13-C as “orchestrators widened and safe for later callers”, not as “WhatsApp fully surfaced everywhere” yet. P13-D/E still need to widen the actual chooser/preview/summary surfaces.
+
+
+---
+
+## P13-D.1 — send-blockers WhatsApp vocabulary (shared propose_send ↔ send_campaign truth) — commit `8730713`
+
+### Why this is its own commit
+
+P13-D is "widen the AI tool + ConfirmSend UI to reach WhatsApp". Doing it as one commit would couple three layers — shared blocker helper, tool schema/handler, and directive UI producer→consumer pair — into a single review. The roadmap's rule against mixing runtime abstraction, provider integration, and UI composition in the same commit applies here: the helper change is pure logic with a unit-testable surface, while the tool-schema + UI change is a coordinated producer→consumer move that must land atomically. Splitting at that seam gives GPT two small audits instead of one sprawling one.
+
+**D.1 (this commit)** — shared `computeBlockers` helper widened: it understands WhatsApp, emits `no_whatsapp_template`, and the new field is selected by both tool handlers. The AI tool `validate()` schemas are deliberately LEFT rejecting `"whatsapp"` / `"all"` — operators cannot reach the new blocker via chat yet. Pure helper groundwork with regression-pinning tests.
+
+**D.2 (next commit)** — tool `validate()` + `inputSchema.enum` widened, `propose_send` handler grows a `by_channel.whatsapp` bucket, `send_campaign` handler's summary line acknowledges WhatsApp, `widget-validate.ts` `CHANNELS` const and `by_channel.whatsapp` schema gate added, and `ConfirmSend.tsx` renders the new bucket + blocker copy. Producer and consumer move together; that's a separate audit.
+
+### Files changed
+
+- [src/lib/ai/tools/send-blockers.ts](Q:/Einai/RSVP/src/lib/ai/tools/send-blockers.ts:1) — `Channel` type aliased from `SendCampaignChannel`; `CampaignForBlockers` grew `templateWhatsAppName` + `templateWhatsAppLanguage`; `hasReadyMessage` gained a WhatsApp branch; `computeBlockers` emits `no_whatsapp_template`.
+- [src/lib/ai/tools/propose_send.ts](Q:/Einai/RSVP/src/lib/ai/tools/propose_send.ts:132) — Prisma select widened by two fields; passed through to `computeBlockers` at the existing call site. Tool schema/handler logic otherwise untouched.
+- [src/lib/ai/tools/send_campaign.ts](Q:/Einai/RSVP/src/lib/ai/tools/send_campaign.ts:117) — same two-field Prisma select addition + pass-through to `computeBlockers`. Tool schema/handler logic otherwise untouched.
+- [tests/unit/send-blockers-whatsapp.test.ts](Q:/Einai/RSVP/tests/unit/send-blockers-whatsapp.test.ts:1) — new; 16 tests pinning the WhatsApp blocker branches.
+- [package.json](Q:/Einai/RSVP/package.json:17) — added the new test file to the test script.
+
+### Design decisions worth auditing
+
+1. **`Channel` alias imported from `SendCampaignChannel`, not re-declared.**
+   `send-blockers.ts` used to define its own narrow `Channel = "email" | "sms" | "both"`. Re-declaring with the widened vocabulary would work but would create two drifting sources of truth (one here, one in `campaigns.ts`). Instead `export type Channel = SendCampaignChannel;` — an acyclic edge into `@/lib/campaigns` (campaigns.ts does not import send-blockers.ts). The `channelSetFor(...)` resolver is also imported so `"both"` / `"all"` / scalar resolution matches the real send path byte-for-byte. A drift between "what the blocker thinks is in scope" and "what the send actually dispatches" is exactly the regression this file exists to prevent.
+
+2. **WhatsApp "configured" requires BOTH `templateWhatsAppName` AND `templateWhatsAppLanguage`.**
+   Either missing emits `no_whatsapp_template`. Mirrors `decideWhatsAppMessage`'s Rule 1 predicate (`length > 0` on both) — Meta resolves approved templates by the `(name, language)` identity pair, so a name without a language cannot reach an approved template and a language without a name cannot either. Treating empty strings as unconfigured is tested explicitly (`empty-string template fields are treated as unconfigured`) — a saved empty from a cleared form field must surface the same blocker as `null` or the operator sees "ready" in the card and a refuse-at-planner wall after clicking.
+
+3. **Shared `unsubPhones` set for SMS and WhatsApp.**
+   The `Unsubscribe` table has one `phoneE164` column without a `channel` discriminator. A recipient who sent `STOP` via SMS is marked unsubscribed by phone, full stop — no channel qualifier. Routing them to WhatsApp on the same phone would violate the opt-out. The `hasReadyMessage` WhatsApp branch reuses the same `unsubPhones.has(inv.phoneE164)` check SMS uses. Test `unsubscribed phone blocks both SMS and WhatsApp` pins this. If the Unsubscribe schema ever gains a channel discriminator (so operators can opt out of SMS but keep WhatsApp), this is the test that will need to be revisited.
+
+4. **`"both"` still does NOT emit `no_whatsapp_template` — pre-P13 invariant carried forward.**
+   `"both"` means email + SMS only (load-bearing per P13-C). A campaign without a WhatsApp template but targeting `"both"` has no problem — WhatsApp isn't in scope. Test `both umbrella: does NOT emit no_whatsapp_template (pre-P13 invariant)` pins this. A naive "let's check all templates on every send" rewrite would fail loudly.
+
+5. **Tool `validate()` schemas deliberately LEFT narrow.**
+   `propose_send` and `send_campaign` still reject `"whatsapp"` / `"all"` at their `inputSchema.enum` gate. The narrow input type (`"email" | "sms" | "both"`) remains a subtype of the widened `SendCampaignChannel`, so the call-site typechecks unchanged. An operator saying "send via whatsapp" in chat will get a validation error at the tool boundary, not a half-rendered ConfirmSend with no WhatsApp bucket or a silent default to `"both"`. D.2 flips the enum + widens the handler in a single commit alongside the UI so the producer/consumer pair is atomic.
+
+6. **Prisma select widened in both tool handlers, not gated on channel.**
+   `templateWhatsAppName` / `templateWhatsAppLanguage` are always selected, not only when `channel === "whatsapp" || "all"`. This keeps `computeBlockers`'s server-side re-check complete regardless of the caller's channel arg: a forged POST to `/api/chat/confirm` pointing at a blocked preview row still hits the right blocker code, and a future AI tool that passes `channel: "all"` doesn't need a coupled change to the Prisma select here. Two extra varchar columns per confirm is a trivial cost for that safety margin.
+
+7. **Blocker emission order stable and pinned.**
+   `status_locked:<status>` → `no_invitees` → `no_ready_messages` → `no_email_template` → `no_sms_template` → `no_whatsapp_template`. This is the "loudest problem first" contract propose_send documents (`src/lib/ai/tools/send-blockers.ts:187-189`). Test `blocker emission order stable: status → audience → templates (email, sms, whatsapp)` pins the full six-element sequence with `assert.deepEqual`, so a future reorder lands with a red test. Deterministic ordering matters because the ConfirmSend UI renders the list top-to-bottom — an operator looking at "status_locked, no_email_template" should not see the elements in a different order on the second page load.
+
+### Unit-testable surfaces (16 tests)
+
+The helper is already pure (it takes pre-loaded `Audience` + narrow campaign). No test harness was needed — the fixtures are three `mk*` helpers in the test file.
+
+**no_whatsapp_template emission** (4 tests):
+- both fields set → no blocker
+- `templateWhatsAppName: null` → blocker
+- `templateWhatsAppLanguage: null` → blocker
+- `templateWhatsAppName: ""` (empty string) → blocker (length-gate semantics)
+
+**Channel-set differences** (3 tests):
+- `channel: "all"` + missing WA template → blocker
+- `channel: "both"` + missing WA template → NOT a blocker (pre-P13 invariant)
+- `channel: "email"` scalar + missing WA template → NOT a blocker (scalar channels only check their own template)
+
+**hasReadyMessage WhatsApp path** (5 tests):
+- invitee with phone, no prior WA → ready
+- invitee with no phone → `no_ready_messages`
+- prior successful WA + `onlyUnsent=true` → `no_ready_messages`
+- prior failed WA + `onlyUnsent=true` → ready (retry is valid; `status !== "failed"` guard)
+- prior successful WA + `onlyUnsent=false` → ready (force re-send)
+
+**Shared phone-unsubscribe** (2 tests):
+- unsubscribed phone blocks WhatsApp (same behavior as SMS)
+- unsubscribed phone does NOT affect an email-only invitee (scope check)
+
+**Combination** (2 tests):
+- `channel: "all"` with every template missing stacks `no_email_template` + `no_sms_template` + `no_whatsapp_template`
+- Blocker emission order pinned via `assert.deepEqual` on the full list
+
+### What P13-D.1 does NOT yet do (deliberate scope gates)
+
+- **AI tool `propose_send` + `send_campaign` `validate()` schemas**: still reject `"whatsapp"` / `"all"`. A chat operator cannot yet ask the AI to "send via whatsapp" and reach the new blocker. P13-D.2.
+- **`propose_send` handler `by_channel`**: still only computes `email` + `sms` buckets. No `whatsapp` bucket count. P13-D.2.
+- **Widget validator `CHANNELS` const + `by_channel.whatsapp` schema**: unchanged. P13-D.2.
+- **`ConfirmSend.tsx`**: does not yet render WhatsApp bucket counts, a "whatsapp" channel label, or a human-readable version of the `no_whatsapp_template` blocker code. P13-D.2.
+- **Operator audit trail**: because the tool-schema gate still refuses WhatsApp, no real `no_whatsapp_template` refusal is observable in a ChatMessage row yet. It only fires in the unit tests. D.2 is what lights up the real surface.
+
+### What would catch a regression
+
+- **Treating empty-string template fields as "configured"**: test `whatsapp scalar: empty-string template fields are treated as unconfigured` fails. Catches a `!campaign.templateWhatsAppName` rewrite to `campaign.templateWhatsAppName !== null` that would let a cleared form field sneak through.
+- **`"both"` silently grew WhatsApp checks**: test `both umbrella: does NOT emit no_whatsapp_template (pre-P13 invariant)` fails. Catches a "let's simplify by always checking all three" rewrite that would break the P13-C load-bearing invariant at the blocker layer.
+- **Blocker emission order changed**: the `assert.deepEqual` on the full six-element list fails — not just the "includes" asserts. Catches a reorder that silently makes the UI render blockers in a different sequence.
+- **WhatsApp phone filtered separately from SMS**: test `unsubscribed phone blocks both SMS and WhatsApp` fails. Catches a per-channel `unsubPhonesSms` / `unsubPhonesWhatsApp` refactor that would start routing SMS opt-outs to WhatsApp.
+- **Prior failed WA attempt blocks retry**: test `prior FAILED WA invitation does not block (retry is valid)` fails. Catches a `status === "sent"` check inverted to `status !== "failed"` being confused with a broader "any prior row blocks".
+- **New `CampaignForBlockers` field added without widening the Prisma select in a tool handler**: tsc fails at the `computeBlockers({ campaign: { ... } })` call-site in that tool because the selected campaign row is missing the field. This is exactly the error that surfaced during implementation — both `propose_send.ts` and `send_campaign.ts` needed the select widening.
+
+### Verification on my side
+
+- `npx tsc --noEmit`: clean
+- `npm test`: **839/839 passing** (823 before + 16 new)
+
+### Commit graph
+
+- `414e535` — P13-A (schema + pure planner)
+- `1db0682` — P13-B (`sendWhatsApp` deps-injected core + 9 choreography tests)
+- `6ec302e` — P13-C (orchestrator widening + 14 tests)
+- `8730713` — P13-D.1 (this commit; shared blocker helper + 16 tests)
+
+### Status
+
+Ready for audit. The shared `computeBlockers` truth now covers WhatsApp, with the `no_whatsapp_template` code and the shared-phone-unsubscribe discipline both pinned by unit tests. The AI tool `validate()` schemas are intentionally still narrow, so WhatsApp stays unreachable via chat until D.2 ships the paired tool-schema + UI widening. After D.2 lands, a chat operator will be able to pick WhatsApp on a real campaign, see the per-channel preview counts, and see a human-readable "WhatsApp template not configured" row in the ConfirmSend card.
