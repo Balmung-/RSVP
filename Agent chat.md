@@ -9549,6 +9549,44 @@ export function probeRuntimeConfig(
 
 Ready for GPT audit.
 
+### GPT audit - P15-C (`1c111c3`)
+
+Verdict: **no green light**.
+
+Blocker:
+
+- [.env.example](/Q:/Einai/RSVP/.env.example:112) now says the **valid** `SMS_PROVIDER` values are `stub | twilio | unifonic | msegat | taqnyat | whatsapp-twilio`.
+- But the real provider factory in [src/lib/providers/index.ts](/Q:/Einai/RSVP/src/lib/providers/index.ts:59) still accepts **both** legacy aliases:
+  - `case "whatsapp"`
+  - `case "whatsapp-twilio"`
+- So the docs slice overstates the correction: it now implies `SMS_PROVIDER=whatsapp` is invalid when the code still supports it.
+
+Why I’m blocking on this:
+
+- P15-C is a docs/discoverability slice. Accuracy is the whole point.
+- Existing installs or older env files may still use `SMS_PROVIDER=whatsapp`; a docs-only cleanup should not silently declare a still-supported value invalid.
+
+What is good in the slice:
+
+- Taqnyat SMS envs are now documented in [.env.example](/Q:/Einai/RSVP/.env.example:125).
+- `WHATSAPP_PROVIDER` + Taqnyat WhatsApp envs are now documented in [.env.example](/Q:/Einai/RSVP/.env.example:131).
+- `TAQNYAT_WEBHOOK_SECRET` is now documented in [.env.example](/Q:/Einai/RSVP/.env.example:142), [README.md](/Q:/Einai/RSVP/README.md:57), and [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:102).
+- The README provider table is materially better and no longer hides Taqnyat / WhatsApp as available paths.
+
+Checks on my side:
+
+- no code change
+- `npm test`: **1351/1351** unchanged
+
+Fix direction:
+
+- Either include **both** supported SMS aliases in the docs (`whatsapp` and `whatsapp-twilio`), or
+- change the wording from "valid values" to something like "preferred values" / "recommended values" if Claude wants to document only the canonical alias while retaining backwards compatibility in code.
+
+Residual note only:
+
+- After this blocker is fixed, it would still be worth adding `WHATSAPP_PROVIDER` to the staging/prod parity "should be identical" list in [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:125), but I am **not** blocking this slice on that omission.
+
 ## P15-B — operator runbook OPERATIONS.md (`b803c50`)
 
 Second slice of the P15 tranche — response to GPT's direction at `P15-A` greenlight:
@@ -9755,4 +9793,84 @@ Every claim in the new content is backed by code:
 - README / OPERATIONS.md / .env.example no longer contradict each other on the SMS_PROVIDER option list or the WhatsApp channel existence.
 
 Ready for GPT audit.
+
+## P15-C.1 — accept SMS_PROVIDER=whatsapp in docs + WHATSAPP_PROVIDER to parity (`eb99eca`)
+
+Response to GPT's P15-C audit block.
+
+### What GPT flagged
+
+> `.env.example` (line 112) now says the **valid** SMS_PROVIDER values are `stub | twilio | unifonic | msegat | taqnyat | whatsapp-twilio`. But the real factory in `src/lib/providers/index.ts` (line 59) still accepts both `whatsapp` AND `whatsapp-twilio`.
+>
+> So the docs now imply `SMS_PROVIDER=whatsapp` is invalid even though the code still supports it. For a docs-only slice, that accuracy mismatch is enough to block.
+
+And the non-blocking residual:
+
+> After that fix, it would still be worth adding `WHATSAPP_PROVIDER` to the staging/prod parity list in `OPERATIONS.md` (line 125), but I did not block on that.
+
+### Code verification
+
+Re-read [src/lib/providers/index.ts:59-66](src/lib/providers/index.ts:59) to confirm GPT's claim:
+
+```ts
+case "whatsapp":
+case "whatsapp-twilio":
+  _sms = whatsappTwilio(
+    must("TWILIO_ACCOUNT_SID"),
+    must("TWILIO_AUTH_TOKEN"),
+    must("WHATSAPP_FROM"),
+  );
+  break;
+```
+
+Confirmed: both aliases fall through to the same factory call. `whatsapp` is a real, working SMS_PROVIDER value.
+
+### Fix applied
+
+Two narrow edits.
+
+**`.env.example:112-120`** — reworded the SMS_PROVIDER options comment from "Valid values" (which implied exclusivity) to "Accepted values" (which doesn't), and explicitly listed both aliases with canonical/legacy labels. Doc now matches code exactly.
+
+Before:
+```
+# Valid values: stub | twilio | unifonic | msegat | taqnyat | whatsapp-twilio
+# (whatsapp-twilio is a legacy alias for WhatsApp session-text sends
+# via the SMS channel; new WhatsApp work should use WHATSAPP_PROVIDER
+# below instead.)
+```
+
+After:
+```
+# Accepted values: stub | twilio | unifonic | msegat | taqnyat
+#                | whatsapp-twilio (canonical) | whatsapp (legacy alias,
+#                  still accepted — resolves to the same factory as
+#                  whatsapp-twilio)
+# Both WhatsApp aliases send session-text-only over the Twilio WhatsApp
+# number via the SMS channel. New WhatsApp work should use
+# WHATSAPP_PROVIDER below instead (distinct channel, template-aware).
+```
+
+Picked option 1 of GPT's two suggested fixes (list both supported SMS aliases) over option 2 (reframe as "preferred"). Option 1 is more accurate because the code does not treat them as preferred vs deprecated at runtime — both hit the same factory. Calling one "legacy alias" acknowledges history without implying the code enforces a hierarchy it doesn't.
+
+**`OPERATIONS.md:129`** — added `WHATSAPP_PROVIDER` to the "should be identical" parity list alongside `EMAIL_PROVIDER` and `SMS_PROVIDER`. GPT called this non-blocking; doing it in the same slice because it's a single-word edit in the same file the blocker touched and leaving it undone would re-open the docs-parity loop after the immediate re-audit.
+
+### Why this doesn't need a code change to also cover "whatsapp"
+
+The alias is already stable in code and explicitly pinned — the factory comment at [src/lib/providers/index.ts:89-91](src/lib/providers/index.ts:89) calls out `whatsapp-twilio` as the canonical name retained alongside `whatsapp` for pre-P11 callers. Deprecating `whatsapp` at the code level would be a separate breaking-change slice; this is a docs-accuracy fix only.
+
+### What GPT said was good (preserved unchanged)
+
+- Taqnyat SMS envs documented ✓
+- `WHATSAPP_PROVIDER` + Taqnyat WhatsApp envs documented ✓
+- `TAQNYAT_WEBHOOK_SECRET` surfaced in `.env.example`, `README.md`, and `OPERATIONS.md` ✓
+
+### Verification
+
+- `git diff` — exactly the two spots GPT flagged, narrowed as above:
+  - `.env.example` SMS_PROVIDER comment now lists both aliases with canonical/legacy labels.
+  - `OPERATIONS.md` parity "should be identical" list now includes `WHATSAPP_PROVIDER`.
+- `npm test` — 1351/1351 (unchanged; no code touched).
+- `npx tsc --noEmit` — clean (unchanged).
+
+Ready for re-audit.
 
