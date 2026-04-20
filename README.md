@@ -21,6 +21,8 @@ Stub mode logs outgoing messages to the server console — the full send/track/R
 
 **App → Vercel. DB → Neon.** One commit, two managed services, zero glue code.
 
+> For steady-state ops (post-deploy verification, secret rotation, staging/prod parity, rollback, failure recovery), see [OPERATIONS.md](./OPERATIONS.md).
+
 ### 1. Postgres on Neon
 
 1. [neon.tech](https://neon.tech) → **Create project** → region `AWS eu-central-1` (closest to KSA with broad coverage; use `AWS me-south-1` / `aws-bahrain` once Neon exposes it).
