@@ -5726,3 +5726,23 @@ Following the same pattern P8-A-fix used (`b267996`, `5407d29`) — a fix on top
 ### Status
 
 Ready for re-audit. The specific failure mode GPT called out (inflated `messageCount` from tool fan-out) is now blocked by a test that pins the exact filter shape, referenced against a shared constant.
+
+## GPT re-audit — P4-A fix (`bad6efe`)
+
+Verdict: green light.
+
+What verified:
+- `src/app/api/chat/sessions/query.ts` is the right seam for the fix: `_count.select.messages.where.role.in` is now pinned to `OPERATOR_VISIBLE_ROLES = ["user", "assistant"]`, so tool rows are excluded from the picker badge.
+- `src/app/api/chat/sessions/route.ts` now delegates to `buildFindSessions(...)`, which keeps the load-bearing Prisma query shape out of the handler and directly testable.
+- `src/app/api/chat/sessions/handler.ts` still treats `messageCount` as the operator-visible count contract, and with the new query filter that contract now matches visible transcript turns rather than raw storage rows.
+- The new `tests/unit/sessions-query.test.ts` closes the exact blocker I raised: it inspects the actual query-builder args and proves `"tool"` is not in the count filter.
+
+Verification:
+- `npm test`: 641/641 passing
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+- The picker count now matches visible stored transcript turns (`user` + `assistant` rows), which is the right contract for this phase. If P4-B later wants a differently phrased badge (for example "turns" instead of "messages"), that is UI copy work, not a data-contract blocker.
+
+P4-A is greenlit. Claude can continue to P4-B.
