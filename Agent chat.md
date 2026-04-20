@@ -8531,3 +8531,134 @@ Surface coverage as of P14-J:
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
 
 Ready for audit.
+
+---
+
+## P14-K — public-RSVP-form helpers (parseOptions + needsOptions + filterForState + validateAnswers) (hash `d215102`)
+
+### Why this slice (honest scoping)
+
+After P14-J landed, spawned another scoping audit subagent with strict "be strict about high value, say so if dry" framing. The subagent surveyed every `src/lib/*.ts` against both the already-covered list and the deferred list. Flagged three legitimate candidates — `questions.ts`, `contact.ts`, `inbound-ack.ts` — all with ZERO direct coverage and non-trivial regression surface. The subagent ranked `questions.ts` as the strongest because it powers the **public RSVP form** that runs against every invitee submission.
+
+`src/lib/questions.ts` — 164 LOC, four pure helpers:
+- `parseOptions(raw)`: splits newline-separated option lists. Used by both server validation AND the public form renderer.
+- `needsOptions(kind)`: `single_select || multi_select`. Discriminates "persist options column" in create/update.
+- `filterForState(questions, attending)`: show-when gating. The `attending=null` case is load-bearing (admin preview path).
+- `validateAnswers(questions, raw)`: coerce + validate across all six question kinds, returns `{ok,answers}` or `{ok:false,errors}`.
+
+Pin-only slice — same pattern as P14-F / P14-I / P14-J.
+
+### Regression surfaces protected
+
+**(1) `parseOptions` — blank-line drop + CRLF tolerance + no-dedup.** Regex is `/\r?\n/`; pipeline is `split → map(trim) → filter(length > 0)`. Pinned:
+- null / undefined / empty string → `[]` (not a crash)
+- LF-separated and CRLF-separated both split cleanly
+- Leading / trailing whitespace on each line trimmed
+- Pure-whitespace lines drop (operator may type extra newlines)
+- Duplicates preserved (dedup policy lives elsewhere in multi_select consumer)
+
+**(2) `needsOptions` — boolean false, multi_select true.** Load-bearing:
+- `needsOptions("boolean") === false` — regression to true would persist stale option blobs on boolean questions
+- `needsOptions("multi_select") === true` — regression to false would lose ALL options on every save of a multi-select
+
+**(3) `filterForState` — null-attending drops conditionals.** LOAD-BEARING: admin preview page passes `null` for undecided invitees. A regression that treated null as attending-OR-declined would leak conditional questions prematurely. Pinned:
+- `attending=null` + `showWhen=attending|declined` → dropped
+- `showWhen=always` always passes regardless of attending state
+- input order preserved
+
+**(4) `validateAnswers` — empty/required semantics.** Whitespace-only strings fail required (via `.trim() === ""`). Empty arrays fail required. Non-required + empty → skipped (no error, no answer entry). Pinned all four emptiness cases.
+
+**(5) `validateAnswers` — truncation discriminator.** The ternary `q.kind === "short_text" ? 300 : 5000` is the ONLY discriminator between short_text (300) and long_text (5000). A regression to always-300 would silently drop 94% of long_text. Pinned both limits.
+
+**(6) `validateAnswers` — number via `Number.isFinite`.** Guards NaN AND Infinity. Pinned against a regression to `!Number.isNaN` (which would allow Infinity through). Pinned: `"Infinity"` → `invalid_number`.
+
+**(7) `validateAnswers` — boolean truthy set + case-insensitive.** Exactly `{true, yes, on, 1}` after `toLowerCase()`. Load-bearing:
+- `"TRUE"` / `"Yes"` / `"ON"` all → `"true"` (case-insensitive — pinned)
+- Unknown strings (`"no"`, `"0"`, `"off"`, anything-else) → `"false"` (NOT an error — HTML checkbox semantics: absent checkbox doesn't submit "false" at all, so the fallback must resolve anything unknown to false, not error)
+
+**(8) `validateAnswers` — single_select membership through `parseOptions`.** Pinned that blank-line-stripped options are what the membership check runs against. A regression that did `options.split("\n")` directly would accept `""` as a choice (and miss clean options on operator textareas with trailing newlines).
+
+**(9) `validateAnswers` — multi_select stale-option grace.** Invalid picks are SILENTLY DROPPED, not errored. This is how an invitee's previously-submitted answer referencing an option the operator has since deleted handles gracefully. Pinned.
+
+**(10) `validateAnswers` — multi_select required edge case.** After filtering to valid picks only, if the result is empty AND required, error is `"required"` (NOT `"invalid_choice"`). Pinned.
+
+**(11) `validateAnswers` — multi_select string-not-array coercion.** FormData.getAll can legitimately return a single string for a single-pick multi-select. The `Array.isArray` branch wraps it to `[input]`. Pinned.
+
+**(12) `validateAnswers` — multi_select non-required all-invalid edge.** Produces an answer row with `value=""` (NOT skip, NOT error). Records "invitee submitted, nothing matched." Pinned.
+
+**(13) `validateAnswers` — unknown kind forward-compat.** The `default` branch `continue`s cleanly — no error, no answer entry. A future kind added to `QUESTION_KINDS` before `validateAnswers` gets a branch MUST NOT crash the form. Pinned.
+
+**(14) `validateAnswers` — all-or-nothing commit.** If ANY question errors, the return is `{ok:false,errors}` — the partial-success answers are DROPPED (not returned). Pinned against a regression that returned both.
+
+### Implementation — single commit `d215102`
+
+**New:**
+- `tests/unit/questions.test.ts` — 52 pins, ~497 LOC.
+
+**Modified:**
+- `package.json` — adds the new test file.
+
+No source-file changes. Pin-only slice.
+
+### Test coverage breakdown
+
+**questions.test.ts — 52 tests:**
+
+- `parseOptions`: 9 (null / undef / empty / single line / LF split / CRLF split / trim / blank-line drop / duplicate preservation)
+- `needsOptions`: 6 (one per QuestionKind — boolean=false pinned, multi_select=true pinned)
+- `filterForState`: 7 (always passes × 3 attending states / attending×2 match / declined×2 match / attending=null drops conditionals / order preservation; presented as 3 test cases + inline triples)
+- `validateAnswers` empty/required: 6 (missing, empty string, whitespace-only, empty array, not-required + missing, not-required + empty)
+- `validateAnswers` short/long truncation: 3 (300 / 5000 / passthrough)
+- `validateAnswers` number: 4 (int, float, non-numeric invalid, Infinity invalid)
+- `validateAnswers` boolean: 5 (canonical "true", yes/on/1 batch, case-insensitive batch, "false", falsy batch)
+- `validateAnswers` single_select: 3 (valid, invalid, blank-line stripping)
+- `validateAnswers` multi_select: 5 (all valid joined, stale filter, required + all-invalid, string-not-array coerce, non-required + all-invalid empty answer)
+- `validateAnswers` integration: 4 (mixed success/error → errors only, all success → all answers in order, unknown kind skipped, errors accumulated across ids)
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1212/1212 passing** in 3.8s (was 1160; +52 from the new tests)
+- 0 `not ok` lines in TAP
+- No source changes — pin-only slice
+
+### Where P14 stands — now eleven slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization (email + sms routes).
+- **P14-I** (`1375045`) — activity phrase() renderer + webhook-auth secretMatches (pin-only).
+- **P14-J** (`0250650`) — template render/escapeHtml + Prisma error classifiers (pin-only).
+- **P14-K** (`d215102`) — public-RSVP-form helpers parseOptions/needsOptions/filterForState/validateAnswers (pin-only).
+
+Test count: 825 → 1212 (+387 across eleven slices). Four of eleven are pin-only (P14-F, P14-I, P14-J, P14-K); seven are extract-and-pin.
+
+Surface coverage as of P14-K:
+- **AI tool helpers**: workspace-reducer, widget-pipeline, confirm-flow, import-outcomes, send-campaign-summary, propose-send-preview, activity-scope — all extracted + pinned.
+- **Inbound webhooks**: parseIntent + token extractors (P14-F) + provider normalization (P14-H) — fully pinned.
+- **Operator-visible strings**: `phrase()` — tone correctness, actor cascade, pluralization, fallback robustness.
+- **Security helpers**: `secretMatches`, `escapeHtml`, `render` one-pass — all pinned.
+- **Template primitives**: `render` + `escapeHtml` — correctness + security.
+- **Error classifiers**: `isUniqueViolation` + `isNotFound` — instanceof discipline.
+- **Public RSVP form**: `parseOptions` + `needsOptions` + `filterForState` + `validateAnswers` — the whole invitee-submission validation pipeline.
+
+### Candidates surfaced for future slices (NOT committed)
+
+Subagent also flagged two other viable pin-only targets:
+- `src/lib/contact.ts` (100 LOC): normalizeEmail / normalizePhone / dedupKey / csvCell / csvRow / parseContactsText. CSV formula-injection guard is security-load-bearing. ~35-45 pins.
+- `src/lib/inbound-ack.ts` (157 LOC): bilingual ack copy × 2 channels × 3 intents + locale fallback chain + opt-out parsing. Extract-and-pin. ~25-30 pins.
+
+These would be natural P14-L / P14-M if the series continues.
+
+### What remains deferred (final)
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change; zero new test value. Remains a follow-up.
+- **Gate-precedence in `propose_import` / `commit_import`** — audited & formally deferred (prisma-interleaved by design).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
+
+Ready for audit.
