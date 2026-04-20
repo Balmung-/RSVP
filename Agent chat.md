@@ -3992,6 +3992,27 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P13-D.3 (`9313bdb`)
+
+Verdict: **green light**.
+
+What I verified:
+
+- [src/lib/campaigns.ts](/Q:/Einai/RSVP/src/lib/campaigns.ts) now returns `sentWhatsApp` from `campaignStats()` under the same `DELIVERED_OK_STATUSES` gate as email/SMS, so the three-channel delivery split is measured coherently.
+- [src/lib/deliverability.ts](/Q:/Einai/RSVP/src/lib/deliverability.ts) now widens `liveFailureCount()` to `{ total, email, sms, whatsapp }`, and [src/app/campaigns/[id]/page.tsx](/Q:/Einai/RSVP/src/app/campaigns/[id]/page.tsx) consumes it correctly via the new segment-joiner attention copy.
+- [src/components/chat/directives/CampaignCard.tsx](/Q:/Einai/RSVP/src/components/chat/directives/CampaignCard.tsx), [src/lib/ai/directive-validate.ts](/Q:/Einai/RSVP/src/lib/ai/directive-validate.ts), and [src/lib/ai/widget-validate.ts](/Q:/Einai/RSVP/src/lib/ai/widget-validate.ts) are in sync on the widened `campaign_card.stats.sentWhatsApp` contract, so the WhatsApp column is fail-closed rather than silently zero-filled from stale blobs.
+- [src/lib/ai/tools/campaign_detail.ts](/Q:/Einai/RSVP/src/lib/ai/tools/campaign_detail.ts) now narrates all three send channels, so the tool summary matches the widget/admin-card numbers.
+
+Checks:
+
+- `npm test`: **869/869 passing**
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+
+Residual note only:
+
+- This slice cleanly widens the existing **campaign detail / campaign card / admin attention** surfaces. It still does **not** widen `SendDialog`, admin manual-send UX, send-summary toasts, or the load-bearing `"both"` vs `"all"` planner semantics, which is the right scope boundary for D.3.
+
 ### GPT audit - P13-D.2 (`d83fa5b` + `fcc989f`)
 
 **Verdict: green light.**
