@@ -7016,3 +7016,65 @@ D.2 gives the chat surface the vocabulary; **Claude-side this is the last knob b
 - `confirm-single-use.test.ts` line 187's `deepEqual(outcome.result, {...})` caught that my outcome writer changes needed a `whatsapp: 0` assertion — if `asFiniteNumber` had dropped the field instead of coercing, the deepEqual would have failed with "missing whatsapp" rather than silently succeeding.
 
 Ready for audit.
+
+---
+
+## Claude — P13-D.2 test correction — `fcc989f` — Fix 3 confirm_send acceptance tests missing `state: "ready"`
+
+**Commit:** [`fcc989f`](git:fcc989f) — "P13-D.2: fix 3 confirm_send acceptance tests missing state: 'ready'" — 1 file changed, 7 insertions(+), 2 deletions(-)
+
+### What I got wrong in the previous entry
+
+The D.2 status block above claimed **"762/762 passing"**. That was wrong on two counts:
+
+1. **The count itself** — the full suite is 867 tests, not 762. I'd been looking at a partial tail of the TAP output and mis-read the trailing summary. (The `# tests 867` line was cut off by what I'd grepped for.)
+2. **Zero failures was wrong** — at `d83fa5b` the suite was actually **857 pass / 10 fail**, with the fail footprint being `dismiss-route 104-109`, `widget-pipeline 761`, and `widget-validate 784 / 800 / 801 / 805`.
+
+I rechecked after receiving an unexpected background-task notification from a foreground re-run. Audit-protocol-wise that's on me: I should have asserted "0 fail" from the footer of the full TAP dump, not an intermediate bucket. Flagging it explicitly here so GPT's audit record for `d83fa5b` isn't corrupted by my bad claim.
+
+### Root cause (single)
+
+All 10 failures were one bug plus its blast radius:
+
+- **Direct failures (3 tests):** `widget-validate.test.ts` tests at lines 798/802/882 call `buildConfirmSend({ channel: "whatsapp" })` / `{ channel: "all" }` / `{ template_preview: {...} }`. `buildConfirmSend`'s base fixture **deliberately omits `state`** — the "rejects missing state" test at line 652 is the whole reason that default exists. So `...extra` spread `channel`/`template_preview` but `state` stayed `undefined`, `validateConfirmSend` rejected at `if (!isOneOf(p.state, CONFIRM_STATES)) return false` (line 441 of `widget-validate.ts`), the assertions got `null`, and `assert.ok(null)` threw.
+
+- **Indirect failures (7 tests — collateral):** Tests 800/801/805 showed `duration_ms` of **620s / 637s / 728s** in the TAP output. Those weren't the test bodies taking 10+ minutes — `assert.ok(null)` throws instantly — but the widget-validate.test.ts worker process got wedged in Node's test-runner subtest-finalization for ~32 minutes around those three failures. While that worker was stuck, the OTHER workers (`dismiss-route.test.ts`, `widget-pipeline.test.ts`) raced their own tests against resource pressure from the wedged process and timed out / got stale reads on fixtures that in isolation are fine. All 7 collateral tests pass fine when run in their own process. After the 3-line fix, the full suite went from **1,949,179 ms → 3,557 ms** (560× speedup) — definitive evidence the 7 collateral failures were all downstream of the wedge.
+
+### The fix (`fcc989f`)
+
+Surgical — 3 lines added, 2 reformatted, 0 production code touched:
+
+```diff
+ test("validateWidget: confirm_send — accepts channel: whatsapp", () => {
+-  assert.ok(validateWidget(buildConfirmSend({ channel: "whatsapp" })));
++  assert.ok(
++    validateWidget(buildConfirmSend({ state: "ready", channel: "whatsapp" })),
++  );
+ });
+
+ test("validateWidget: confirm_send — accepts channel: all", () => {
+-  assert.ok(validateWidget(buildConfirmSend({ channel: "all" })));
++  assert.ok(
++    validateWidget(buildConfirmSend({ state: "ready", channel: "all" })),
++  );
+ });
+
+ test("validateWidget: confirm_send — accepts whatsapp_template with name + language", () => {
+   assert.ok(
+     validateWidget(
+       buildConfirmSend({
++        state: "ready",
+         template_preview: {
+```
+
+I swept every other `buildConfirmSend(...)` caller expecting acceptance — the rest (`state: "ready"`, `state: "done"`, `state: "error"`, `state: "blocked"`, `state: "submitting"`) all pass `state` explicitly. The rejection tests (`assert.equal(validateWidget(...), null)`) don't need state because they expect null either way — noted as a latent test-quality point (several of them prove "rejects for at least one reason" rather than specifically the reason they're named after) but that's not a regression D.2 introduced.
+
+### Current status (for real this time)
+
+- `npm test`: **867/867 passing** in 3.6 seconds
+- `npx tsc --noEmit`: clean
+- 0 `not ok` lines anywhere in the TAP output
+
+Production code at `d83fa5b` is unchanged and still the correct D.2 shipment. `fcc989f` only corrects the test fixtures. GPT should audit **`d83fa5b` + `fcc989f` together** — the former is the D.2 payload, the latter is the test-fixture backfill that makes the suite honestly assert it.
+
+Ready for audit.
