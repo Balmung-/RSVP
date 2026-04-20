@@ -18,6 +18,7 @@ import {
   uploadErrorMessage,
   type UploadResponse,
 } from "./uploadReference";
+import { SEED_PROMPT_EVENT, isSeedPromptEvent } from "./seedComposerPrompt";
 import { Icon } from "@/components/Icon";
 
 // The left rail: transcript + composer. Display-only; all state and
@@ -58,6 +59,7 @@ export function ChatRail({
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -66,6 +68,32 @@ export function ChatRail({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [turns]);
+
+  // P8-B — when a workspace chip seeds a prompt, focus the
+  // textarea so the operator can hit Enter immediately without a
+  // manual click. ChatWorkspace updates the input text via its own
+  // sibling listener on the same event; this one handles focus.
+  //
+  // `setTimeout(..., 0)` defers the focus() call until after React
+  // has applied the `setInput(prompt)` state update, so the caret
+  // lands at the end of the seeded text rather than before it.
+  // Without the defer, a fast click could focus an empty textarea
+  // a tick before the text arrives, which is visually janky.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: Event) => {
+      if (!isSeedPromptEvent(e)) return;
+      const el = textareaRef.current;
+      if (!el) return;
+      window.setTimeout(() => {
+        el.focus();
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      }, 0);
+    };
+    window.addEventListener(SEED_PROMPT_EVENT, handler);
+    return () => window.removeEventListener(SEED_PROMPT_EVENT, handler);
+  }, []);
 
   const canSend = phase === "idle" && input.trim().length > 0;
   const canUpload = phase === "idle" && !uploading;
@@ -207,6 +235,7 @@ export function ChatRail({
             <Icon name={uploading ? "spinner" : "upload"} size={18} className={uploading ? "animate-spin" : undefined} />
           </button>
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}

@@ -3,7 +3,12 @@
 import { DirectiveRenderer, type AnyDirective } from "./DirectiveRenderer";
 import type { ClientWidget } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
-import { isTerminalConfirmWidget } from "@/lib/ai/widget-validate";
+import {
+  isTerminalConfirmWidget,
+  type WidgetKind,
+} from "@/lib/ai/widget-validate";
+import { getNextAction } from "@/lib/ai/next-action-prompts";
+import { NextActionChip } from "./NextActionChip";
 
 // Workspace widget renderer. Thin shim over `DirectiveRenderer` for
 // W2 — the six widget kinds (campaign_list, campaign_card,
@@ -62,6 +67,18 @@ export function WidgetRenderer({
     typeof onDismiss === "function" &&
     isTerminalConfirmWidget(widget.kind, widget.props);
 
+  // P8-B — compute the "seed next action" chip. The resolver
+  // returns null for action/summary kinds and for kinds with no
+  // meaningful follow-up, so this is effectively a no-op on any
+  // widget without a registered prompt. The cast from `string` to
+  // `WidgetKind` is safe here: every widget returned by the DB
+  // layer went through `validateWidget`, which enforces
+  // `widget.kind ∈ WIDGET_KINDS`.
+  const nextAction = getNextAction(
+    { kind: widget.kind as WidgetKind, props: widget.props },
+    locale === "ar" ? "ar" : "en",
+  );
+
   return (
     <>
       <DirectiveRenderer directive={directive} fmt={fmt} />
@@ -90,6 +107,19 @@ export function WidgetRenderer({
             ×
           </span>
         </button>
+      )}
+      {nextAction && (
+        // Chip renders BELOW the directive card, inside the same
+        // dashboard wrapper so the `rounded-xl` focus-ring hugs
+        // both. Right-aligned so it reads as a subtle follow-up
+        // affordance rather than a primary action.
+        <div className="pt-2 flex justify-end">
+          <NextActionChip
+            label={nextAction.label}
+            prompt={nextAction.prompt}
+            locale={locale === "ar" ? "ar" : "en"}
+          />
+        </div>
       )}
     </>
   );

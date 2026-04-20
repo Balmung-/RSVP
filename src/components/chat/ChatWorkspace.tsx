@@ -10,6 +10,10 @@ import {
   reduceTurns,
   reduceWidgets,
 } from "./workspaceReducer";
+import {
+  SEED_PROMPT_EVENT,
+  isSeedPromptEvent,
+} from "./seedComposerPrompt";
 
 // The split-workspace orchestrator for /chat (W2).
 //
@@ -108,6 +112,28 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     // ESLint would want hydrateSession in the dep array; stable
     // closure over primitives only, so the miss is harmless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // P8-B — the dashboard's "seed next action" chips dispatch a
+  // CustomEvent on `window`; this listener funnels the event's
+  // `prompt` into the composer's input state. Overwrite (not
+  // append) so the operator sees exactly what the chip seeded.
+  // If they had a partial draft, clicking a chip is an explicit
+  // opt-in — the same behavior the rest of the industry's
+  // suggested-prompt chips follow (ChatGPT, Linear, etc).
+  //
+  // The listener is in ChatWorkspace (not ChatRail) because this
+  // is where the `input` state lives. ChatRail runs its own tiny
+  // sibling effect to focus the textarea so the operator can hit
+  // Enter immediately without a manual click.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: Event) => {
+      if (!isSeedPromptEvent(e)) return;
+      setInput(e.detail.prompt);
+    };
+    window.addEventListener(SEED_PROMPT_EVENT, handler);
+    return () => window.removeEventListener(SEED_PROMPT_EVENT, handler);
   }, []);
 
   const hydrateSession = useCallback(
