@@ -8124,3 +8124,95 @@ Test count: 825 → 1014 (+189 across six slices). Every meaningful auto-mutatio
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per GPT residual note.
 
 Ready for audit.
+
+---
+
+## P14-G — campaign_detail activity-scope extraction + pin (hash `71fc2c0`)
+
+### Why this slice
+
+The P14-F residual list called this out as the last substantive extraction opportunity still visible in the AI-tool surface. Spent ~10 min confirming the gap was real before building: `src/lib/ai/tools/campaign_detail.ts` lines 111-149 (pre-extract) held four rules that couldn't be unit-tested without prisma / `campaignStats` / the handler envelope, and the rules have a real regression history — Push 6a was a stage-sends regression caused by exactly this kind of filter drift (`refType: "campaign"`-only dropped `invite.sent` / `stage.*` rows). The inline composition was the fix; it had zero tests.
+
+This is a clean extract-and-pin slice (not pin-only like P14-F) because the composition was inline — no exported seam to pin against until one existed.
+
+### Regression surfaces protected
+
+**(a) "Drop stage branch" regression (the Push 6a return case).** A refactor that special-cases empty-stage campaigns by omitting stage-only filters at a different layer — or one that swaps `stageIds.length > 0` for a truthy check that doesn't fire on `[]` (it does, but subtly) — starts dropping `invite.sent` / `stage.*` rows off the card. Pin 2 + pin 4 catch this.
+
+**(b) The single-entry collapse threshold.** The rule is EXACTLY `scopedOr.length === 1 ? scopedOr[0] : { OR: scopedOr }`. A ">= 1 collapse" regression returns the bare campaign branch on multi-branch queries, silently dropping stage AND invitee rows. Deadliest single regression this slice protects against. Pin 14 tests the threshold at 1-vs-2 directly.
+
+**(c) null-vs-empty-array conflation on `inviteeIds`.** The null sentinel means "scan was capped (>2000 invitees)"; the empty array means "scan ran, zero results". Both suppress the invitee branch, but ONLY null should fire the "per-invitee events hidden" UI hint. A well-meaning "normalize null → []" cleanup silently disables the hint. Pin 5 + pin 7 pin the distinction.
+
+**(d) Branch-order drift.** `campaign → stage → invitee` is pinned as a fixed order. `OR` is semantically commutative, but the array is observable by the audit replay stream and by query-plan introspection. An "alphabetize" cleanup is the likely perturbation. Pin 4 + pin 12 pin the order explicitly.
+
+**(e) Singleton-to-scalar optimization.** Stage and invitee branches ALWAYS use `{ in: [...] }`, even with one element. Prisma accepts both `{ refId: "x" }` and `{ refId: { in: ["x"] } }` at runtime, but the shape is observable and consistent with the inline code. Pin 8 + pin 9 reject a "optimize singletons to scalar" refactor.
+
+**(f) refType literal drift.** The exact strings `"campaign"`, `"stage"`, `"invitee"` are the contract with every writer into `EventLog.refType` (`src/lib/stages.ts`, `src/lib/inbound.ts`, `src/lib/checkin.ts`, `src/lib/approvals.ts`, `src/lib/rsvp.ts`, …). A rename in one place silently corrupts every reader. Pin 12 catches it.
+
+### Implementation — single commit `71fc2c0`
+
+**New:**
+- `src/lib/ai/tools/activity-scope.ts` — ~144 LOC. Exports `deriveActivityScope`, `DeriveActivityScopeInput`, `DeriveActivityScopeResult`.
+- `tests/unit/activity-scope.test.ts` — 14 pins, ~354 LOC.
+
+**Modified:**
+- `src/lib/ai/tools/campaign_detail.ts` — removed ~22 LOC of inline OR-composition, added one `deriveActivityScope({ campaignId, stageIds, inviteeIds })` call. `Prisma` type import stays (still used for `CampaignWhereInput` on the scope-AND compose at line 78). Doc block above the call-site points to `activity-scope.ts` for the rules.
+- `package.json` — adds the new test file.
+
+### Mirror-copy note (intentional scope bound)
+
+`src/app/campaigns/[id]/activity/page.tsx:60-68` still holds a near-identical inline copy of this composition, including the same collapse rule and the same `inviteeScanCapped` flag. **This slice does NOT migrate that call site.** Reasons:
+
+1. The activity page is a React Server Component with its own call-site shape — rewiring it has independent verification surface (pagination UI, `ar`/`en` locale hint text, route-level auth).
+2. Per-slice blast-radius discipline — one caller migrated per slice so if the extraction shifts behavior subtly, only one surface is affected and the pins catch it before the page is touched.
+3. The migration is mechanical (6 lines changed) and can be a follow-up slice (maybe P14-G.1) once the pins here have survived in production for a cycle.
+
+Documented in `activity-scope.ts`'s header comment so a reader who touches the page knows the pins here don't currently guard it.
+
+### Test coverage — 14 tests, grouped by regression vector
+
+**(1) Collapse optimization — 1 test:** single-branch campaign scope returns the bare `{refType, refId}` literal, NOT an `OR` wrapper. Pins the query-plan path.
+
+**(2-4) OR-composition shape — 3 tests:** campaign+stages (2-entry OR), campaign+invitees (2-entry OR + capped=false), all three branches (3-entry OR, order pinned).
+
+**(5-7) Capped-scan flag — 3 tests:** null inviteeIds → flag=true + no invitee branch (shape collapses to bare campaign); null + stages → 2-entry OR + flag=true; null vs [] → same where shape, different flag (the "don't normalize null → []" safety pin).
+
+**(8-9) Singleton-in-array discipline — 2 tests:** stage singleton uses `{in: [id]}`, invitee singleton uses `{in: [id]}` — both pin against bare-scalar "optimizations".
+
+**(10) Field extraction — 1 test:** `.map((s) => s.id)` pulls only the `.id` field from each stageId input object, ignoring any extra fields. Cast the input objects with spurious fields; assert the output has only ids.
+
+**(11) Id propagation — 1 test:** campaignId passes through verbatim — no trimming, no lowercasing, no prefix-stripping. Mixed-case id survives.
+
+**(12) refType literal guard — 1 test:** exact strings `"campaign"`, `"stage"`, `"invitee"` in that order. Catches silent renames.
+
+**(13) Result-shape drift — 1 test:** `Object.keys(result).sort()` is exactly `["activityWhere", "inviteeScanCapped"]`. A silent extension (new field added to return type but caller not rewired) fails this pin.
+
+**(14) Collapse threshold — 1 test:** 1 branch → bare; 2 branches (campaign+stage) → OR wrapper; 2 branches (campaign+invitee) → OR wrapper. Pins the exact threshold. Protects against the ">=1 collapse" regression — deadliest single regression this slice can catch.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1028/1028 passing** in 2.7s (was 1014; +14 from the new tests)
+- 0 `not ok` lines in TAP
+- `campaign_detail.ts` diff: +13 / -23 (one delegation call replaces the inline composition; the surrounding prisma reads still decide null-vs-scanned)
+
+### Where P14 stands — now seven slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+
+Test count: 825 → 1028 (+203 across seven slices). Every meaningful pure derivation in the AI-tool surface — summary-refresh trigger, confirm-route pre-claim, import-outcome fold, send-campaign summary, propose-send preview, inbound intent classification, campaign_detail activity-scope — is now extracted (six of seven) or pinned at its existing exported seam (one of seven) with exhaustive unit tests.
+
+### What remains deferred
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change on the React Server Component at `src/app/campaigns/[id]/activity/page.tsx:60-68`. Waits until the pins here have proven themselves; noted in the helper's header.
+- **`inbound/email/route.ts` provider normalization** — `extractEmail` + `htmlToText` + dual-path form/JSON coalescing. Lower signal than P14-A through P14-G.
+- **Gate-precedence invariants in `propose_import` / `commit_import`** — prisma-interleaved; cleanest extraction path unclear. Could be done if a regression surfaces.
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per GPT residual note.
+
+Ready for audit.
