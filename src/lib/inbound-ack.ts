@@ -19,19 +19,19 @@ import { logAction } from "./audit";
 const APP_URL = () => process.env.APP_URL ?? "http://localhost:3000";
 const BRAND = () => process.env.APP_BRAND ?? "Protocol";
 
-function ackEnabled(): boolean {
+export function ackEnabled(): boolean {
   const v = (process.env.INBOUND_AUTO_ACK ?? "true").toLowerCase();
   return v !== "false" && v !== "0" && v !== "off";
 }
 
-function localeFor(invitee: Invitee, campaign: Campaign | null): "en" | "ar" {
+export function localeFor(invitee: Invitee, campaign: Campaign | null): "en" | "ar" {
   const raw = (invitee.locale ?? campaign?.locale ?? process.env.DEFAULT_LOCALE ?? "en").toLowerCase();
   return raw === "ar" ? "ar" : "en";
 }
 
-type AckIntent = "attending" | "declined" | "stop";
+export type AckIntent = "attending" | "declined" | "stop";
 
-function emailCopy(
+export function emailCopy(
   intent: AckIntent,
   locale: "en" | "ar",
   campaignName: string,
@@ -74,7 +74,7 @@ function emailCopy(
   };
 }
 
-function smsCopy(
+export function smsCopy(
   intent: AckIntent,
   locale: "en" | "ar",
   campaignName: string,
