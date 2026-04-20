@@ -14,6 +14,7 @@ import { createWorkspaceEmitter } from "@/lib/ai/widgets";
 import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
 import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
 import { resolveRuntime } from "@/lib/ai/runtime";
+import { deriveSessionTitle } from "@/lib/ai/session-title";
 import type {
   InternalAssistantContent,
   InternalMessage,
@@ -176,8 +177,21 @@ export async function POST(req: Request) {
       );
     }
   } else {
+    // P4 — derive a title from the operator's first user message so
+    // the session-picker has a meaningful label the moment the row
+    // appears in GET /api/chat/sessions. `deriveSessionTitle` may
+    // return null for whitespace-only messages (defensive — the
+    // length check above already rejected empty-trim, so this is
+    // extremely unlikely to be null here, but the column is nullable
+    // so a null is a valid write). Subsequent turns in this session
+    // never re-derive: the title is the ORIGINAL ask, not whatever
+    // was most recently typed.
+    const derivedTitle = deriveSessionTitle(message);
     const created = await prisma.chatSession.create({
-      data: { userId: me.id },
+      data: {
+        userId: me.id,
+        title: derivedTitle,
+      },
       select: { id: true },
     });
     sessionId = created.id;
