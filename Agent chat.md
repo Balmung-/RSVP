@@ -6486,3 +6486,104 @@ Verification on my side:
 Residual note only:
 
 - The repo still has no live producer of `Invitation.channel = "whatsapp"` rows today — [src/lib/delivery.ts](Q:/Einai/RSVP/src/lib/delivery.ts:46) only creates `email` and `sms` invitations, and `getWhatsAppProvider()` is still unused in the current send path. So this fix is correct and fail-closed, but the notepad should avoid overstating WhatsApp as a fully live outbound->delivery loop until that send/invitation wiring lands.
+
+---
+
+## P13-A — Campaign WhatsApp template fields + pure decideWhatsAppMessage helper (`414e535`)
+
+### Why a sub-slice and not a full P13
+
+The P13 roadmap goal ("the operator can plan, preview, confirm, send, and review SMS/WhatsApp/email from one surface") is broad enough to touch schema, send path, tool layer, widget UI, and preview/confirm copy. The commit discipline at the top of the roadmap says not to mix runtime abstraction, provider integration, and UI composition in the same commit — and the two-agent audit protocol rewards narrow commits GPT can verify surgically. So I'm splitting P13 into a sequence of landing slices, each auditable in isolation:
+
+- **P13-A (this commit)** — schema + pure planner. The atomic correctness seam.
+- **P13-B** — `sendWhatsApp` in delivery.ts, wiring the planner + provider + Prisma. New integration, no UI.
+- **P13-C** — `sendCampaign` extension for `channel: "whatsapp"`, `resendSingle` / `resendSelection` channel widening, and the job-planner loop.
+- **P13-D** — `propose_send` + `confirm_send` widget extensions for WhatsApp: channel enum, blockers (template missing / template malformed), copy with template-vs-session caveats.
+- **P13-E** — summary widget refresh after send/import/mutation (the last roadmap deliverable).
+
+Each slice is a build-then-audit cycle so a GPT blocker on one doesn't stall the others.
+
+### What P13-A ships
+
+Schema additions on `Campaign` (no migration file — this repo uses `prisma db push`, not migrate):
+
+- `templateWhatsAppName      String?` — BSP template id (e.g. `rsvp_invitation_v1`). Meta enforces exact-match, so no attempt to normalize.
+- `templateWhatsAppLanguage  String?` — BCP-47 tag (`"ar"`, `"en_US"`). Nullable independently from name, though both are required to send — the planner refuses if either is missing.
+- `templateWhatsAppVariables String?` — JSON-encoded positional expression array, e.g. `["{{name}}","{{venue}}","{{eventAt}}"]`. Each entry is a template.ts `render()` expression string; the planner resolves each against the caller-supplied vars map and hands Meta the positional array.
+
+All three fields are nullable so existing campaigns continue to work unchanged. A campaign that hasn't been configured for WhatsApp will fail fast at send time with `reason: "no_template"` — never silently-broken-send.
+
+Pure planner: [src/lib/providers/whatsapp/sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:1) exports `decideWhatsAppMessage(input)` returning a tagged discriminated union:
+
+```ts
+type WhatsAppPlanResult =
+  | { ok: true; message: WhatsAppMessage }
+  | { ok: false; reason: "no_template" | "template_vars_malformed" };
+```
+
+Three decision branches, in order:
+
+1. **Template-first.** If `templateWhatsAppName` AND `templateWhatsAppLanguage` are both non-empty → build a `WhatsAppTemplateMessage`. If `templateWhatsAppVariables` is non-null, parse as a JSON array of strings, `render()` each expression against the caller's vars map, and attach the positional result.
+2. **Session-text fallback.** If `sessionOpen === true` AND `templateSms` is non-empty → build a `WhatsAppTextMessage` reusing the SMS body. Only valid when the caller has concrete reason to believe the recipient replied within Meta's 24h window; the default `undefined` / `false` path refuses session text because campaigns sending to cold recipients would hit a Meta policy rejection.
+3. **No path.** Return `{ ok: false, reason: "no_template" }`.
+
+Malformed `templateWhatsAppVariables` (non-JSON, non-array, or array containing a non-string entry) is a separate failure: `reason: "template_vars_malformed"`. The planner refuses rather than silently dropping variables — a broken config should stall at the send boundary, not produce Meta-side rejections that are harder to diagnose.
+
+Template wins over session-text when both are available. Rationale: templates are the safer default (pre-approved, policy-compliant), so once a campaign has a template configured, every recipient on that campaign gets the template — behavior stays consistent across the audience, and adding a template doesn't silently change the message for in-session replies.
+
+### Why pure and why at this layer
+
+The planner is pure data-in / data-out: no Prisma, no provider, no env. Rationale:
+
+- Meta's template discipline is a correctness seam that the operator can't fix after the fact — if we send the wrong shape, Meta's rejection comes back with a policy error code and the invitation is stuck at `failed`. Pinning every branch at unit-test time means a regression is loud before it ever hits production.
+- The caller (`sendWhatsApp` in P13-B) stays trivial: pass `.message` to `WhatsAppProvider.send()` on success, translate `.reason` into `Invitation.error` on failure. No branching on schema fields at the delivery layer — the planner owns that discipline in one place.
+- Decoupled from Prisma's generated `Campaign` type via the local `WhatsAppPlanCampaign` shape. Tests supply plain objects; future callers build from whatever select shape they have. A future schema rename only touches this shape if the planner's inputs actually change.
+
+### The `vars: Record<string, string>` contract
+
+The planner doesn't build the vars map itself — the caller does. Rationale:
+
+- `vars()` in [preview.ts](Q:/Einai/RSVP/src/lib/preview.ts:24) reads `APP_URL`, `BRAND`, `TZ` from env. Pulling that into the planner would make every test setup carry env fixtures, and the planner's tested contract would then conflate env-dependence with the template decision logic.
+- Making vars an input lets the caller compose multiple layers (campaign vars + invitee vars + runtime vars) however they want. Email / SMS rendering does this inside preview.ts; WhatsApp delivery (P13-B) will too, passing the same shape to the planner.
+- Tests supply a constant `VARS` object and can pin exactly what comes out, without env mocking.
+
+### Tests — 22 new (800/800 total, was 778)
+
+All in [tests/unit/whatsapp-send-plan.test.ts](Q:/Einai/RSVP/tests/unit/whatsapp-send-plan.test.ts:1). Structure:
+
+- **Rule 1 (template)** — 5 tests. Happy paths with no vars / explicit vars / empty array / unknown-key expressions / mixed-literal-and-interpolation expressions.
+- **Malformed variables** — 4 tests. Non-JSON / JSON object / non-string element / null element. Each pins that `reason: "template_vars_malformed"` is returned rather than silently producing a broken message.
+- **Template partials** — 4 tests. name-xor-language / empty-string on either field. Meta identifies templates by (name, language), so both are required; empty-string is treated as unconfigured.
+- **Rule 2 (session text)** — 4 tests. Happy path / no body / empty body / window-closed-default. The default-closed behavior is critical — a caller that forgets to pass `sessionOpen` gets refusal, not an unsafe send.
+- **Rule ordering** — 1 test. Template wins over session text when both paths are open.
+- **Rule 3** — 1 test. Empty campaign → `no_template`.
+- **Pass-through invariants** — 2 tests. `to` is copied verbatim (no accidental normalization) / empty vars map is not an error (expressions render to empty strings).
+
+### What would catch a regression
+
+- **Template precedence flipped** (session-text wins over template): the rule-ordering test fails — the result would be `kind: "text"` instead of `kind: "template"`.
+- **sessionOpen default changed to true**: the session-undefined + templateSms test would flip from `no_template` refusal to a text message, which is the unsafe behavior.
+- **Variables validation dropped** (e.g. someone "simplifies" to `JSON.parse` alone): the non-array / non-string / null tests would all return `{ok: true}` with broken data instead of `template_vars_malformed`.
+- **Empty-string treated as configured**: the `name: ""` and `language: ""` tests would return `{ok: true}` with empty template fields, which Meta would reject with a policy error rather than Einai returning a clean `no_template`.
+- **render() expression language changed** (e.g. switched to positional `{1}` instead of named `{{name}}`): the "unknown var → empty string" and "mixed literal" tests would fail, catching the expression-language drift before it hits the template.
+
+### Notes for downstream slices
+
+- **P13-B (`sendWhatsApp`)** needs to build the vars map the planner consumes. The most natural move is to export `vars()` from preview.ts (it's currently local) and share it between renderSms/renderEmail/sendWhatsApp. That refactor is in-scope for P13-B since it's in service of the new code path, not a standalone cleanup.
+- **P13-D (`propose_send` + `confirm_send`)** will need to surface `template_vars_malformed` as a send-blocker in the UI, since a send attempt against a campaign with malformed vars would otherwise land as a pile of `failed` Invitations. The planner already produces the structured reason; the blocker mapping is in `send-blockers.ts`.
+- **Schema migration**: this repo uses `prisma db push`, so deploying P13-A means running that command against the prod DB. The three added columns are nullable so the push is non-blocking — existing rows get `NULL` on all three fields and `decideWhatsAppMessage` refuses those sends with `no_template`, which matches the pre-P13 behavior (no WhatsApp send was possible at all).
+
+### Commit graph
+
+- `1d315ab` — P12-fix green-light marker (prior slice)
+- `414e535` — P13-A (this commit; schema + pure planner + 22 tests)
+
+Files changed in `414e535`:
+- [prisma/schema.prisma](Q:/Einai/RSVP/prisma/schema.prisma:1) (3 nullable fields on Campaign + explanatory comment)
+- [src/lib/providers/whatsapp/sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:1) (new; pure planner with types)
+- [tests/unit/whatsapp-send-plan.test.ts](Q:/Einai/RSVP/tests/unit/whatsapp-send-plan.test.ts:1) (new; 22 tests)
+- [package.json](Q:/Einai/RSVP/package.json:17) (added test file to the test script)
+
+### Status
+
+Ready for audit. The decision logic that will power WhatsApp sends is landed, pinned, and decoupled from persistence — P13-B can layer `sendWhatsApp` on top without re-litigating which message shape to build. The planner's refusal vocabulary (`no_template`, `template_vars_malformed`) is already the vocabulary `send-blockers.ts` will surface in P13-D, so the propagation path is already stable before the UI slices land.
