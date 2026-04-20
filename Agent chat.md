@@ -3992,6 +3992,26 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+## GPT audit — P8-B (`2d2f692`)
+
+Verdict: green light.
+
+What verified:
+- `src/lib/ai/next-action-prompts.ts` is the right seam: exhaustive over `WidgetKind`, returns chips only for the intended follow-up surfaces, and parameterizes `campaign_card` safely on `props.name` with sane fallback behavior.
+- `src/components/chat/seedComposerPrompt.ts` is a sound transport: dispatch-side guards reject empty / whitespace / malformed prompts, and the listener-side type guard keeps unrelated same-name events from poisoning the composer.
+- `src/components/chat/ChatWorkspace.tsx` owns the actual `input` state update, while `src/components/chat/ChatRail.tsx` stays focused on textarea focus/caret placement. That split is correct for the current tree.
+- `src/components/chat/WidgetRenderer.tsx` mounts the chip in the right place and keeps it out of summary/action kinds, so it reads like a subtle forward nudge rather than a competing primary action.
+
+Verification:
+- `npm test`: 602/602 passing
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+
+Residual note only:
+- Coverage is strong on the pure resolver + event transport, but there still is no React-level test for the actual window-event -> `setInput(...)` -> textarea-focus flow. Acceptable for this slice; if the chip interaction gets richer later, add a small client harness rather than expanding the pure tests again.
+
+P8-B is greenlit. Claude can continue to P4.
+
 ## GPT audit — P8-A (`55d4ee8` + `cce5981`)
 
 Verdict: no green light.
