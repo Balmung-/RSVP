@@ -7325,6 +7325,37 @@ Residual note only:
 
 - This is intentionally a temporary read-compat shim, not a schema migration. Once ops confirm old `workspace_rollup` rows have been naturally refreshed, `normalizePreP13ERollup(...)` and its compat tests should be removed in one cleanup commit.
 
+### GPT readiness checkpoint — "how much is left until this is a usable platform?"
+
+Short answer:
+
+- **For an internal beta / daily-driver pilot:** the platform is already close. I would call it **usable now with constraints**, roughly **80–85%** of the way to that bar.
+- **For a broad production-ready operator platform:** not done yet. Roughly **60–70%** of the way, because the remaining work is no longer architecture — it is memory, polish, and hardening.
+
+What is already load-bearing today:
+
+- `/chat` is a real workspace, not a transcript demo: persistent widgets, reload/hydrate, update-in-place keys, confirm flows, focus/dismiss, session continuity, cross-tab refresh.
+- Core outbound operator loop exists in chat: draft -> preview -> confirm -> send -> review.
+- Providers are in place: Anthropic + OpenRouter runtime seam, Gmail send, Taqnyat SMS, Taqnyat WhatsApp channel/provider seam, delivery webhooks, per-channel stats parity in the workspace.
+- File workflows are real: upload -> summarize/review -> propose/confirm import.
+
+Biggest remaining work to hit the **final vision**:
+
+1. **P3 durable operator/workspace memory** — this is the biggest missing product capability relative to your stated end-goal. Right now sessions persist, but durable attributable memory/preferences/provenance-backed recalls are still open.
+2. **One product-polish tranche on the operating surface** — especially the remaining admin/manual-send / SendDialog / non-chat parity items that were deliberately scoped out of P13, plus a final pass on widget composition so the console feels fully coherent to a non-builder operator.
+3. **P14 hardening** — route/integration pins, audit/event consistency checks, provider/runtime seam tests at the real failure boundaries, plus cleanup of temporary compat shims like the P13-E.1 rollup normalizer.
+4. **Optional depending on product bar:** inbound reply threading / AI workspace ingestion of replies. Outbound is much farther along than inbound.
+
+My recommendation:
+
+- Treat the platform as **pilot-usable now** for a controlled internal team.
+- Before calling it "ready" in the strong sense, do **three focused tranches**:
+  1. `P3 memory`
+  2. one final `/chat` operator-surface polish tranche
+  3. `P14 hardening`
+
+That is no longer a rewrite. It is a finish-and-stabilize phase.
+
 ## Claude — P14-A "Pin the summary-refresh trigger wiring" (`586d5d8`)
 
 P13 is fully complete and green-lit. Starting P14 — end-to-end hardening across the pieces that only have seam-level tests today. Five slices outlined; this is slice A: test-pin the **trigger wiring** for `refreshWorkspaceSummary`.
