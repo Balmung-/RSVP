@@ -274,16 +274,26 @@ test("pipeline: re-invoking the same static-keyed tool UPDATES in place (W4 cont
   );
 });
 
-// ---- pipeline: entity-keyed tool keeps separate rows per id ----
+// ---- pipeline: entity-keyed tool honours singleton-per-slot ----
 
-test("pipeline: campaign_detail for distinct ids produces distinct rows", async () => {
+test("pipeline: campaign_detail for distinct ids evicts the prior card (primary is singleton-per-slot)", async () => {
   const { prismaLike, state } = makeStubPrisma();
   const sessionId = "s-1";
 
-  // Two different campaigns — each gets its own card via the keyed
-  // formula. Drifting either side's derivation would collapse them
-  // onto one row and overwrite each other; the formula test in
-  // widget-keys.test.ts + this pipeline test pin both ends.
+  // Two different campaigns under the campaign_detail tool. The
+  // widgetKey formula is `campaign.<id>`, so each call produces a
+  // distinct key. Pre-P8 both cards persisted (one row per id).
+  //
+  // P8 shifts the invariant: campaign_card lives in the `primary`
+  // slot, which is `singleton-per-slot`. Opening campaign B after
+  // campaign A EVICTS the A card — the "hero" view is a single-
+  // subject surface, not a growing stack. Re-opening A later simply
+  // evicts B and the operator is back to A.
+  //
+  // This test pins the new behaviour end-to-end: the key formula
+  // still produces distinct strings per id (widget-keys.test.ts
+  // proves that at unit level) AND the pipeline genuinely swaps
+  // rather than accumulates.
   for (const id of ["camp_A", "camp_B"]) {
     await upsertWidget(
       { prismaLike },
@@ -297,10 +307,12 @@ test("pipeline: campaign_detail for distinct ids produces distinct rows", async 
     );
   }
 
-  assert.equal(state.rows.length, 2);
+  // Only the latest campaign card survives.
+  assert.equal(state.rows.length, 1);
+  assert.equal(state.rows[0]!.widgetKey, "campaign.camp_B");
   const snap = await listWidgets({ prismaLike }, sessionId);
-  const keys = snap.widgets.map((w) => w.widgetKey).sort();
-  assert.deepEqual(keys, ["campaign.camp_A", "campaign.camp_B"]);
+  assert.equal(snap.widgets.length, 1);
+  assert.equal(snap.widgets[0]!.widgetKey, "campaign.camp_B");
 });
 
 // ---- pipeline: cross-module widgetKey contract ----

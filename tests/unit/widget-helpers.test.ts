@@ -172,39 +172,65 @@ test("upsertWidget: updates in place on same (sessionId, widgetKey)", async () =
     {
       sessionId: "s-1",
       widgetKey: "stable-key",
-      // Kind + slot may CHANGE across upserts — the stable identity
-      // is (sessionId, widgetKey), not (sessionId, widgetKey, kind).
+      // Kind may CHANGE across upserts within the same policy slot
+      // — the stable identity is (sessionId, widgetKey), not
+      // (sessionId, widgetKey, kind). P8 locks each kind to its
+      // SLOT_POLICY slot, so the new kind must pick a partner slot
+      // consistent with the policy (here `contact_table` -> primary,
+      // same as the previous campaign_list's slot). A cross-slot
+      // change on the same widgetKey is rejected by the validator
+      // AFTER the policy check rather than silently migrating slot.
       kind: "contact_table",
-      slot: "secondary",
+      slot: "primary",
       props: validContactTableProps,
     },
   );
   // One row, not two — GPT's "no duplicate card spam" rule.
   assert.equal(state.rows.length, 1);
   assert.equal(updated?.kind, "contact_table");
-  assert.equal(updated?.slot, "secondary");
+  assert.equal(updated?.slot, "primary");
 });
 
-test("upsertWidget: different widgetKeys coexist in the same session", async () => {
+test("upsertWidget: different widgetKeys coexist in the same session's coexist-per-key slot", async () => {
+  // Pre-P8 this test confirmed that two different widgetKeys
+  // coexist in the same session regardless of slot. P8's
+  // singleton-per-slot rule now forbids that for primary / secondary
+  // / summary (see composition-eviction.test.ts for the eviction
+  // behaviour). The cross-key coexistence invariant is still true
+  // but ONLY for coexist-per-key slots — today, `action`. Two
+  // confirm cards with different widgetKeys both persist side-by-
+  // side.
   const { prismaLike, state } = makeStubPrisma();
+  const validConfirmDraftProps = {
+    id: "c-1",
+    name: "",
+    description: null,
+    venue: null,
+    event_at: null,
+    locale: "",
+    status: "",
+    team_id: null,
+    created_at: "",
+    state: "done" as const,
+  };
   await upsertWidget(
     { prismaLike },
     {
       sessionId: "s-1",
-      widgetKey: "campaign_list:active",
-      kind: "campaign_list",
-      slot: "primary",
-      props: validCampaignListProps,
+      widgetKey: "confirm.draft.c-1",
+      kind: "confirm_draft",
+      slot: "action",
+      props: validConfirmDraftProps,
     },
   );
   await upsertWidget(
     { prismaLike },
     {
       sessionId: "s-1",
-      widgetKey: "contacts:royal",
-      kind: "contact_table",
-      slot: "primary",
-      props: validContactTableProps,
+      widgetKey: "confirm.draft.c-2",
+      kind: "confirm_draft",
+      slot: "action",
+      props: { ...validConfirmDraftProps, id: "c-2" },
     },
   );
   assert.equal(state.rows.length, 2);
@@ -297,6 +323,32 @@ test("listWidgets: returns [] for a session with no widgets", async () => {
 
 test("listWidgets: orders by slot then order", async () => {
   const { prismaLike } = makeStubPrisma();
+  // Pre-P8 this test put two campaign_list widgets in `primary` to
+  // prove within-slot `order` ordering. Under P8 the primary slot is
+  // singleton-per-slot (a second widgetKey would evict the first),
+  // so within-slot ordering has to be exercised in a coexist-per-key
+  // slot — `action` — instead. We keep the original test intent:
+  //   - Cross-slot ordering: `action` < `secondary` (alphabetic slot
+  //     asc precedes).
+  //   - Within-slot ordering: two `action` confirm_drafts with
+  //     distinct `order` values come out `order 0` first.
+  // Minimal valid confirm_draft props — the validator requires the
+  // full envelope even when the test only cares about widgetKey/slot
+  // ordering. `state: "done"` is the only state the validator accepts
+  // for this kind (drafts are terminal-on-creation).
+  const validConfirmDraftProps = {
+    id: "c",
+    name: "",
+    description: null,
+    venue: null,
+    event_at: null,
+    locale: "",
+    status: "",
+    team_id: null,
+    created_at: "",
+    state: "done" as const,
+  };
+  const activityProps = { items: [] };
   // Insert in a jumbled order to prove sort is by slot/order, not
   // by insertion order.
   await upsertWidget(
@@ -304,9 +356,9 @@ test("listWidgets: orders by slot then order", async () => {
     {
       sessionId: "s-1",
       widgetKey: "b-secondary",
-      kind: "campaign_list",
+      kind: "activity_stream",
       slot: "secondary",
-      props: validCampaignListProps,
+      props: activityProps,
       order: 0,
     },
   );
@@ -314,10 +366,10 @@ test("listWidgets: orders by slot then order", async () => {
     { prismaLike },
     {
       sessionId: "s-1",
-      widgetKey: "a-primary-1",
-      kind: "campaign_list",
-      slot: "primary",
-      props: validCampaignListProps,
+      widgetKey: "a-action-1",
+      kind: "confirm_draft",
+      slot: "action",
+      props: validConfirmDraftProps,
       order: 1,
     },
   );
@@ -325,10 +377,10 @@ test("listWidgets: orders by slot then order", async () => {
     { prismaLike },
     {
       sessionId: "s-1",
-      widgetKey: "a-primary-0",
-      kind: "campaign_list",
-      slot: "primary",
-      props: validCampaignListProps,
+      widgetKey: "a-action-0",
+      kind: "confirm_draft",
+      slot: "action",
+      props: validConfirmDraftProps,
       order: 0,
     },
   );
@@ -336,8 +388,8 @@ test("listWidgets: orders by slot then order", async () => {
   assert.deepEqual(
     result.widgets.map((w) => w.widgetKey),
     // action, primary, secondary, summary is the alphabetic slot
-    // order; within primary, order 0 precedes order 1.
-    ["a-primary-0", "a-primary-1", "b-secondary"],
+    // order; within action, order 0 precedes order 1.
+    ["a-action-0", "a-action-1", "b-secondary"],
   );
 });
 

@@ -34,6 +34,7 @@ import {
   type WidgetKind,
   type WidgetSlot,
 } from "./widget-validate";
+import { SLOT_COMPOSITION } from "./slotPolicy";
 
 // ---- dep-injection surface ----
 
@@ -196,8 +197,28 @@ export async function listWidgets(
 // The call is a single Prisma upsert — atomic insert-or-update.
 // That matches GPT's W1 contract: "a second write to the same key
 // UPDATES in place; never appends a duplicate row."
+//
+// P8 — singleton-per-slot eviction. When the new widget lands in a
+// slot whose `SLOT_COMPOSITION` is `singleton-per-slot`
+// (summary/primary/secondary), any OTHER widgets already in the
+// same slot for the same session are removed so only one occupant
+// remains. Same-widgetKey re-writes are an UPDATE in place and
+// don't trigger eviction on themselves. The eviction runs AFTER
+// the upsert succeeds, so a validator rejection never removes
+// siblings (eviction would have left a slot suddenly empty with no
+// replacement to show). Callers that need the evicted widgetKeys
+// (e.g. the WorkspaceEmitter, which must emit a `widget_remove`
+// SSE frame per evicted row so the client reducer drops them)
+// pass an `onEvict` callback; other callers omit it and the
+// evictions happen silently — still correct at the DB layer.
 export async function upsertWidget(
-  deps: { prismaLike: PrismaLike },
+  deps: {
+    prismaLike: PrismaLike;
+    // Fires once per successfully evicted sibling. Invoked after
+    // the delete lands in the DB so the caller can emit a
+    // `widget_remove` SSE with confidence the row is gone.
+    onEvict?: (widgetKey: string) => void;
+  },
   input: UpsertWidgetInput,
 ): Promise<Widget | null> {
   const validated = validateWidget({
@@ -253,10 +274,12 @@ export async function upsertWidget(
     },
     update: {
       // Update DOES NOT touch widgetKey or sessionId — those are the
-      // stable identity. Everything else is fair game: a tool that
-      // re-runs with different filters can change slot, order, or
-      // even kind (e.g. campaign_list -> campaign_card after the
-      // user narrows to one).
+      // stable identity. Under P8's kind-slot policy the `kind` can
+      // no longer silently migrate to an arbitrary replacement
+      // kind+slot pair (the validator rejects mismatches), but the
+      // shape stays write-through so a future kind-swap within the
+      // same slot (e.g. a tool rewriting `campaign_list` props
+      // against the same widgetKey) still works.
       kind: validated.kind,
       slot: validated.slot,
       props: propsJson,
@@ -264,6 +287,42 @@ export async function upsertWidget(
       sourceMessageId,
     },
   });
+
+  // P8 — sibling eviction. Runs AFTER the upsert landed so a DB
+  // failure on the upsert can't leave the slot empty (the widgets
+  // already there remain until a successful write replaces them).
+  // `coexist-per-key` slots (today: `action`) skip eviction
+  // entirely — confirm cards stack, they don't replace each other.
+  //
+  // Finding the siblings: we ask the DB for every widget in the
+  // session and filter by slot in memory. A session typically has
+  // a single-digit number of widgets, so the scan is cheap and
+  // avoids expanding the narrow `PrismaLike` surface with a new
+  // composite `where` shape (all tests would need to teach their
+  // stub about the new predicate). Ordering doesn't matter for
+  // the filter — we pass the existing listWidgets orderBy just to
+  // reuse the PrismaLike contract verbatim.
+  if (SLOT_COMPOSITION[validated.slot] === "singleton-per-slot") {
+    const existing = await deps.prismaLike.chatWidget.findMany({
+      where: { sessionId: input.sessionId },
+      orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
+    });
+    for (const sibling of existing) {
+      if (sibling.slot !== validated.slot) continue;
+      if (sibling.widgetKey === validated.widgetKey) continue;
+      const result = await deps.prismaLike.chatWidget.deleteMany({
+        where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
+      });
+      // Only fire onEvict when a row actually went away — a no-op
+      // delete (row already gone between findMany and deleteMany,
+      // a race under concurrent writes) must not emit a spurious
+      // `widget_remove` SSE. Same "emit on effect" discipline the
+      // WorkspaceEmitter uses for manual removes.
+      if (result.count > 0) {
+        deps.onEvict?.(sibling.widgetKey);
+      }
+    }
+  }
 
   return rowToWidget(row);
 }
@@ -364,7 +423,24 @@ export function createWorkspaceEmitter(
       return result;
     },
     async upsert(input) {
-      const widget = await upsertWidget(deps, { ...input, sessionId });
+      // P8 — collect evicted widgetKeys so we can emit a
+      // `widget_remove` SSE per sibling BEFORE `widget_upsert` +
+      // `widget_focus`. The order matters for the client: the
+      // reducer processes events in arrival order, and the UI
+      // should see "old card goes away, new card appears, focus
+      // lands on new card" rather than a transient state with two
+      // cards in the same singleton slot.
+      const evicted: string[] = [];
+      const widget = await upsertWidget(
+        {
+          ...deps,
+          onEvict: (widgetKey) => evicted.push(widgetKey),
+        },
+        { ...input, sessionId },
+      );
+      for (const widgetKey of evicted) {
+        send("widget_remove", { widgetKey });
+      }
       if (widget) {
         send("widget_upsert", widget);
         // W4 — an upsert IS the moment the operator's attention

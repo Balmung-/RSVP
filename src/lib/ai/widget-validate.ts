@@ -42,6 +42,14 @@
 //   5. `widgetKey` is caller-chosen but validated here for shape —
 //      non-empty, no whitespace-only, and capped at a sensible
 //      length so it can't exceed Postgres index key limits.
+//   6. P8 — kind-slot matching enforced via `SLOT_POLICY` from
+//      `./slotPolicy`. A write that declares a kind+slot combination
+//      the policy doesn't permit (say `contact_table` in
+//      `secondary`) fails here, before the upsert runs and before
+//      any sibling eviction logic kicks in. See slotPolicy.ts for
+//      the full rationale.
+
+import { SLOT_POLICY } from "./slotPolicy";
 
 export const WIDGET_KINDS = [
   "campaign_list",
@@ -702,6 +710,12 @@ export function validateWidget(input: unknown): WidgetInput | null {
 
   const slot = input.slot;
   if (!isOneOf(slot, WIDGET_SLOTS)) return null;
+
+  // P8 — kind-slot policy gate. A kind has exactly one legal slot;
+  // see `SLOT_POLICY` in ./slotPolicy for the full mapping. Reject a
+  // crossed-wires combination here so the eviction logic downstream
+  // never has to consider "did this widget arrive in the wrong slot?".
+  if (SLOT_POLICY[kind] !== slot) return null;
 
   const props = input.props;
   if (!isPlainObject(props)) return null;
