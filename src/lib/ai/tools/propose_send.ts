@@ -1,10 +1,10 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
-import { channelSetFor } from "@/lib/campaigns";
 import { confirmSendWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
+import { deriveProposeSendPreview } from "./propose-send-preview";
 
 // Previews what `sendCampaign` WOULD do, without doing it. The
 // model calls this to resolve an audience + template + count
@@ -61,13 +61,6 @@ type Input = {
 
 const SUBJECT_PREVIEW_CHARS = 200;
 const BODY_PREVIEW_CHARS = 280;
-
-type ChannelBreakdown = {
-  ready: number;
-  skipped_already_sent: number;
-  skipped_unsubscribed: number;
-  no_contact: number;
-};
 
 export const proposeSendTool: ToolDef<Input> = {
   name: "propose_send",
@@ -181,103 +174,6 @@ export const proposeSendTool: ToolDef<Input> = {
     // (by `computeBlockers`) and by `send_campaign` at confirm
     // time — single source of truth for both surfaces.
     const audience = await loadAudience(campaign.id);
-    const { invitees, unsubEmails, unsubPhones } = audience;
-
-    // Resolve the channel set via the shared resolver so `"both"` /
-    // `"all"` / scalar channels collapse to the same concrete Set
-    // the real send path uses (`channelSetFor` is the single source
-    // of truth — see `src/lib/campaigns.ts:channelSetFor`). This
-    // keeps the bucket loop below byte-for-byte symmetric with
-    // `hasReadyMessage` in send-blockers.ts and with the per-channel
-    // dispatch branches in `sendCampaign`.
-    const chans = channelSetFor(channel);
-    const wantsEmail = chans.has("email");
-    const wantsSms = chans.has("sms");
-    const wantsWhatsApp = chans.has("whatsapp");
-
-    const emailBucket: ChannelBreakdown = {
-      ready: 0,
-      skipped_already_sent: 0,
-      skipped_unsubscribed: 0,
-      no_contact: 0,
-    };
-    const smsBucket: ChannelBreakdown = {
-      ready: 0,
-      skipped_already_sent: 0,
-      skipped_unsubscribed: 0,
-      no_contact: 0,
-    };
-    // WhatsApp bucket is computed identically to the SMS bucket
-    // (same `phoneE164` contact field, same `unsubPhones` shared
-    // set per the Unsubscribe table's channel-less phone column).
-    // The only difference is the `invitations.channel === "whatsapp"`
-    // filter for already-sent detection — an invitee who received
-    // an SMS does not count as "already sent WhatsApp" and vice
-    // versa. This mirrors the planner's channel-scoped dedupe.
-    const whatsAppBucket: ChannelBreakdown = {
-      ready: 0,
-      skipped_already_sent: 0,
-      skipped_unsubscribed: 0,
-      no_contact: 0,
-    };
-
-    for (const inv of invitees) {
-      const hasEmailSent = inv.invitations.some(
-        (x) => x.channel === "email" && x.status !== "failed",
-      );
-      const hasSmsSent = inv.invitations.some(
-        (x) => x.channel === "sms" && x.status !== "failed",
-      );
-      const hasWhatsAppSent = inv.invitations.some(
-        (x) => x.channel === "whatsapp" && x.status !== "failed",
-      );
-      if (wantsEmail) {
-        if (!inv.email) {
-          emailBucket.no_contact += 1;
-        } else if (onlyUnsent && hasEmailSent) {
-          emailBucket.skipped_already_sent += 1;
-        } else if (unsubEmails.has(inv.email)) {
-          emailBucket.skipped_unsubscribed += 1;
-        } else {
-          emailBucket.ready += 1;
-        }
-      }
-      if (wantsSms) {
-        if (!inv.phoneE164) {
-          smsBucket.no_contact += 1;
-        } else if (onlyUnsent && hasSmsSent) {
-          smsBucket.skipped_already_sent += 1;
-        } else if (unsubPhones.has(inv.phoneE164)) {
-          smsBucket.skipped_unsubscribed += 1;
-        } else {
-          smsBucket.ready += 1;
-        }
-      }
-      if (wantsWhatsApp) {
-        if (!inv.phoneE164) {
-          whatsAppBucket.no_contact += 1;
-        } else if (onlyUnsent && hasWhatsAppSent) {
-          whatsAppBucket.skipped_already_sent += 1;
-        } else if (unsubPhones.has(inv.phoneE164)) {
-          whatsAppBucket.skipped_unsubscribed += 1;
-        } else {
-          whatsAppBucket.ready += 1;
-        }
-      }
-    }
-
-    // `ready_messages` is a JOB count — one `(invitee, channel)`
-    // pair is one job, matching `sendCampaign`'s planner
-    // (`src/lib/campaigns.ts:218-229`) which enqueues one message
-    // per pair. An invitee on channel=all with email + phone
-    // contributes 3 (email, sms, whatsapp) to this count. Naming
-    // reflects the semantics: operators see `Messages ready: 3`
-    // next to `Invitees: 1` and know the card is describing sends,
-    // not heads. Documented here because the previous name
-    // `ready_total` was ambiguous and the ConfirmSend copy framed
-    // the same number as a recipient count (GPT, Push 6c review).
-    const readyMessages =
-      emailBucket.ready + smsBucket.ready + whatsAppBucket.ready;
 
     // Blockers via the shared helper — same codes send_campaign
     // enforces at confirm time, same ordering the directive
@@ -298,56 +194,34 @@ export const proposeSendTool: ToolDef<Input> = {
       onlyUnsent,
     });
 
+    // P14-E — the four post-audience-load derivations (per-channel
+    // bucket fold + readyMessages sum + summary-line composition +
+    // ready/blocked state ternary) live in `deriveProposeSendPreview`
+    // so each transformation is unit-testable without prisma /
+    // `loadAudience` / `computeBlockers`. The handler consumes the
+    // produced fields and still composes the widget envelope + the
+    // template_preview clipping + the WhatsApp template label (fields
+    // that pull from the campaign row directly and aren't derivations
+    // worth extracting).
+    //
+    // Sibling to P14-D' (`deriveSendCampaignSummary` in
+    // send-campaign-summary.ts) — that file pins the POST-dispatch
+    // summary; this one pins the PRE-dispatch preview. Structurally
+    // symmetric.
+    const preview = deriveProposeSendPreview({
+      campaignName: campaign.name,
+      campaignStatus: campaign.status,
+      channel,
+      onlyUnsent,
+      audience,
+      blockers,
+    });
+
     // Preview snippets. These are server-side clipped so the
     // directive payload stays bounded; full bodies live on the
     // edit page.
     const clip = (s: string | null, max: number): string | null =>
       s ? s.trim().slice(0, max) : null;
-
-    const summaryLines: string[] = [];
-    summaryLines.push(
-      `Propose send for "${campaign.name}" [${campaign.status}]: channel=${channel}, only_unsent=${onlyUnsent}.`,
-    );
-    // Per-channel breakdown in the summary is built dynamically so
-    // scalar channels (e.g. `"whatsapp"`) don't say "email 0, sms 0,
-    // whatsapp N" — the model's transcript should mirror what the
-    // operator asked for. `"both"` says "email N, sms M" (not
-    // whatsapp); `"all"` adds the third entry.
-    const readyParts: string[] = [];
-    if (wantsEmail) readyParts.push(`email ${emailBucket.ready}`);
-    if (wantsSms) readyParts.push(`sms ${smsBucket.ready}`);
-    if (wantsWhatsApp) readyParts.push(`whatsapp ${whatsAppBucket.ready}`);
-    summaryLines.push(
-      `${invitees.length} invitee${invitees.length === 1 ? "" : "s"}; ${readyMessages} message${readyMessages === 1 ? "" : "s"} ready to send (${readyParts.join(", ")}).`,
-    );
-    const skippedAlreadySent =
-      emailBucket.skipped_already_sent +
-      smsBucket.skipped_already_sent +
-      whatsAppBucket.skipped_already_sent;
-    const skippedUnsub =
-      emailBucket.skipped_unsubscribed +
-      smsBucket.skipped_unsubscribed +
-      whatsAppBucket.skipped_unsubscribed;
-    if (skippedAlreadySent + skippedUnsub > 0) {
-      summaryLines.push(
-        `Skipped: already-sent ${skippedAlreadySent}, unsubscribed ${skippedUnsub}.`,
-      );
-    }
-    if (blockers.length > 0) {
-      summaryLines.push(`Blockers: ${blockers.join(", ")}.`);
-    }
-    summaryLines.push(
-      `A ConfirmSend card has been rendered. The operator must click Confirm to actually send — this tool does not send.`,
-    );
-
-    // W5 — pre-terminal state. `ready` when the operator can click
-    // confirm right now; `blocked` when one or more blockers must be
-    // resolved first. The confirm route rewrites this to `done` or
-    // `error` after dispatch (see `markConfirmSendOutcome` in
-    // `src/app/api/chat/confirm/[messageId]/route.ts`). The same
-    // validator rejects `submitting` as a persisted state — that one
-    // is client-local during the POST window and never hits the DB.
-    const state: "ready" | "blocked" = blockers.length > 0 ? "blocked" : "ready";
 
     // WhatsApp template identity for the preview card. Unlike the
     // email / SMS bodies (which live on the Campaign row and render
@@ -375,13 +249,9 @@ export const proposeSendTool: ToolDef<Input> = {
       locale: campaign.locale,
       channel,
       only_unsent: onlyUnsent,
-      invitee_total: invitees.length,
-      ready_messages: readyMessages,
-      by_channel: {
-        email: emailBucket,
-        sms: smsBucket,
-        whatsapp: whatsAppBucket,
-      },
+      invitee_total: preview.inviteeCount,
+      ready_messages: preview.readyMessages,
+      by_channel: preview.buckets,
       template_preview: {
         subject_email: clip(campaign.subjectEmail, SUBJECT_PREVIEW_CHARS),
         email_body: clip(campaign.templateEmail, BODY_PREVIEW_CHARS),
@@ -389,7 +259,7 @@ export const proposeSendTool: ToolDef<Input> = {
         whatsapp_template: whatsAppTemplateLabel,
       },
       blockers,
-      state,
+      state: preview.state,
     };
 
     return {
@@ -398,10 +268,10 @@ export const proposeSendTool: ToolDef<Input> = {
         name: campaign.name,
         channel,
         only_unsent: onlyUnsent,
-        ready_messages: readyMessages,
-        invitee_total: invitees.length,
+        ready_messages: preview.readyMessages,
+        invitee_total: preview.inviteeCount,
         blockers,
-        summary: summaryLines.join("\n"),
+        summary: preview.summary,
       },
       widget: {
         widgetKey: confirmSendWidgetKey(campaign.id),
