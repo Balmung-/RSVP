@@ -8786,3 +8786,115 @@ Surface coverage as of P14-L:
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
 
 Ready for audit.
+
+---
+
+## P14-M — inbound-ack copy helpers (ackEnabled + localeFor + emailCopy + smsCopy) (hash `65e91cc`)
+
+### Why this slice (honest scoping)
+
+Last candidate from the P14-K scoping subagent's survey. `src/lib/inbound-ack.ts` is the auto-ack path: after `ingest()` classifies an inbound reply as attending / declined / stop, it sends a one-line confirmation back on the same channel. The four pure helpers (`ackEnabled`, `localeFor`, `emailCopy`, `smsCopy`) were all file-private — just needed `export` added to become pinnable.
+
+Minimal-visibility extract: source diff is 4 `export` keywords + 1 `export type`. No new file, no import re-wiring. `sendInboundAck` still uses the helpers exactly as before via local module scope.
+
+### Regression surfaces protected
+
+**(1) `ackEnabled` — exact disable-triplet.** `process.env.INBOUND_AUTO_ACK` with value in `{"false", "0", "off"}` disables; everything else (including unset, typos, unknown words) → acks on. Load-bearing as a **fail-open** invariant: operator typos in the env var MUST NOT silently disable acks. Pinned per-value + case-insensitive (toLowerCase applied).
+
+**(2) `ackEnabled` — empty-string behavior.** `?? "true"` coalesces ONLY null/undefined. Empty string stays as-is, `toLowerCase()` → `""`, which isn't in the disable set → returns true. A regression to `||` would fall through to the "true" default (same observable, different path — pinned to catch the path drift).
+
+**(3) `localeFor` — cascade order.** `invitee.locale ?? campaign?.locale ?? process.env.DEFAULT_LOCALE ?? "en"`. Each hop pinned:
+- invitee wins over campaign
+- null invitee → campaign wins
+- null invitee + null campaign → DEFAULT_LOCALE env
+- all null + no env → `"en"` literal
+
+**(4) `localeFor` — locale normalization.** `.toLowerCase()` then exact match `=== "ar"`. Anything not `"ar"` (including unknown locales like `"fr"`, `"de"`, `"zh"`) → `"en"`. Pinned so a refactor that preserved the raw locale wouldn't leak `"fr"` / `"de"` into the downstream template switch (which only has en/ar branches).
+
+**(5) `localeFor` — empty-string stops cascade.** Subtle `??` pin: `invitee.locale = ""` does NOT fall through to campaign, because `""` is not nullish. Then empty → not-`"ar"` → `"en"`. A regression to `||` would fall through. Pinned.
+
+**(6) `emailCopy` — 3 intents × 2 locales = 6 shape pins.** Each combination has a distinct subject + body:
+- EN attending: `Confirmed — {campaign}`
+- EN declined: `Regrets noted — {campaign}`
+- EN stop: `Unsubscribed`
+- AR attending: `تأكيد الحضور — {campaign}`
+- AR declined: `اعتذار مسجّل — {campaign}`
+- AR stop: `تم إلغاء الاشتراك`
+
+**(7) `emailCopy` — stop branch LOAD-BEARING discipline.** The stop ack MUST NOT include the RSVP URL or the campaign name. Pinned with explicit `!text.includes("https://")` and `!text.includes("Annual Gala")` / `!text.includes("الحفل")` assertions. A regression that cut-pasted the attending/declined template would leak the URL to an unsubscribed user (re-engage loophole + embarrassing).
+
+**(8) `emailCopy` — BRAND default fallback.** `process.env.APP_BRAND ?? "Protocol"` pinned both with override (`"TestBrand"`) and without (fallback to `"Protocol"`). A regression to an empty-string default would leak `"— "` with no brand into every email sign-off.
+
+**(9) `smsCopy` — full-string shape pins.** 6 exact-string pins covering all combinations. Same stop-URL-leak discipline as email.
+
+**(10) Parity canaries.** Three cross-cutting pins catch cut-paste bugs:
+- `attending` subject/text ≠ `declined` subject/text (email, across both locales)
+- `attending` ≠ `declined` (sms, across both locales)
+- Brand appears in EVERY intent×locale×channel combination (12 outputs)
+
+### Implementation — single commit `65e91cc`
+
+**New:**
+- `tests/unit/inbound-ack-copy.test.ts` — 32 pins, ~344 LOC.
+
+**Modified:**
+- `src/lib/inbound-ack.ts` — added `export` to `ackEnabled`, `localeFor`, `emailCopy`, `smsCopy`, and `type AckIntent`. Zero behavior change.
+- `package.json` — adds the new test file to the `test` script.
+
+### Test coverage breakdown
+
+**inbound-ack-copy.test.ts — 32 tests:**
+
+- `ackEnabled`: 8 (unset → true / true / false / 0 / off / case-insensitive batch / unknown-fail-open batch / empty-string)
+- `localeFor`: 8 (invitee='ar' wins / invitee='en' wins / null→campaign / null+null→env / all-null→"en" / case-insensitive batch / unknown→en batch / empty-string stops cascade)
+- `emailCopy`: 7 (EN×3 intents / AR×3 intents / BRAND default)
+- `smsCopy`: 6 (EN×3 intents / AR×3 intents)
+- Parity: 3 (no-swap email / no-swap sms / brand-everywhere)
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1296/1296 passing** in 4.3s (was 1264; +32 from the new tests)
+- 0 `not ok` lines in TAP
+- Source diff is 4 `export` keywords — zero behavior change
+
+### Where P14 stands — now thirteen slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization.
+- **P14-I** (`1375045`) — activity phrase() + webhook-auth secretMatches (pin-only).
+- **P14-J** (`0250650`) — template render/escapeHtml + Prisma classifiers (pin-only).
+- **P14-K** (`d215102`) — public-RSVP-form helpers (pin-only).
+- **P14-L** (`523d37d`) — contact.ts seam (pin-only).
+- **P14-M** (`65e91cc`) — inbound-ack copy helpers (minimal-extract pin).
+
+Test count: 825 → 1296 (+471 across thirteen slices). Five pin-only (P14-F, P14-I, P14-J, P14-K, P14-L), seven extract-and-pin (P14-A, P14-B', P14-C, P14-D', P14-E, P14-G, P14-H), and one minimal-visibility-extract (P14-M; same spirit as pin-only but added 4 `export` keywords).
+
+Surface coverage as of P14-M:
+- **AI tool helpers**: workspace-reducer, widget-pipeline, confirm-flow, import-outcomes, send-campaign-summary, propose-send-preview, activity-scope.
+- **Inbound webhooks**: parseIntent + token extractors + provider normalization.
+- **Inbound ack (NEW)**: ackEnabled + localeFor + emailCopy + smsCopy — every auto-ack path pinned for bilingual correctness, cut-paste canary, stop-URL discipline, fail-open env gate.
+- **Operator-visible strings**: `phrase()`.
+- **Security helpers**: `secretMatches`, `escapeHtml`, `render` one-pass, `csvCell` formula-injection.
+- **Template primitives**: `render` + `escapeHtml`.
+- **Error classifiers**: `isUniqueViolation` + `isNotFound`.
+- **Public RSVP form**: parseOptions + needsOptions + filterForState + validateAnswers.
+- **Contact seam**: normalizeEmail + dedupKey + csvCell + csvRow + parseContactsText.
+
+### What remains deferred (final)
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change; zero new test value. Remains a follow-up.
+- **Gate-precedence in `propose_import` / `commit_import`** — audited & formally deferred (prisma-interleaved by design).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
+- **`normalizePhone` libphonenumber branch** — can't be tested under tsx/CJS interop (documented constraint; Next.js runtime exercises it).
+- **`sendInboundAck` E2E** — the fire-and-forget async wrapper around the pure helpers; the copy is now pinned and the prisma/provider side effects live behind dependency-injection-free globals. Not a natural extract target.
+
+With P14-M, the three candidates the P14-K scoping subagent flagged are all landed (P14-K `questions.ts`, P14-L `contact.ts`, P14-M `inbound-ack.ts`). The P14 scoping well is effectively dry — the remaining deferred items are all either marginal (activity-page migration), not-extractable-without-harm (import-planner gate-precedence), or environment-bound (libphonenumber, sendInboundAck E2E).
+
+Ready for audit.
