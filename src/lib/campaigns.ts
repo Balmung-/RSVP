@@ -1,6 +1,6 @@
 import { prisma } from "./db";
 import { dedupKey, normalizeEmail, normalizePhone } from "./contact";
-import { sendEmail, sendSms } from "./delivery";
+import { sendEmail, sendSms, sendWhatsApp } from "./delivery";
 import { newRsvpToken } from "./tokens";
 import { isUniqueViolation } from "./prisma-errors";
 import { DELIVERED_OK_STATUSES } from "./statuses";
@@ -129,19 +129,59 @@ export async function campaignStats(campaignId: string) {
   };
 }
 
+// Campaign-send channel selector.
+//
+// Scalar values target one channel. Group values are umbrellas:
+//   - "both" — email + SMS. Preserved verbatim from before P13; the
+//             AI tool's `send_campaign` validate() still only accepts
+//             this group, and the admin-UI bulk send passes it
+//             through as-is. Semantically "both" remains "every
+//             channel the invitee has BEFORE WhatsApp was introduced"
+//             so existing callers are not surprised by a WhatsApp
+//             message they didn't ask for.
+//   - "all"  — email + SMS + WhatsApp. Post-P13 callers that have
+//             been audited to deal with WhatsApp use this explicitly.
+// A caller that wants WhatsApp only picks the "whatsapp" scalar.
+export type SendCampaignChannel =
+  | "email"
+  | "sms"
+  | "whatsapp"
+  | "both"
+  | "all";
+
+// Channel-selector resolver. The surface is a single function so
+// callers don't each re-derive the set from the group semantics.
+// "both" intentionally excludes whatsapp — see the type comment.
+// Exported for unit testing; production callers reach it implicitly
+// through `sendCampaign`.
+export function channelSetFor(ch: SendCampaignChannel): Set<"email" | "sms" | "whatsapp"> {
+  switch (ch) {
+    case "email":
+      return new Set(["email"]);
+    case "sms":
+      return new Set(["sms"]);
+    case "whatsapp":
+      return new Set(["whatsapp"]);
+    case "both":
+      return new Set(["email", "sms"]);
+    case "all":
+      return new Set(["email", "sms", "whatsapp"]);
+  }
+}
+
 // Atomic send. Uses a CAS on Campaign.status to guarantee single concurrent run.
 // draft|active → sending; on completion → active (or closed if deadline passed).
 // If CAS fails (another send is in flight) we return { locked: true }.
 export async function sendCampaign(
   campaignId: string,
-  opts: { channel: "email" | "sms" | "both"; onlyUnsent: boolean } = { channel: "both", onlyUnsent: true },
+  opts: { channel: SendCampaignChannel; onlyUnsent: boolean } = { channel: "both", onlyUnsent: true },
 ) {
   const acquired = await prisma.campaign.updateMany({
     where: { id: campaignId, status: { in: ["draft", "active"] } },
     data: { status: "sending" },
   });
   if (acquired.count === 0) {
-    return { locked: true as const, email: 0, sms: 0, skipped: 0, failed: 0 };
+    return { locked: true as const, email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0 };
   }
 
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
@@ -155,34 +195,48 @@ export async function sendCampaign(
   // campaign at 500ms per provider call took ~4 min and would clip
   // Railway's request budget. At concurrency=5 the same campaign
   // finishes in under a minute without flooding the provider.
-  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" | "whatsapp" };
+  const chans = channelSetFor(opts.channel);
   const jobs: Job[] = [];
   let skipped = 0;
   for (const i of invitees) {
     const hasEmailSent = i.invitations.some((x) => x.channel === "email" && x.status !== "failed");
     const hasSmsSent = i.invitations.some((x) => x.channel === "sms" && x.status !== "failed");
-    if ((opts.channel === "email" || opts.channel === "both") && i.email) {
+    const hasWhatsAppSent = i.invitations.some((x) => x.channel === "whatsapp" && x.status !== "failed");
+    if (chans.has("email") && i.email) {
       if (opts.onlyUnsent && hasEmailSent) skipped++;
       else jobs.push({ invitee: i, channel: "email" });
     }
-    if ((opts.channel === "sms" || opts.channel === "both") && i.phoneE164) {
+    if (chans.has("sms") && i.phoneE164) {
       if (opts.onlyUnsent && hasSmsSent) skipped++;
       else jobs.push({ invitee: i, channel: "sms" });
     }
+    // WhatsApp reuses phoneE164 — same contact field as SMS. An
+    // invitee with a phone number can legitimately receive both,
+    // and a campaign targeting `channel: "all"` will fan out two
+    // phone jobs per invitee (SMS + WhatsApp). Dedup on the WA
+    // side happens via the planner's template-vs-session rules,
+    // not here.
+    if (chans.has("whatsapp") && i.phoneE164) {
+      if (opts.onlyUnsent && hasWhatsAppSent) skipped++;
+      else jobs.push({ invitee: i, channel: "whatsapp" });
+    }
   }
 
-  let email = 0, sms = 0, failed = 0;
+  let email = 0, sms = 0, whatsapp = 0, failed = 0;
 
   try {
-    const results = await mapConcurrent(jobs, 5, async (job) =>
-      job.channel === "email"
-        ? await sendEmail(campaign, job.invitee)
-        : await sendSms(campaign, job.invitee),
-    );
+    const results = await mapConcurrent(jobs, 5, async (job) => {
+      if (job.channel === "email") return sendEmail(campaign, job.invitee);
+      if (job.channel === "sms") return sendSms(campaign, job.invitee);
+      return sendWhatsApp(campaign, job.invitee);
+    });
     for (let k = 0; k < jobs.length; k++) {
       const r = results[k];
       if (r.ok) {
-        if (jobs[k].channel === "email") email++; else sms++;
+        if (jobs[k].channel === "email") email++;
+        else if (jobs[k].channel === "sms") sms++;
+        else whatsapp++;
       } else {
         failed++;
       }
@@ -197,7 +251,7 @@ export async function sendCampaign(
     });
   }
 
-  return { locked: false as const, email, sms, skipped, failed };
+  return { locked: false as const, email, sms, whatsapp, skipped, failed };
 }
 
 // Create / update a single invitee via the admin UI. Returns the row or an
@@ -306,12 +360,19 @@ export async function deleteInvitee(campaignId: string, inviteeId: string): Prom
   await prisma.invitee.deleteMany({ where: { id: inviteeId, campaignId } });
 }
 
+// Per-channel scalar — the shape of a single resend job. A caller
+// that wants groups ("both" / "all") iterates this set itself, same
+// way `sendCampaign`'s channel-selector resolves. Resend is always
+// a targeted per-channel action, so there's no equivalent to the
+// "both" umbrella here.
+export type ResendChannel = "email" | "sms" | "whatsapp";
+
 // Resend to a single invitee on one channel. Used from the invitee drawer.
 // Creates a fresh Invitation row regardless of prior attempts.
 export async function resendSingle(
   campaignId: string,
   inviteeId: string,
-  channel: "email" | "sms",
+  channel: ResendChannel,
 ): Promise<{ ok: boolean; error?: string }> {
   const [campaign, invitee] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: campaignId } }),
@@ -320,7 +381,12 @@ export async function resendSingle(
   if (!campaign || !invitee || invitee.campaignId !== campaignId) {
     return { ok: false, error: "not_found" };
   }
-  const r = channel === "email" ? await sendEmail(campaign, invitee) : await sendSms(campaign, invitee);
+  const r =
+    channel === "email"
+      ? await sendEmail(campaign, invitee)
+      : channel === "sms"
+        ? await sendSms(campaign, invitee)
+        : await sendWhatsApp(campaign, invitee);
   return r.ok ? { ok: true } : { ok: false, error: r.error };
 }
 
@@ -329,10 +395,10 @@ export async function resendSingle(
 export async function resendSelection(
   campaignId: string,
   inviteeIds: string[],
-  opts: { channels: Array<"email" | "sms">; onlyUnsent: boolean },
-): Promise<{ email: number; sms: number; skipped: number; failed: number }> {
+  opts: { channels: ResendChannel[]; onlyUnsent: boolean },
+): Promise<{ email: number; sms: number; whatsapp: number; skipped: number; failed: number }> {
   const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
-  if (!campaign) return { email: 0, sms: 0, skipped: 0, failed: 0 };
+  if (!campaign) return { email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0 };
   const invitees = await prisma.invitee.findMany({
     where: { campaignId, id: { in: inviteeIds } },
     include: { invitations: true },
@@ -340,33 +406,40 @@ export async function resendSelection(
   // Flatten to (invitee, channel) pairs so the concurrent runner can
   // fan out across them. `skipped` pairs are resolved here so the
   // parallel stage only does real sends.
-  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  type Job = { invitee: (typeof invitees)[number]; channel: ResendChannel };
   const jobs: Job[] = [];
   let skipped = 0;
   for (const i of invitees) {
     for (const ch of opts.channels) {
       const has = i.invitations.some((x) => x.channel === ch && x.status !== "failed");
+      // WhatsApp shares the phoneE164 contact field with SMS —
+      // the address check collapses to "has email for email, has
+      // phone for sms/whatsapp". Keeping this as a single inline
+      // ternary (rather than a switch) stays readable and avoids
+      // a helper that'd only have one caller.
       const hasAddr = ch === "email" ? !!i.email : !!i.phoneE164;
       if (!hasAddr) { skipped++; continue; }
       if (opts.onlyUnsent && has) { skipped++; continue; }
       jobs.push({ invitee: i, channel: ch });
     }
   }
-  const results = await mapConcurrent(jobs, 5, async (job) =>
-    job.channel === "email"
-      ? await sendEmail(campaign, job.invitee)
-      : await sendSms(campaign, job.invitee),
-  );
-  let email = 0, sms = 0, failed = 0;
+  const results = await mapConcurrent(jobs, 5, async (job) => {
+    if (job.channel === "email") return sendEmail(campaign, job.invitee);
+    if (job.channel === "sms") return sendSms(campaign, job.invitee);
+    return sendWhatsApp(campaign, job.invitee);
+  });
+  let email = 0, sms = 0, whatsapp = 0, failed = 0;
   for (let k = 0; k < jobs.length; k++) {
     const res = results[k];
     if (res.ok) {
-      if (jobs[k].channel === "email") email++; else sms++;
+      if (jobs[k].channel === "email") email++;
+      else if (jobs[k].channel === "sms") sms++;
+      else whatsapp++;
     } else {
       failed++;
     }
   }
-  return { email, sms, skipped, failed };
+  return { email, sms, whatsapp, skipped, failed };
 }
 
 export async function findDuplicates(campaignId: string) {

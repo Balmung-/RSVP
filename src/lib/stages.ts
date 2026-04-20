@@ -1,5 +1,5 @@
 import { prisma } from "./db";
-import { sendEmail, sendSms } from "./delivery";
+import { sendEmail, sendSms, sendWhatsApp } from "./delivery";
 import { notifyAdmins } from "./notify";
 import { mapConcurrent } from "./concurrency";
 import type { Campaign, CampaignStage, Prisma } from "@prisma/client";
@@ -10,10 +10,23 @@ export type StageKind = (typeof STAGE_KINDS)[number];
 export const AUDIENCE_KINDS = ["all", "non_responders", "attending", "declined"] as const;
 export type AudienceKind = (typeof AUDIENCE_KINDS)[number];
 
-export const CHANNELS = ["email", "sms"] as const;
+// P13-C — WhatsApp added as a first-class stage channel. Existing
+// stages serialize as "email,sms" and normalize unchanged; a stage
+// that was saved before P13-C keeps its behavior (no WhatsApp send)
+// because `normalizeChannels` filters the stored string against
+// this constant — a stage row only gets "whatsapp" in its channels
+// column if the operator explicitly picked it in the stage editor.
+export const CHANNELS = ["email", "sms", "whatsapp"] as const;
 export type Channel = (typeof CHANNELS)[number];
 
 function normalizeChannels(raw: string | null | undefined): Channel[] {
+  // Default stays "email,sms" (NOT "email,sms,whatsapp"). A null
+  // channels column means "legacy default" — the behavior from
+  // before WhatsApp existed, which is email + SMS. If we silently
+  // flipped the default to include WhatsApp, every stage created
+  // before P13-C with a null/empty `channels` column would start
+  // sending WhatsApp after deploy, which is wrong. Operators opt
+  // in per stage via the editor.
   const parts = (raw ?? "email,sms").split(",").map((s) => s.trim().toLowerCase());
   return CHANNELS.filter((c) => parts.includes(c));
 }
@@ -174,7 +187,11 @@ async function runStage(stage: CampaignStage): Promise<void> {
 
   // Flatten to (invitee, channel) pairs, drop skippable ones up front,
   // then fan out across the provider calls with a concurrency cap.
-  type Job = { invitee: (typeof invitees)[number]; channel: "email" | "sms" };
+  // WhatsApp reuses the phoneE164 address — same contact field as SMS.
+  // A stage can legitimately configure both channels on the same
+  // invitee; the planner + provider enforce template-vs-session
+  // discipline on the WhatsApp side, and the SMS send is independent.
+  type Job = { invitee: (typeof invitees)[number]; channel: Channel };
   const jobs: Job[] = [];
   let skipped = 0;
   for (const i of invitees) {
@@ -188,11 +205,16 @@ async function runStage(stage: CampaignStage): Promise<void> {
       jobs.push({ invitee: i, channel: ch });
     }
   }
-  const results = await mapConcurrent(jobs, 5, async (job) =>
-    job.channel === "email"
-      ? await sendEmail(effective, job.invitee)
-      : await sendSms(effective, job.invitee),
-  );
+  const results = await mapConcurrent(jobs, 5, async (job) => {
+    if (job.channel === "email") return sendEmail(effective, job.invitee);
+    if (job.channel === "sms") return sendSms(effective, job.invitee);
+    // WhatsApp. Stage sends are business-initiated, so `sessionOpen`
+    // is deliberately left undefined (→ template-first path). A
+    // stage cannot be inside a 24h session window for every invitee
+    // at once, and the planner refuses session-text unless the
+    // caller explicitly asserts the window is open.
+    return sendWhatsApp(effective, job.invitee);
+  });
   let sent = 0, failed = 0;
   for (const r of results) if (r.ok) sent++; else failed++;
 
