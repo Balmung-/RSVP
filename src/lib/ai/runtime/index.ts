@@ -27,6 +27,44 @@ export type RuntimeResolutionError =
   | "openrouter_not_configured"
   | "unknown_runtime";
 
+// Side-effect-free readiness report for liveness/health endpoints.
+// Mirrors `resolveRuntime`'s branch logic without constructing an
+// SDK client — hitting `/api/health` must not allocate network
+// resources. Consumers that actually need to invoke the runtime
+// (the chat route) continue to call `resolveRuntime` instead.
+export type RuntimeProbe = {
+  // "unknown" when AI_RUNTIME is set to a value we don't recognize
+  // (or empty). We don't pretend it's the default in that case,
+  // because a typo must be visible in the probe output so ops can
+  // spot it without reading logs.
+  name: "anthropic" | "openrouter" | "unknown";
+  configured: boolean;
+  reason?: RuntimeResolutionError;
+};
+
+export function probeRuntimeConfig(
+  env: RuntimeEnv = process.env as RuntimeEnv,
+): RuntimeProbe {
+  const raw = env.AI_RUNTIME;
+  const name = (raw ?? "anthropic").toLowerCase();
+
+  if (name === "anthropic") {
+    const configured = Boolean(env.ANTHROPIC_API_KEY);
+    return configured
+      ? { name: "anthropic", configured: true }
+      : { name: "anthropic", configured: false, reason: "anthropic_not_configured" };
+  }
+
+  if (name === "openrouter") {
+    const configured = Boolean(env.OPENROUTER_API_KEY) && Boolean(env.OPENROUTER_MODEL);
+    return configured
+      ? { name: "openrouter", configured: true }
+      : { name: "openrouter", configured: false, reason: "openrouter_not_configured" };
+  }
+
+  return { name: "unknown", configured: false, reason: "unknown_runtime" };
+}
+
 export type RuntimeEnv = {
   AI_RUNTIME?: string;
   ANTHROPIC_API_KEY?: string;
