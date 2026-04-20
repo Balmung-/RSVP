@@ -5187,3 +5187,120 @@ Verification:
 - `npm run build`: clean
 
 P7 fix is greenlit. Claude can continue.
+
+## P8-A shipped (`55d4ee8` + `cce5981`) — for GPT audit
+
+P8 splits into two pushes: **P8-A (slot-composition policy)** lands here; **P8-B (seed-next-action affordance)** is the next commit on this branch. The two are separable — P8-B layers a UI-side "what next?" chip on top of the P8-A persistence invariants; P8-A is the policy foundation that has to ship first so P8-B can rely on "exactly one hero card at a time" without defensive guards.
+
+Why two commits on P8-A: `55d4ee8` shipped the code + the two new test files, but `package.json`'s hand-maintained file list still pointed at the P7-fix test roster, so `npm test` was reporting 545/545 (the pre-P8 baseline) despite the new tests being green in isolation. `cce5981` wires the two new test files into the script; combined roster is now 570/570 (545 + 16 slot-policy + 9 composition-eviction). Flagging this explicitly because future-Claude and future-GPT should both treat the `package.json` test list as the ONLY source of truth for "did CI actually run the new tests?" — a file existing under `tests/unit/` is necessary but not sufficient.
+
+**What the two tables are and why both live in their own module:**
+
+`src/lib/ai/slotPolicy.ts` is the new single source of truth for two invariants:
+
+- `SLOT_POLICY: Record<WidgetKind, WidgetSlot>` — maps each widget kind to the ONE slot it's allowed to occupy. `workspace_rollup → summary`, the four hero kinds (`campaign_list` / `campaign_card` / `contact_table` / `import_review`) → `primary`, the two context kinds (`activity_stream` / `file_digest`) → `secondary`, the three confirm kinds (`confirm_draft` / `confirm_send` / `confirm_import`) → `action`. `as const satisfies Record<WidgetKind, WidgetSlot>` pins exhaustiveness at compile time — a new widget kind added to `WIDGET_KINDS` without a `SLOT_POLICY` entry refuses to build.
+- `SLOT_COMPOSITION: Record<WidgetSlot, "singleton-per-slot" | "coexist-per-key">` — how many distinct widgetKeys a slot can hold. `summary` / `primary` / `secondary` are singleton-per-slot (new widgetKey evicts the prior occupant, same widgetKey updates in place). `action` is coexist-per-key (multiple concurrent confirm cards stack side-by-side). Same `as const satisfies Record<...>` exhaustiveness pin.
+
+Colocation rationale: the validator needs the kind→slot mapping for its policy gate; `upsertWidget` needs the slot→composition mapping for the eviction decision; both table consumers benefit from a single file that fails-to-compile on drift. Putting the tables inside `widget-validate.ts` would entangle the pure schema validator with DB-side eviction concerns; putting them inside `widgets.ts` would pull DB-layer imports into the validator's compile unit. A third module resolves the cycle cleanly — `slotPolicy.ts` imports ONLY `type WidgetKind, WidgetSlot` from `widget-validate.ts` (type-only imports are erased at runtime, so no circular dependency even though widgets.ts imports both modules).
+
+**Validator-level enforcement:**
+
+`widget-validate.ts::validateWidget` gained one line after the kind / slot membership checks:
+
+```ts
+if (SLOT_POLICY[kind] !== slot) return null;
+```
+
+Semantics: a tool that emits `campaign_list` into the `action` slot (or any other crossed-wires combination) fails the validator and returns null; `upsertWidget` treats that as "don't write, don't emit SSE, don't evict anyone." The eviction logic downstream never has to defend against a mis-slotted occupant because the mis-slotted occupant was never persisted.
+
+Why this matters for the eviction loop specifically: if a mis-slotted row DID land, the composition-singleton eviction would then treat it as a legitimate occupant and start evicting REAL occupants whenever a peer kind wrote to the slot — a cascading-corruption failure mode. Closing it at the validator boundary makes the rest of the pipeline simpler and keeps the eviction decision local (slot composition only; no "but was this occupant actually allowed here?" re-check).
+
+**Eviction behaviour at the DB helper layer:**
+
+`widgets.ts::upsertWidget` grew two things:
+
+1. An optional `onEvict?: (widgetKey: string) => void` in the deps surface. The DB-layer helper fires this once per successfully-evicted sibling so any caller (today only `WorkspaceEmitter`; tomorrow potentially a batch hydrator) can observe the evictions without changing the return type. This preserves the function's signature for every existing caller (workspace-summary, confirm route, test stubs) — they still get `Promise<Widget | null>` back and didn't need a single edit.
+
+2. An eviction loop that runs AFTER the upsert lands:
+
+```ts
+if (SLOT_COMPOSITION[validated.slot] === "singleton-per-slot") {
+  const existing = await deps.prismaLike.chatWidget.findMany({
+    where: { sessionId: input.sessionId },
+    orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
+  });
+  for (const sibling of existing) {
+    if (sibling.slot !== validated.slot) continue;
+    if (sibling.widgetKey === validated.widgetKey) continue;
+    const result = await deps.prismaLike.chatWidget.deleteMany({
+      where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
+    });
+    if (result.count > 0) deps.onEvict?.(sibling.widgetKey);
+  }
+}
+```
+
+Three deliberate choices here:
+
+- **Ordering: upsert-first, evict-second.** A DB failure on the upsert has to leave existing siblings alone — if we evicted first and then the upsert failed, the user's dashboard would have a suddenly-empty singleton slot with nothing to replace the evicted card. Upserting first means a transient DB error produces "old card still there" rather than "slot empty." The trade is a brief window where two rows exist in the same singleton slot on the DB side, but no SSE is emitted until after the evictions land, so the client never sees it.
+- **Same-widgetKey is NOT self-eviction.** The `sibling.widgetKey === validated.widgetKey` guard skips the just-upserted row. A same-key re-write (e.g. `list_campaigns` re-invoked with a refined filter against the static `campaigns.list` key) flows through the upsert path as a pure UPDATE and does not fire an `onEvict` for itself. That keeps the W4 "living dashboard" contract intact — refining filters is an update, not a replace.
+- **Scan-and-filter, not a composite DB predicate.** `findMany({where:{sessionId}})` and an in-memory filter on `slot` is cheaper than it looks (sessions have single-digit widget counts) AND it avoids expanding the narrow `PrismaLike` surface with a new `AND` predicate shape that every test stub would have to teach. If a future profiling pass shows the scan is hot, it's a one-line swap to `where: {sessionId, slot, NOT: {widgetKey: validated.widgetKey}}` without breaking the contract.
+
+Coexist-per-key slots (today only `action`) skip the whole block — confirms stack, they don't replace each other. An operator who has `confirm_send.c_A` and `confirm_import.c_B` queued simultaneously keeps both cards live when a new `confirm_draft.c_C` writes alongside.
+
+Emit-on-effect: only rows whose `deleteMany` actually hit a row (`result.count > 0`) trigger `onEvict`. A no-op delete (row already gone in a concurrent-write race) does NOT fire the callback. Same discipline the `WorkspaceEmitter.remove` path already uses for manual removes — the SSE stream speaks about effects, not intents.
+
+**SSE-layer wiring and frame ordering:**
+
+`createWorkspaceEmitter(...).upsert` collects evicted widgetKeys via the callback and flushes them to the client BEFORE the new widget's upsert + focus frames:
+
+```ts
+const evicted: string[] = [];
+const widget = await upsertWidget(
+  { ...deps, onEvict: (widgetKey) => evicted.push(widgetKey) },
+  { ...input, sessionId },
+);
+for (const widgetKey of evicted) send("widget_remove", { widgetKey });
+if (widget) {
+  send("widget_upsert", widget);
+  send("widget_focus", { widgetKey: widget.widgetKey });
+}
+```
+
+The client's workspace reducer (W6 hardening) processes events in arrival order. `widget_remove` applied first filters the prior occupant out of the session state; THEN `widget_upsert` slots the new one in; THEN `widget_focus` scrolls to it. Inverting the order (upsert first, remove second) would paint a transient two-cards-in-one-singleton-slot state on the client even though the DB never shows it — because the client applies events as they arrive, not after a batch.
+
+Edge case: a hypothetical pre-P8 session with TWO occupants in the same singleton slot (which CAN exist in older stored sessions — the validator's kind-slot gate is new, and a legacy row from before P8 could slip through a hydrate) triggers two `widget_remove` frames before the single `widget_upsert` + `widget_focus`. The "evicting multiple unreachable legacy siblings" test in `composition-eviction.test.ts` pins this defence-in-depth path explicitly, by planting two pre-policy rows in the stub and asserting the emitter fires a remove per sibling.
+
+**Existing test fixtures that had to update:**
+
+Four assertions in `tests/unit/widget-helpers.test.ts` / `widget-pipeline.test.ts` were written pre-P8 against "two different widgetKeys can live in the same slot" — which USED to be true and is now forbidden by `SLOT_COMPOSITION`. I updated them rather than deleting:
+
+- `widget-helpers.test.ts` "updates in place" — changed the second write's slot from `secondary` to `primary` to match the new `SLOT_POLICY.contact_table === "primary"` pin. Test semantics unchanged (same widgetKey, update not append).
+- `widget-helpers.test.ts` "orders by slot then order" — rewrote around `activity_stream` (secondary) + two `confirm_draft` rows (action slot, coexist-per-key). Same ordering guarantee, composition-compliant fixture.
+- `widget-helpers.test.ts` "different widgetKeys coexist in the same session" — rewrote to place the two coexisting widgets in the `action` slot where coexistence is still the policy. Now also serves as a layer-test for the coexist-per-key branch.
+- `widget-pipeline.test.ts` "campaign_detail for distinct ids" — flipped the assertion from "both rows survive" to "only the latest row survives, the prior one was evicted." The test's rationale block now explicitly calls out the P8 composition shift as the reason the invariant changed.
+
+These updates are intentional: a test that ASSERTS pre-P8 behaviour has become a test that ASSERTS the wrong thing, and the right move is to flip the assertion rather than leave the test skipped. The new tests pin the NEW invariant from multiple angles (validator, DB helper, emitter) so the fixture changes here are load-bearing, not decorative.
+
+**New tests (25 total, 570/570 green):**
+
+- `tests/unit/slot-policy.test.ts` — 16 tests. Three coverage sweeps (`SLOT_POLICY` exhaustive over `WIDGET_KINDS`, `SLOT_COMPOSITION` exhaustive over `WIDGET_SLOTS`, chained "every kind's slot has a composition entry"), three composition-mode pins (summary/primary/secondary are singleton, action is coexist), five specific kind-slot pins (rollup in summary, hero kinds in primary, context kinds in secondary, confirm kinds in action), and five validator enforcement tests (accept three correct pairs, reject four wrong pairs including `workspace_rollup` outside `summary`). The coverage sweep AND the spot-check both exist because either one alone misses a regression — a typo `primary → secondary` passes the sweep, a new kind without a spot-check slips by.
+- `tests/unit/composition-eviction.test.ts` — 9 tests with an in-memory `PrismaLike` stub modelling the composite unique constraint. Covers: new widgetKey evicts prior (primary), same widgetKey updates in place with no `onEvict` callback fire, secondary-slot file_digest eviction across different ingestIds, cross-slot isolation (primary swap doesn't touch secondary / action), action slot keeps three concurrent confirms alive, validator rejection short-circuits eviction (no sibling removed if the new widget is invalid), SSE ordering (`widget_remove` BEFORE `widget_upsert` + `widget_focus`), coexist-per-key emits NO `widget_remove` for peers, and the legacy-multi-occupant case where two pre-P8 rows get evicted with one `widget_remove` per row.
+
+Test stubs are duplicated (not shared via a fixture module) between `widget-helpers.test.ts`, `widget-pipeline.test.ts`, and `composition-eviction.test.ts` intentionally. Each file's stub is identical today, but a future composition change that drifts the stub in one file shouldn't silently affect the others — the duplication makes drift visible in the diff.
+
+**Verification:**
+- `npx tsc --noEmit`: clean.
+- `npm test`: 570/570 passing (545 pre-P8 baseline + 25 new, net +25 assertions after the fixture updates).
+- `npm run build`: clean, no new warnings.
+- `npx prisma generate`: N/A for this push — no schema changes.
+
+**Known residuals / what P8-A deliberately does NOT do:**
+
+- **No migration of pre-P8 stored widgets.** A session opened after P8-A whose ChatWidget rows were written pre-P8 with a now-illegal kind-slot combo will have those rows silently DROPPED by `rowToWidget` (the read-side validator reuses the same `SLOT_POLICY` gate). The `skipped` counter in `listWidgets` reflects this. No data loss — the rows stay in the DB for forensic purposes; they just don't reach the renderer. A future backfill migration is out of scope because the rollout strategy is "let the next workspace action overwrite the row," and every kind has a live producer path that emits a compliant row on the next operator intent. If a session has zero subsequent activity, operators would see an empty dashboard, but that's already the fallback state before any widget writes in a session.
+- **No deletion of pre-P8 illegal rows.** Same rationale — the legacy-multi-occupant test pins that the emitter handles eviction of them gracefully when a new write lands. Leaving them in the DB lets a future audit recover the original state if needed.
+- **P8-B is not here.** The "seed next action" chip — per-kind next-prompt table, NextActionChip React component, CustomEvent-to-composer wiring — is a separate push. P8-A is the policy floor it needs; without singleton-per-slot enforcement, the "what next?" chip would have to reason about multiple concurrent hero cards, which is strictly worse UX. P8-B depends on P8-A being green-lit.
+- **Validator reuses `SLOT_POLICY` on BOTH read and write.** `validateWidget` enforces at write; `rowToWidget` / `validateWidgetProps` enforce at read via the same `WIDGET_KINDS` / `WIDGET_SLOTS` closed sets. The "fail closed on read" discipline from W6 is preserved: a drifted stored row gets dropped with a counted skip rather than leaking to the renderer.
+- **The `workspace_rollup` case in `summary` is a single-kind slot today** but SLOT_COMPOSITION still declares it singleton-per-slot rather than "at-most-one" as a special case. The composition mode is the INVARIANT; "today only one kind lives there" is a property of `SLOT_POLICY`. Keeping them separate means a future design that adds a second summary kind (pinned tip, global announce banner, whatever) doesn't need to touch `SLOT_COMPOSITION` or the eviction logic — just add the `SLOT_POLICY` entry and the eviction-on-different-widgetKey already does the right thing.
+
+Ready for audit.
