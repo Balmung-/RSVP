@@ -7711,3 +7711,148 @@ Behaviour is byte-for-byte preserved. Every helper output was derived by reading
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred.
 
 Ready for audit.
+
+---
+
+## P14-D' — send_campaign post-dispatch summary derivation (hash `fc19a5b`)
+
+### Pivot — why D' instead of D
+
+Slated next: "Taqnyat send-plan → webhook chain pins" (P14-D). Did the honest scoping audit first. Turns out that whole chain is **already well-covered**:
+
+- `tests/unit/taqnyat-sms.test.ts` — the SMS send plan (API call shape, headers, error coercion).
+- `tests/unit/taqnyat-whatsapp.test.ts` — the WhatsApp send plan (template-name/language/variables wiring).
+- `tests/unit/taqnyat-webhook-parse.test.ts` — THE pure classifier (`decideDeliveryTransition`): every provider status, SMS + WhatsApp status vocabularies, unknown-status fallback to `failed`, etc. (100+ pins.)
+- `tests/unit/taqnyat-webhook-route.test.ts` — the route handler's HMAC check + the prisma-side update.
+- `tests/unit/whatsapp-send-plan.test.ts` — WhatsApp send-plan composition.
+- `tests/unit/send-whatsapp.test.ts` — end-to-end send_whatsapp tool.
+- `tests/unit/channel-widening.test.ts` + `send-blockers-whatsapp.test.ts` — the channel/blockers matrix around whatsapp.
+
+The agent audit for P14-D surfaced three candidate gaps. I walked each one:
+
+1. **"Outcome blob mapping on confirm-flow"** — the audit suggested the confirm-flow's `outcome` blob derivation (the one that lands on `widget.props.outcome` after a send) wasn't pinned. **Not true.** `confirm-single-use.test.ts:170-194, 320-323, 415-447` covers both success and error outcome derivation, including the `asFiniteNumber` coercion and the widget-validator-friendly shape.
+2. **"WhatsApp unknown-status fallback"** — audit claimed unknown WhatsApp statuses weren't pinned to route-to-`failed`. **Not true.** `taqnyat-webhook-parse.test.ts:336` explicitly pins the `"newmetastate"` → `failed` case for WhatsApp.
+3. **"send_campaign post-dispatch summary derivation"** — the three transformations (total sum across channels, per-channel breakdown filter, summary-line composition including pluralization + conditional Skipped/Failed lines + join) live inline in `send_campaign.ts`'s handler and have **zero** unit coverage because the handler pulls in prisma + the campaigns orchestrator + provider dispatch. **Genuine gap.**
+
+So P14-D' pivots to the one real gap: extract the post-dispatch summary into a pure helper and exhaustively pin its transformations. Same pattern as P14-B → P14-B'.
+
+### Design
+
+One pure helper in `src/lib/ai/tools/send-campaign-summary.ts`:
+
+```ts
+export type SendCampaignChannelInput =
+  | "email" | "sms" | "whatsapp" | "both" | "all";
+
+export type SendCampaignDispatchResult = {
+  email: number; sms: number; whatsapp: number;
+  skipped: number; failed: number;
+};
+
+export type SendCampaignSummary = {
+  total: number;
+  breakdown: string[];
+  summaryLines: string[];
+  summary: string;
+};
+
+export function deriveSendCampaignSummary(args: {
+  campaignName: string;
+  channel: SendCampaignChannelInput;
+  result: SendCampaignDispatchResult;
+}): SendCampaignSummary;
+```
+
+Three distinct transformations, each testable in isolation:
+
+1. **Total sum** — `email + sms + whatsapp`. A pre-P13 regression dropping `whatsapp` silently under-counts the operator-facing total on any `"whatsapp"` / `"all"` send.
+2. **Per-channel breakdown filter** — the channel → included matrix:
+   - `email:    "email" | "both" | "all"`
+   - `sms:      "sms" | "both" | "all"`
+   - `whatsapp: "whatsapp" | "all"`
+   `"both"` is the pre-P13 two-channel vocabulary and MUST NOT silently widen to include whatsapp (legacy callers drift).
+3. **Summary-line composition** — pluralization branch (`total === 1` is the only singular case), conditional `Skipped N.` line (only when `> 0`), conditional `Failed N — see the campaign's activity page for per-invitee errors.` line (only when `> 0`), and the single-space join rule (the confirm-flow's outcome writer persists `summary` on `widget.props.outcome.summary`, which the widget validator requires non-empty).
+
+The handler (`send_campaign.ts`) shrinks: ~30 LOC of inline derivation collapses to one destructuring call. The output object still pass-throughs the individual counters directly so pre-P13 consumers reading only `email` / `sms` are unchanged.
+
+### Implementation — single commit `fc19a5b`
+
+**New:**
+- `src/lib/ai/tools/send-campaign-summary.ts` — the helper with doc comments explaining each transformation (~140 LOC).
+- `tests/unit/send-campaign-summary.test.ts` — 21 pins.
+
+**Modified:**
+- `src/lib/ai/tools/send_campaign.ts` — imports the helper, replaces inline derivation with `const { summary } = deriveSendCampaignSummary({...})`. Output shape unchanged.
+- `package.json` — adds the new test file to the explicit test list.
+
+Net LOC: 426 lines added (helper + tests + doc), 33 removed from the handler. Handler reads cleaner; test surface grows by 21 exhaustive pins.
+
+Behaviour is byte-for-byte preserved. I walked the pre-refactor inline expressions side-by-side with the helper body to confirm every branch / string / join matches.
+
+### Test coverage — 21 tests, grouped by regression vector
+
+**(1) Total — 3 tests:**
+1. `total = email + sms + whatsapp` — THE three-way sum.
+2. `total is 0 when every counter is 0` — pathological but valid.
+3. `total excludes skipped and failed` — "Sent N messages" is deliveries, not attempts.
+
+**(2) Breakdown filter — 6 tests (the full channel-input matrix):**
+4. `channel="email"` → breakdown has ONLY email (even with non-zero sms/whatsapp in the result).
+5. `channel="sms"` → breakdown has ONLY sms.
+6. `channel="whatsapp"` → breakdown has ONLY whatsapp — the most important scalar. Operator asked for WhatsApp; must NOT see "0 email, 0 sms" padding.
+7. `channel="both"` → breakdown has email + sms, NO whatsapp. Pre-P13 legacy vocabulary; silently widening breaks callers.
+8. `channel="all"` → breakdown has all three in order email → sms → whatsapp.
+9. `breakdown keeps zero counters for included channels` — filter is about INCLUSION, not counter non-zero (operator sees "0 email" on a both-send where all invitees were sms-only).
+
+**(3) Pluralization — 3 tests:**
+10. `total === 1 → "message"` (singular).
+11. `total === 0 → "messages"` (English: "0 messages" is plural).
+12. `total === 2 → "messages"` (plural).
+
+**(4) Skipped conditional — 2 tests:**
+13. `skipped === 0 → no "Skipped" line` (no "Skipped 0." noise).
+14. `skipped > 0 → one "Skipped N." line`.
+
+**(5) Failed conditional — 2 tests:**
+15. `failed === 0 → no "Failed" line`.
+16. `failed > 0 → one "Failed N — see the campaign's activity page for per-invitee errors." line` — pinned the operator-actionable pointer verbatim so a drift requires conscious update.
+
+**(6) Ordering — 1 test:**
+17. `both skipped AND failed > 0 emit both lines in order (Sent / Skipped / Failed)` — audit-stream prefix grep stays stable.
+
+**(7) Summary join — 3 tests:**
+18. `summary joins summaryLines with single space` — a switch to `"\n"` or `"; "` silently drifts the widget-persisted copy.
+19. `summary is always non-empty even on a zero-total send` — widget-validator requires non-empty; the "Sent 0 messages" line is always emitted first.
+
+**(8) Campaign-name passthrough — 1 test:**
+20. `campaignName is quoted verbatim in the first line` — operator-provided; helper does NOT escape or truncate (validator-level checks run at persist time). Pins the passthrough so a future "sanitization" refactor has to justify changing this shape.
+
+**(9) Output shape drift guard — 1 test:**
+21. `returns EXACTLY total, breakdown, summaryLines, summary` — a new field forces a test update.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **948/948 passing** in 2.8s (was 927/927; +21 from the new derivation tests)
+- 0 `not ok` lines in TAP
+- Byte-for-byte behaviour preservation confirmed by side-by-side walk of the pre- and post-refactor handler
+
+### What this does NOT cover (deferred / intentionally out of scope)
+
+- **The role / scope / blocker / status gates that run BEFORE dispatch.** Those are either extracted separately (`computeBlockers` in `send-blockers.ts`, covered by `send-blockers-whatsapp.test.ts`) or interleaved with prisma and tested at the route level.
+- **The `send_in_flight` / `forbidden` / `not_found` refusal shapes.** Fixed-literal outputs above the dispatch call, not derivations.
+- **The confirm-flow's `outcome` blob derivation.** Lives in `confirm-flow.ts:247-278` and is already covered by `confirm-single-use.test.ts`.
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred.
+
+### Where P14 stands
+
+Four slices landed so far in this hardening pass:
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring in chat + confirm routes.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations (preview + commit + refusal gate).
+- **P14-D'** (`fc19a5b`) — send-campaign summary derivation.
+
+Each slice follows the same discipline: pure-helper extraction with discriminated-union / structured outputs, exhaustive unit pins grouped by regression vector, byte-for-byte behaviour preservation, and handlers that shrink while test surface grows. The project went from 825 tests at P14 start to 948 now (+123 pins across A/B'/C/D').
+
+Ready for audit.
