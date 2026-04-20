@@ -7856,3 +7856,160 @@ Four slices landed so far in this hardening pass:
 Each slice follows the same discipline: pure-helper extraction with discriminated-union / structured outputs, exhaustive unit pins grouped by regression vector, byte-for-byte behaviour preservation, and handlers that shrink while test surface grows. The project went from 825 tests at P14 start to 948 now (+123 pins across A/B'/C/D').
 
 Ready for audit.
+
+---
+
+## P14-E — propose_send preview bucket fold (hash `95b5e04`)
+
+### Why this slice — the structural sibling of P14-D'
+
+P14-D' pinned the POST-dispatch summary derivation (`deriveSendCampaignSummary`): the total sum across channels, the per-channel breakdown filter, the pluralization + conditional Skipped/Failed line composition, and the join.
+
+Its structural sibling is the PRE-dispatch preview derivation in `propose_send.ts` — the handler that renders the `ConfirmSend` directive the operator reviews before clicking. Four transformations live inline there:
+
+1. **Per-channel bucket fold** (lines 198-267 pre-refactor) — for each invitee, evaluate `(email / sms / whatsapp)` independently and fold into exactly one of `{ready, skipped_already_sent, skipped_unsubscribed, no_contact}` per wanted channel. Precedence chain: `no_contact → skipped_already_sent → skipped_unsubscribed → ready`.
+2. **`readyMessages` sum** (line 279-280) — 3-way: `email.ready + sms.ready + whatsapp.ready`. A JOB count (per-(invitee, channel) pair), not a head count.
+3. **Summary-line composition** (lines 307-341) — first line `Propose send for "..." [...]: channel=..., only_unsent=...`; second line `N invitee(s); M message(s) ready to send (<readyParts>).` with readyParts dynamically filtered to match the channel set; conditional `Skipped: already-sent X, unsubscribed Y.` line only when `skippedAlreadySent + skippedUnsub > 0`; conditional `Blockers: <joined>.` line only when non-empty; always-emitted `ConfirmSend card has been rendered...` tail pointer.
+4. **`state` ternary** — `blockers.length > 0 ? "blocked" : "ready"`. Feeds the widget's state field and controls whether the confirm button is clickable (covered downstream by `confirm-send-clickable.test.ts`'s state-to-clickability rules, but the input side — this ternary — was NOT pinned).
+
+All four had ZERO unit coverage before this slice. The existing tests (`send-blockers-whatsapp.test.ts`, `channel-widening.test.ts`, `directive-validate.test.ts`) cover the INPUTS (`computeBlockers`, `channelSetFor`) and the VALIDATORS (`by_channel` shape), but nothing pinned the TRANSFORMATIONS that sit between them in the handler.
+
+### Scoping audit — what I checked and rejected
+
+Did a harsh gap audit (via a research agent) before committing to this slice. Walked every file in `src/lib/ai/tools/`, every route under `src/app/api/**/route.ts`, and the relevant shared libraries. Ranked 4 candidates:
+
+1. **propose_send bucket fold** (this slice) — structural symmetry with P14-D', concrete regression vectors, clean extraction against already-extracted `loadAudience` + `computeBlockers`.
+2. **`parseIntent` / keyword dictionaries / token extraction in `src/lib/inbound.ts`** — zero coverage, genuinely high-risk (auto-apply path writes RSVP rows based on these classifications). But the functions are already pure and exported — this would be a pin-only slice, not an extract-and-pin slice. Deferred to a potential P14-F.
+3. **`campaign_detail` activity-scoping OR-composition** — small but real gap, 10-14 pins.
+4. **`inbound/email/route.ts` provider normalization** — real but weaker (less discriminated-union structure, more defensive string coalescing).
+
+Candidates rejected after investigation:
+- `send_campaign` handler (fully delegating post-P14-D').
+- `commit_import` / `propose_import` (fully delegating post-P14-C).
+- `confirm-flow.ts` (extracted + tested at `confirm-outcome.test.ts`, `releasable-refusals.test.ts`, `confirm-classify.ts`).
+- `draft_campaign` (trivial parsing, low regression cost).
+- `sendCampaign` orchestrator / `stages.ts` `runStage` (prisma-interleaved — violates the "no prisma mocking" rule).
+- `preview.ts` rendering utilities (downstream; regressions surface loudly via operator test-send).
+
+Verdict: P14-E = bucket fold. Best structural sibling, clearest regression vectors, cleanest extraction.
+
+### Design
+
+One pure helper in `src/lib/ai/tools/propose-send-preview.ts`:
+
+```ts
+export function deriveProposeSendPreview(args: {
+  campaignName: string;
+  campaignStatus: string;
+  channel: ProposeSendChannelInput;  // email | sms | whatsapp | both | all
+  onlyUnsent: boolean;
+  audience: Audience;                 // from loadAudience
+  blockers: string[];                 // from computeBlockers
+}): {
+  buckets: { email: ChannelBreakdown; sms: ChannelBreakdown; whatsapp: ChannelBreakdown };
+  readyMessages: number;
+  inviteeCount: number;
+  summaryLines: string[];
+  summary: string;
+  state: "ready" | "blocked";
+};
+```
+
+The handler (`propose_send.ts`) shrinks drastically: 192 LOC of inline derivation + 20-LOC inline `ChannelBreakdown` type collapse to one destructuring call. Net: -130 LOC in the handler, +280 LOC in the new helper (most of that is doc comments explaining regression vectors).
+
+The helper imports `channelSetFor` from `@/lib/campaigns` (single source of truth for channel vocabulary) and the `Audience` / `InviteeForAudience` types from `send-blockers.ts` (already extracted).
+
+Byte-for-byte behaviour preserved: walked each pre-refactor line side-by-side with the helper body. The only visible shift is the type's relocation.
+
+### Implementation — single commit `95b5e04`
+
+**New:**
+- `src/lib/ai/tools/propose-send-preview.ts` — the helper + `ProposeSendChannelInput` + `ChannelBreakdown` + `ProposeSendPreview` types (~280 LOC including thorough doc comments).
+- `tests/unit/propose-send-preview.test.ts` — 32 pins (~440 LOC).
+
+**Modified:**
+- `src/lib/ai/tools/propose_send.ts` — imports + delegates all four derivations. The remaining inline logic (template_preview clipping, WhatsApp template label construction, widget envelope) is direct pass-throughs from the campaign row, not derivations worth extracting.
+- `package.json` — adds the new test file.
+
+Net LOC: 904 lines added (helper + tests + doc), 162 removed from the handler.
+
+### Test coverage — 32 tests, grouped by regression vector
+
+**(1) Per-channel fold — email precedence chain (5 tests):**
+1. `no_contact` when inv.email is null.
+2. `skipped_already_sent` when `onlyUnsent && has non-failed invitation`.
+3. `skipped_unsubscribed` when email in unsubEmails.
+4. `ready` when all gates pass.
+5. `no_contact` wins over already-sent (first gate in chain) — CRITICAL precedence pin.
+
+**(2) Already-sent detection (3 tests):**
+6. Status `"failed"` excluded — failed attempt allows resend.
+7. Channel-scoped — email invitation doesn't lock SMS.
+8. `onlyUnsent=false` disables the gate entirely (full re-send path).
+
+**(3) Channel-filter matrix (5 tests):**
+9. `channel="email"` → only emailBucket increments; sms/whatsapp stay all-zero.
+10. `channel="sms"` → only smsBucket.
+11. `channel="whatsapp"` → only whatsAppBucket — operator asks for WhatsApp, must not see email/SMS counters moving.
+12. `channel="both"` → email + sms, NOT whatsapp (pre-P13 invariant pinned).
+13. `channel="all"` → all three.
+
+**(4) Precedence edge cases (2 tests):**
+14. Already-sent AND unsubscribed → skipped_already_sent wins (first gate wins). Swapping would mislead the operator about the REASON for the skip.
+15. WhatsApp uses unsubPhones (shared with SMS) — an SMS STOP blocks WhatsApp too. Conservative default.
+
+**(5) readyMessages sum (3 tests):**
+16. 3-way sum `email.ready + sms.ready + whatsapp.ready`.
+17. Zero when nobody is reachable.
+18. JOB count semantics — 1 invitee on channel=all with full contact → readyMessages=3, inviteeCount=1.
+
+**(6) inviteeCount (1 test):**
+19. Equals `audience.invitees.length` (head count, not job count — historical bug "ready_total" collapsed the two).
+
+**(7) Summary lines (8 tests):**
+20. First-line exact format `Propose send for "<name>" [<status>]: channel=<ch>, only_unsent=<bool>.`
+21. readyParts scalar "whatsapp" emits only `whatsapp N` (not email/sms).
+22. readyParts channel="all" emits three parts in email → sms → whatsapp order.
+23. Pluralization — 1 singular, 0 and 2 plural for both "invitee" and "message".
+24. No Skipped line when skip totals are 0.
+25. One Skipped line with exact `already-sent X, unsubscribed Y.` format.
+26. Blockers line emitted only when non-empty, with `, `-joined codes.
+27. ConfirmSend tail ALWAYS emitted as last line — the pointer the AI model reads.
+
+**(8) state ternary (2 tests):**
+28. `state="ready"` when blockers is empty.
+29. `state="blocked"` when any blocker is present — pins ternary direction so a single-char flip can't paint the confirm button active on a blocked preview.
+
+**(9) Summary join + shape drift guards (3 tests):**
+30. `summary = summaryLines.join("\n")` — INTENTIONALLY newline, not space like P14-D'. A "harmonize" refactor would silently drift one of them.
+31. Output shape — exactly `buckets, inviteeCount, readyMessages, state, summary, summaryLines`.
+32. `buckets` sub-shape — exactly `email, sms, whatsapp`. Adding a fourth channel fires this test before the widget validator.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **980/980 passing** in 2.7s (was 948/948; +32 from the new derivation tests)
+- 0 `not ok` lines in TAP
+- Byte-for-byte behaviour preservation confirmed by side-by-side walk of pre- and post-refactor handler
+
+### What this does NOT cover (deferred / intentionally out of scope)
+
+- **Widget envelope composition** — covered at emission by `validateWidgetProps` in `widget-validate.ts` and by `directive-validate.test.ts` (which pins `by_channel` structural shape).
+- **`template_preview` clipping** — simple `slice(0, N)`, low regression cost.
+- **WhatsApp template label construction** — pass-through ternary from campaign row.
+- **`parseIntent` + keyword classifiers in `src/lib/inbound.ts`** — identified as genuinely high-risk gap (auto-apply path writes RSVP rows), but it's a pin-only slice since the functions are already pure and exported. Worth doing as P14-F if P14 continues.
+- **`campaign_detail` activity-scoping** — smaller gap, 10-14 pins, deferred.
+- **Gate-precedence invariants in `propose_import` / `commit_import`** — still deferred (prisma-interleaved).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred.
+
+### Where P14 stands — now five slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+
+Test count: 825 → 980 (+155 across five slices). Handlers across `send_campaign.ts`, `propose_send.ts`, `propose_import.ts`, `commit_import.ts`, and the confirm route are now thin orchestrators that delegate every meaningful transformation to a pure, unit-tested helper.
+
+Ready for audit.
