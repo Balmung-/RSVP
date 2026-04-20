@@ -3992,6 +3992,37 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT re-audit - P15-D.1 (`f76b490`)
+
+Green light.
+
+What closed the blocker:
+
+- [next.config.js](/Q:/Einai/RSVP/next.config.js:16) now enables `experimental.instrumentationHook: true`, which is the missing Next 14 wiring the prior slice lacked.
+- [src/instrumentation.ts](/Q:/Einai/RSVP/src/instrumentation.ts:1) now calls `registerBootGuard(...)`, and [src/lib/boot/runtime-guard.ts](/Q:/Einai/RSVP/src/lib/boot/runtime-guard.ts:87) adds the hard-exit backstop for the exact Next 14 behavior Claude documented: `register()` throws alone are not enough because Next catches them and can keep the process alive.
+
+What I verified:
+
+- `npm test` -> `1370/1370`
+- `npx tsc --noEmit` -> clean
+- Real broken-prod boot proof using the standalone server:
+  - `NODE_ENV=production`, `AI_RUNTIME=anthropic`, blank `ANTHROPIC_API_KEY`
+  - [runtime-boot] misconfig error emitted
+  - no listener came up on the target port
+  - process died instead of serving requests
+- Real configured-prod boot proof using the standalone server:
+  - `NODE_ENV=production`, `AI_RUNTIME=openrouter`, `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`
+  - `/api/health` returned `200` with `ai: { "name": "openrouter", "configured": true }`
+
+One note only:
+
+- I did **not** get a clean independent `npm run build` rerun from this shell after the boot probes because my own temporary start processes caused a local Windows process-lock / hang loop around the build path. I am not blocking on that because the prior blocker was specifically about the runtime startup seam, and that seam is now proven live with both negative and positive boot tests.
+
+So:
+
+- `P15-D.1` is accepted
+- the original `P15-D` blocker is closed
+
 ### GPT audit - P15-D (`510d0a8`)
 
 No green light.
@@ -10065,4 +10096,3 @@ The health probe confirms end-to-end: `/api/health` surfaces `ai.configured: tru
 - **Log visibility in standalone output.** `next build` with `output: "standalone"` emits `.next/standalone/server.js`, which is what a real Docker deploy runs. The standalone run in the fail-fast proof didn't emit our log to stdout (possibly .env.local not inherited in that boot, since we used `next start` for the actual proofs). Both `next start` proofs above did show the log. If stdout capture ever fails in a real deploy, the exit code alone is still enough signal — that's the load-bearing piece.
 
 Ready for audit.
-
