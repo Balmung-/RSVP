@@ -5579,3 +5579,70 @@ Two new test files, 25 total assertions, wired into `npm test` alongside the exi
 - **No chip-hides-on-hydrate suppression** — if a widget hydrates before the composer finishes mounting, clicking the chip fires an event no one is listening for. Functionally harmless (the click is idempotent and the operator can click again); worth a follow-up if telemetry shows it happening.
 
 Ready for audit.
+
+---
+
+## P4-A notepad — `6b3aa8c` ready for GPT audit
+
+### What landed
+
+P4-A is the API + data foundation for the session-picker UI in P4-B. Two additions:
+
+1. **`GET /api/chat/sessions`** — the picker's backing endpoint. Returns the caller's recent, non-archived chat sessions in `updatedAt DESC` order, each row shaped `{ id, title, createdAt, updatedAt, messageCount, preview }`. Default limit 25, hard-capped at 100, falls back to default on malformed `?limit=`.
+2. **First-message title derivation in `POST /api/chat`** — when the route creates a new `ChatSession` row (no `body.sessionId` supplied), it derives a title from the operator's message via `deriveSessionTitle(message)` and writes it to the `title` column. The derivation is pure, tested in isolation, and never re-runs on subsequent turns in the same session.
+
+No schema migration. `ChatSession.title` has been nullable in the schema for a while; P4-A is the first caller that writes it.
+
+### Files & layout
+
+- **`src/app/api/chat/sessions/handler.ts`** (new) — pure handler. `listSessionsHandler(req, deps)` takes a `Request` and a `{ getCurrentUser, findSessions }` dep object; returns `{ kind: "ok" | "error", body, status? }`. No Next imports, no Prisma imports, no `process.env`. Parses `?limit=` with a fallback-not-reject policy (malformed → default). Derives the preview via `derivePreview(row)` — first user message, `trim()`-ed, capped at 80 chars with `…` suffix.
+- **`src/app/api/chat/sessions/route.ts`** (new) — thin GET wrapper. Injects the real `getCurrentUser` and a `findSessions` closure that pins the Prisma query shape: `where: { userId, archivedAt: null }`, `orderBy: { updatedAt: "desc" }`, `take: limit`, and an `include` that carries `_count.messages` + the first user message's content (ordered `createdAt asc`, `take: 1`) for the preview. Query-shape coupling lives next to the Prisma generated types, not in the handler.
+- **`src/lib/ai/session-title.ts`** (new) — `deriveSessionTitle(message: string): string | null`. Pure. Collapses internal whitespace runs to a single space, trims the edges, returns `null` if the result is empty, caps at `TITLE_MAX_CHARS = 60` with a U+2026 ellipsis suffix on truncation. Exported alongside the constant so tests can pin the boundary.
+- **`src/app/api/chat/route.ts`** (edited) — the session-create branch now imports `deriveSessionTitle` and passes the derived value into `prisma.chatSession.create({ data: { userId, title: derivedTitle } })`. The existing-session branch is untouched — the title is set ONCE on creation, never overwritten by subsequent turns.
+
+### Testing
+
+Two new test files, **30 total assertions**, wired into `npm test` alongside the existing 603:
+
+**`tests/unit/list-sessions-handler.test.ts`** — 17 tests:
+- **Auth gate** — 401 with no user, and critically `findSessions` is NEVER called (unauthenticated probes don't touch DB).
+- **Empty + populated** — empty array when user has no rows; populated rows are forwarded in the order `findSessions` returned them (handler does NOT re-sort, trusting the Prisma `orderBy`).
+- **Row shape** — every returned row carries `id, title, createdAt (ISO), updatedAt (ISO), messageCount, preview`. Null title is forwarded as null (picker's job to fall back to preview).
+- **Ownership scoping** — a hand-crafted `?userId=mallory` in the URL is IGNORED; `findSessions` always receives `getCurrentUser().id`. Pinned with an explicit `user: { id: "alice" }` + `?userId=mallory` test.
+- **Limit parsing** — default (no param), valid `?limit=10` forwarded as 10, `?limit=9999` clamped to 100, `?limit=abc` falls back to default (not 400), `?limit=0` and `?limit=-5` fall back to default.
+- **Preview derivation** — short message verbatim, long message truncated to exactly `PREVIEW_CHARS` and ending in `…`, whitespace-only content returns null, empty messages array returns null, undefined messages field returns null (defensive), non-string content returns null (defensive against schema drift).
+
+**`tests/unit/session-title.test.ts`** — 13 tests:
+- **Happy path** — short EN message returned verbatim, short AR message returned verbatim (no special-casing for non-Latin).
+- **Truncation** — exactly `TITLE_MAX_CHARS` length is NOT truncated (off-by-one guard), longer is truncated to exactly `TITLE_MAX_CHARS` with `…` suffix, truncation preserves the prefix `TITLE_MAX_CHARS - 1` code units.
+- **Whitespace** — leading/trailing trim, internal newlines collapse to single space, tabs + double spaces collapse, mixed whitespace around newlines (`"  \n  hello\n  world  \n  "` → `"hello world"`).
+- **Nulls** — empty string returns null, whitespace-only returns null, non-string input (number/null/undefined/object) returns null.
+- **Realistic shapes** — a pasted-paragraph first message truncates cleanly with the opening words intact; an AR multi-line message collapses + trims as expected.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **633/633 passing** (was 603; +30 new).
+
+### What would catch a regression
+
+- Handler re-sorting rows on its own (e.g. a future "natural language priority" sort): the "rows forwarded in order returned by findSessions" test fails — it passes already-sorted rows in an arbitrary stable order and expects the handler to preserve it.
+- Regression in the ownership scoping (e.g. a caller bug that starts reading `?userId=` from the URL): the "findSessions is called with the authenticated user's id — not a query param" test fails with `alice !== mallory`.
+- Regression in the limit clamp (e.g. a future refactor that lets MAX_LIMIT drift): the `?limit=9999` test fails with `forwardedLimit !== 100`.
+- Regression in the preview truncation (e.g. off-by-one producing `length 81` instead of `80`): the "long first message is truncated" test fails on the exact-length assertion.
+- Regression in `deriveSessionTitle` whitespace collapse (e.g. removing the `\s+` regex in favor of a single-space replace): the `"hello\t\tworld    now" → "hello world now"` test fails.
+- Regression in the session-create path that drops the `title:` field: no unit test covers the real Prisma write, but the test harness's absence would surface in integration — if we later add an e2e test that reads back the row, the title being `null` would fail.
+
+### Known residuals (deliberately not here)
+
+- **No PATCH rename / DELETE archive routes** — P4's roadmap spec asks for "session list/picker, resume last, clear new-workspace action, workspace title/digest row". Rename + archive are nice-to-haves that don't block the picker UX. Deferring to a potential P4-C or a follow-up issue.
+- **No backfill of titles on pre-P4 sessions** — sessions created before this commit have `title: null`. The picker falls back to the preview row (also added in this commit), so operator UX still works — just without the derived label. A one-shot backfill script would be trivial (`UPDATE ChatSession SET title = LEFT(first_user_message, 60) WHERE title IS NULL`), deferred until we know operator complaints warrant it.
+- **No session-list rate limit** — the list endpoint is GET-only, idempotent, and scoped to one user. If telemetry shows picker-poll abuse we add it; for now the existing Next.js HTTP limits suffice.
+- **No `Cache-Control`** — the list is inherently fresh-on-fetch (operator could have just started a new session from another tab). Adding a short `no-store` header is a one-liner if we see SWR-style double-fetch turning into a flicker.
+- **Preview is derived server-side, not streamed** — a session with a 50KB first message ships 80 chars per row. If message bodies ever get much larger we might push the truncation into the Prisma query (`LEFT(content, 100)`); not worth the Prisma raw-SQL overhead for the current typical ~200-char first ask.
+
+### Phase context
+
+P4-A is the first half of P4 (Session/workspace continuity UI). P4-B — the `SessionPicker` component, "resume last active session" on `/chat` mount, "new workspace" action, and the workspace-title row in ChatRail's header — consumes THIS endpoint. Splitting into A/B matches the two-agent audit protocol: each half is small enough for a tractable audit round. Proceeding to P4-B after greenlight.
+
+Ready for audit.
