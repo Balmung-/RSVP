@@ -5,6 +5,7 @@ import { runImport, type PlannerReport } from "@/lib/importPlanner";
 import { parseContactsText } from "@/lib/contact";
 import { confirmImportWidgetKey } from "../widgetKeys";
 import { buildIngestOwnershipWhere } from "./ingestAccess";
+import { deriveProposeImportCounters } from "./import-outcomes";
 import type { ToolDef, ToolResult } from "./types";
 
 // P7 — preview a file-backed import, WITHOUT committing.
@@ -236,33 +237,13 @@ export const proposeImportTool: ToolDef<Input> = {
             "preview",
           );
 
-    // Blockers for the preview → confirm gate. Ordering matters —
-    // the widget renders them in array order, and `nothing_to_commit`
-    // is the one case where the operator should see "everything's
-    // fine, but there's nothing to write" rather than a recoverable
-    // error.
-    const blockers: string[] = [];
-    if (report.willCreate === 0) {
-      blockers.push("nothing_to_commit");
-    }
-
-    // Rollup for `expected` — the validator requires exactly
-    // {newRows, existingSkipped, conflicts, invalid}. We fold
-    // within-file dupes into `existingSkipped` because from the
-    // operator's perspective both are "rows we won't create, please
-    // fix the file or re-upload" — the distinction matters to the
-    // write (and surfaces in commit_import's `result.duplicatesInFile`)
-    // but would be extra noise on the preview card. `conflicts` is
-    // always 0 here: the planner's dedupe is key-identity, not a
-    // merge with field-level conflict detection.
-    const expected = {
-      newRows: report.willCreate,
-      existingSkipped: report.duplicatesExisting + report.duplicatesWithin,
-      conflicts: 0,
-      invalid: report.invalid,
-    };
-
-    const state: "ready" | "blocked" = blockers.length > 0 ? "blocked" : "ready";
+    // P14-C — counters, blockers, state all derived by
+    // `deriveProposeImportCounters` so each transformation (4-field
+    // expected fold, nothing_to_commit threshold, state ternary) is
+    // unit-testable without prisma / the planner. The widget consumes
+    // these three fields EXACTLY — the derivation output shape is
+    // pinned to the `validateConfirmImport` contract.
+    const { expected, blockers, state } = deriveProposeImportCounters(report);
 
     const summaryLines: string[] = [];
     summaryLines.push(

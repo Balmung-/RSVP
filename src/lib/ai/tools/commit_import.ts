@@ -2,6 +2,10 @@ import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
 import { runImport, type PlannerReport } from "@/lib/importPlanner";
 import { buildIngestOwnershipWhere } from "./ingestAccess";
+import {
+  deriveCommitImportResult,
+  shouldRefuseNothingToCommit,
+} from "./import-outcomes";
 import type { ToolDef, ToolResult } from "./types";
 
 // P7 — the destructive companion to `propose_import`.
@@ -205,7 +209,12 @@ export const commitImportTool: ToolDef<Input> = {
     // whitelist and unfreezes the single-use anchor. The operator
     // can re-upload a better file and try again; forcing them into a
     // "you already committed nothing" dead-end would be a worse UX.
-    if (report.created === 0 && report.willCreate === 0) {
+    //
+    // P14-C — `shouldRefuseNothingToCommit` pins the two-conjunct
+    // threshold (`created === 0 && willCreate === 0`) against
+    // simplification to `created === 0` alone (which would release
+    // the claim on a partial-write driver-skip). Unit-tested.
+    if (shouldRefuseNothingToCommit(report)) {
       return {
         output: {
           error: "nothing_to_commit",
@@ -216,27 +225,14 @@ export const commitImportTool: ToolDef<Input> = {
       };
     }
 
-    // Rollup for the confirm route's `result` surface. Matches
-    // `validateImportResult` — the widget's terminal-state contract
-    // requires created, existingSkipped, duplicatesInFile, invalid,
-    // errors.
-    //
-    // `existingSkipped` here is ONLY rows that matched an existing
-    // DB key — NOT within-file dupes (those surface separately as
-    // `duplicatesInFile`, which is the distinction the commit can
-    // actually tell and the preview cannot). `errors` is always 0 in
-    // the happy path: a driver-level skip could surface as
-    // (willCreate - created) but our dedupe is tight enough that we
-    // don't expect divergence. If it ever does, we'd rather surface
-    // it here than silently underreport.
-    const errors = Math.max(0, report.willCreate - report.created);
-    const result = {
-      created: report.created,
-      existingSkipped: report.duplicatesExisting,
-      duplicatesInFile: report.duplicatesWithin,
-      invalid: report.invalid,
-      errors,
-    };
+    // P14-C — `deriveCommitImportResult` produces the five-field
+    // terminal-state rollup matching `validateImportResult`:
+    // `existingSkipped` is ONLY existing-DB-key matches (NOT within-
+    // file dupes, those surface separately as `duplicatesInFile`),
+    // and `errors` is `Math.max(0, willCreate - created)` so a future
+    // planner over-report can't leak a negative counter. Unit-tested.
+    const result = deriveCommitImportResult(report);
+    const errors = result.errors;
 
     const filename = ingest.fileUpload.filename;
     const summaryLines: string[] = [];
