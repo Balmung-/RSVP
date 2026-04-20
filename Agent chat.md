@@ -8662,3 +8662,127 @@ These would be natural P14-L / P14-M if the series continues.
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
 
 Ready for audit.
+
+---
+
+## P14-L — `contact.ts` seam: email + dedupKey + CSV cell/row/parse (hash `523d37d`)
+
+### Why this slice (honest scoping)
+
+One of the two remaining candidates the P14-K scoping subagent surfaced. `src/lib/contact.ts` is a 100-LOC pure-helpers file that sits between every operator-pasted contact list and the invitee database: every import runs through `parseContactsText` → `normalizeEmail` / `normalizePhone` → `dedupKey`; every CSV export runs through `csvCell` / `csvRow`. ZERO direct unit coverage.
+
+The security-load-bearing surface is `csvCell`'s formula-injection defense — Excel/Sheets/Numbers all execute `=...` formulas when a CSV is opened, and a regression in the leading-char prefix logic (wrong char class, dropped `^` anchor, replaced doubled-quote escape with a backslash) turns every data export into an injection vector.
+
+Pin-only slice — same pattern as P14-F / P14-I / P14-J / P14-K.
+
+### Regression surfaces protected
+
+**(1) `normalizeEmail` — regex strictness.** The regex `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` is tight: no whitespace, no double-@, must have a dot in the domain-side. Pinned:
+- `null` / `undefined` / `""` → `null` (no crash)
+- Trim + lowercase both applied (`"  Alice@Example.COM  "` → `"alice@example.com"`)
+- Missing `@` / missing dot / whitespace-inside / double-@ all → `null`
+- Valid with subdomain (`a@b.c.d`) passes
+
+**(2) `dedupKey` — anonymous-no-collide.** `dedupKey(null, null)` returns `"none:" + crypto.randomBytes(12).toString("hex")` — each anonymous contact gets a unique key. Pinned both `startsWith("none:")` AND that two consecutive calls produce DIFFERENT keys. A regression to a deterministic fallback (e.g. `"none:empty"`) would collapse every anonymous contact into one dedup bucket.
+
+**(3) `dedupKey` — nullish equivalence.** `email ?? ""` means `null` and `""` produce the same seed. Pinned `dedupKey(null, phone) === dedupKey("", phone)`. This is intentional (normalizeEmail returns null for empty, so callers never pass "", but if they did it must dedup with null).
+
+**(4) `dedupKey` — deterministic 24-char hex for non-anonymous.** `createHash("sha1").update(seed).digest("hex").slice(0, 24)` — pinned per-branch (email-only / phone-only / both-set) that output shape is 24 lowercase hex and is stable across calls.
+
+**(5) `csvCell` — SECURITY-LOAD-BEARING formula-injection defense.** `/^[=+\-@\t\r]/` must be anchored to start and cover exactly these six chars. Pinned individually:
+- `=` / `+` / `-` / `@` / `\t` / `\r` all prefixed with apostrophe when leading
+- `a=b` / `a+b` with dangerous char MID-value does NOT prefix (anchored regex)
+- Combined `="a"` (leading `=` AND embedded `"`) produces both defenses: apostrophe prefix THEN doubled-quote escape
+
+**(6) `csvCell` — doubled-quote escape.** Embedded `"` in value gets doubled (`"` → `""` inside the outer quotes). Round-trips with `parseContactsText`.
+
+**(7) `csvCell` — null/undefined → empty quoted.** `value == null` check short-circuits to `""`. Prevents `"null"` / `"undefined"` string literals ending up in exports.
+
+**(8) `csvRow` — injection defense preserved across cells.** Mixed types + dangerous leading cells all get the same treatment via `.map(csvCell)`. Pinned with `["name", "=1+1", null, 42]` → `'"name","\'=1+1","","42"'`.
+
+**(9) `parseContactsText` — BOM stripping.** Excel/Sheets exports often have a leading U+FEFF. If not stripped, the first header becomes `"\uFEFFname"` and every subsequent `row.name` lookup fails silently. Pinned.
+
+**(10) `parseContactsText` — auto-delimiter.** Comma AND tab both detected on first occurrence. Load-bearing: Google Sheets paste is TSV by default, not CSV. A regression that hard-coded comma would turn every Sheets paste into a single-column mess.
+
+**(11) `parseContactsText` — header lowercased + `\s+` → underscore.** `"Full Name"` → `"full_name"`. Pinned.
+
+**(12) `parseContactsText` — missing columns → `""` (NOT undefined).** Protects type contracts downstream: every row is `Record<string, string>`, never `Record<string, string | undefined>`. Pinned.
+
+**(13) `parseContactsText` — quoted-field edge cases.** Comma inside quotes preserved, doubled-quote → single quote (CSV escape), embedded newline preserved, CRLF strips `\r`. Pinned each.
+
+**(14) `parseContactsText` — empty-row skip.** Trailing blank lines / all-delimiter rows are skipped via `field.some((f) => f.length > 0)`. Pinned — operator pastes often have trailing blank lines from the clipboard.
+
+**(15) Round-trip integration.** A row serialized through `csvRow` and parsed back through `parseContactsText` comes out byte-identical. Pinned with payloads containing `,` and `"` to exercise the escape machinery.
+
+### Constraint: normalizePhone under tsx
+
+`libphonenumber-js` bundles its metadata as a `.json` file imported under an ESM-type module, and the `core/index.cjs` → `build/parsePhoneNumber.js` chain breaks when reached through tsx's CJS interop (the min JSON's `countries` property reads as undefined inside `isSupportedCountry`, crashing with `Cannot read properties of undefined`).
+
+`tests/unit/import-planner.test.ts:30-37` already documented this exact constraint. I added the same note in `contact.test.ts` and pinned ONLY the short-circuit branches (`null` / `undefined` / `""`) that return BEFORE the libphonenumber call. The library-delegated branches are exercised via Next.js at runtime where the metadata loads correctly.
+
+### Implementation — single commit `523d37d`
+
+**New:**
+- `tests/unit/contact.test.ts` — 52 pins, ~332 LOC.
+
+**Modified:**
+- `package.json` — adds the new test file.
+
+No source-file changes. Pin-only slice.
+
+### Test coverage breakdown
+
+**contact.test.ts — 52 tests:**
+
+- `normalizeEmail`: 10 (null / undef / empty / trim+lower / lower passthrough / missing-@ / missing-dot / whitespace-inside / double-@ / subdomain)
+- `normalizePhone` (short-circuit only): 3 (null / undef / empty — with inline NOTE documenting the tsx constraint)
+- `dedupKey`: 7 (both-null random / two-call no-collide / email-only deterministic / phone-only deterministic / both deterministic / null≡"" equivalence / different emails)
+- `csvCell`: 14 (plain / null / undef / embedded-quote / 6 leading-char injections / mid-value NOT anchored / number / bool / combined leading + escape)
+- `csvRow`: 4 (empty / single / multiple / mixed-with-injection)
+- `parseContactsText`: 14 (empty / header-only / BOM / comma / tab / lowercase+underscore header / trim / missing column / comma-in-quotes / doubled-quote / embedded newline / CRLF / empty-row skip / csvCell round-trip)
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1264/1264 passing** in 3.7s (was 1212; +52 from the new tests)
+- 0 `not ok` lines in TAP
+- No source changes — pin-only slice
+
+### Where P14 stands — now twelve slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization.
+- **P14-I** (`1375045`) — activity phrase() + webhook-auth secretMatches (pin-only).
+- **P14-J** (`0250650`) — template render/escapeHtml + Prisma classifiers (pin-only).
+- **P14-K** (`d215102`) — public-RSVP-form helpers (pin-only).
+- **P14-L** (`523d37d`) — contact.ts seam (pin-only).
+
+Test count: 825 → 1264 (+439 across twelve slices). Five of twelve are pin-only (P14-F, P14-I, P14-J, P14-K, P14-L); seven are extract-and-pin.
+
+Surface coverage as of P14-L:
+- **AI tool helpers**: workspace-reducer, widget-pipeline, confirm-flow, import-outcomes, send-campaign-summary, propose-send-preview, activity-scope.
+- **Inbound webhooks**: parseIntent + token extractors (P14-F) + provider normalization (P14-H).
+- **Operator-visible strings**: `phrase()`.
+- **Security helpers**: `secretMatches`, `escapeHtml`, `render` one-pass, `csvCell` formula-injection.
+- **Template primitives**: `render` + `escapeHtml`.
+- **Error classifiers**: `isUniqueViolation` + `isNotFound`.
+- **Public RSVP form**: parseOptions + needsOptions + filterForState + validateAnswers.
+- **Contact seam**: normalizeEmail + dedupKey + csvCell + csvRow + parseContactsText.
+
+### Remaining candidate for potential future slice
+
+- `src/lib/inbound-ack.ts` (157 LOC) — bilingual ack copy × 2 channels × 3 intents + locale fallback + opt-out env parsing. Extract-and-pin; ~25-30 pins. This is the last high-value candidate the scoping subagent flagged.
+
+### What remains deferred (final)
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change; zero new test value. Remains a follow-up.
+- **Gate-precedence in `propose_import` / `commit_import`** — audited & formally deferred (prisma-interleaved by design).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
+
+Ready for audit.
