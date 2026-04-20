@@ -190,7 +190,7 @@ export async function listWidgets(
 
 // Process-local mutex, keyed per `(sessionId, slot)`. Singleton-slot
 // writes (summary / primary / secondary) serialize through here so
-// the `findMany-siblings -> deleteMany -> upsert` sequence cannot
+// the `upsert -> findMany-siblings -> deleteMany` sequence cannot
 // interleave with another writer's sequence inside the same Node
 // process. Coexist-per-key slots (action) bypass this lock entirely.
 //
@@ -212,19 +212,20 @@ export async function listWidgets(
 // would need to be replaced by a DB advisory lock or SERIALIZABLE
 // transaction — the call sites of `upsertWidget` would not change.
 //
-// Why this is necessary (GPT audit 2026-04-20, blocker on 55d4ee8):
-// The original P8-A ordering was `upsert-then-evict`, which under
-// two concurrent parallel writes could cross-delete each other's
-// rows and leave the singleton slot empty. The fix is twofold:
-//   1. This mutex serializes singleton-slot writes per
-//      `(sessionId, slot)` so only one find/delete/upsert sequence
-//      runs at a time inside the process.
-//   2. `upsertWidget` is reordered to `evict-then-upsert` so the
-//      worst possible failure mode outside the mutex's protection
-//      (multi-process racing, which today cannot happen; or a
-//      future change that drops the mutex) degrades to
-//      "two occupants briefly, self-healing on next write"
-//      rather than "zero occupants, stuck broken state."
+// Why this mutex is the sole race guard (GPT audits 2026-04-20):
+// The first audit caught that the original `upsert-then-evict`
+// ordering, without serialization, could cross-delete under two
+// concurrent writes and leave the singleton slot empty. The fix was
+// to serialize the sequence here. An intermediate revision (55d4ee8)
+// tried to ALSO reorder to `evict-then-upsert` as defence-in-depth
+// for a hypothetical future mutex-less caller, but the second audit
+// caught that reorder: if the upsert throws after the delete lands,
+// the slot is left empty — a new zero-occupant failure mode in
+// exchange for a race that this mutex already closes. The correct
+// shape is: keep this mutex as the sole race guard, keep the
+// `upsert-then-evict` ordering so a throwing upsert never collapses
+// a prior occupant. Covered by
+// `tests/unit/composition-concurrency.test.ts`.
 const slotLocks = new Map<string, Promise<void>>();
 
 async function withSlotLock<T>(
@@ -272,14 +273,16 @@ async function withSlotLock<T>(
 // remains. Same-widgetKey re-writes are an UPDATE in place and
 // don't trigger eviction on themselves.
 //
-// Ordering: for singleton slots we evict siblings FIRST and then
-// run the upsert, the whole pair serialized under `withSlotLock` so
-// two concurrent writers cannot interleave. The evict-first order
-// is also what makes the mutex-less worst case (new producer added
-// cross-instance) degrade safely — see the `slotLocks` docstring.
-// Coexist-per-key slots (today: `action`) skip the mutex and the
-// eviction entirely — confirm cards stack, they don't replace each
-// other.
+// Ordering: for singleton slots we run the upsert FIRST and then
+// evict siblings, the whole pair serialized under `withSlotLock` so
+// two concurrent writers cannot interleave. The upsert-first order
+// is throw-safe: if the upsert rejects, the eviction loop never
+// runs and a prior occupant of the slot remains intact. Reversing
+// this (evict-first) would collapse the prior occupant on an upsert
+// throw, which is strictly worse than the concurrent-write race the
+// mutex already closes. Coexist-per-key slots (today: `action`)
+// skip the mutex and the eviction entirely — confirm cards stack,
+// they don't replace each other.
 //
 // Callers that need the evicted widgetKeys (e.g. the
 // `WorkspaceEmitter`, which must emit a `widget_remove` SSE frame
@@ -343,29 +346,16 @@ export async function upsertWidget(
   // a new composite `where` shape (all tests would need to teach
   // their stub about the new predicate).
   const doWrite = async (): Promise<WidgetRow> => {
-    if (isSingleton) {
-      const existing = await deps.prismaLike.chatWidget.findMany({
-        where: { sessionId: input.sessionId },
-        orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
-      });
-      for (const sibling of existing) {
-        if (sibling.slot !== validated.slot) continue;
-        if (sibling.widgetKey === validated.widgetKey) continue;
-        const result = await deps.prismaLike.chatWidget.deleteMany({
-          where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
-        });
-        // Only fire onEvict when a row actually went away — a no-op
-        // delete (row already gone between findMany and deleteMany,
-        // which the mutex prevents but a future mutex-less caller
-        // could still hit) must not emit a spurious `widget_remove`
-        // SSE. Same "emit on effect" discipline the WorkspaceEmitter
-        // uses for manual removes.
-        if (result.count > 0) {
-          deps.onEvict?.(sibling.widgetKey);
-        }
-      }
-    }
-    return deps.prismaLike.chatWidget.upsert({
+    // Upsert FIRST, then evict siblings. This ordering is throw-safe
+    // by design: if the upsert rejects (validator already ran, but
+    // the DB layer can still fail — connection drop, constraint, etc)
+    // the eviction loop never runs and any prior occupant of the
+    // slot remains intact. Reversing the order (evict-first) would
+    // leave the slot empty on an upsert throw, which is strictly
+    // worse than the race the mutex already closes. Concurrent-write
+    // races are handled upstream by `withSlotLock`, not by this
+    // ordering — see the `slotLocks` docstring.
+    const row = await deps.prismaLike.chatWidget.upsert({
       where: {
         sessionId_widgetKey: {
           sessionId: input.sessionId,
@@ -397,6 +387,37 @@ export async function upsertWidget(
         sourceMessageId,
       },
     });
+    if (isSingleton) {
+      // Finding the siblings: we ask the DB for every widget in the
+      // session and filter by slot in memory. A session typically has
+      // a single-digit number of widgets, so the scan is cheap and
+      // avoids expanding the narrow `PrismaLike` surface with a new
+      // composite `where` shape (all tests would need to teach their
+      // stub about the new predicate). The just-upserted row is
+      // skipped by the `widgetKey === validated.widgetKey` filter so
+      // we never evict our own write.
+      const existing = await deps.prismaLike.chatWidget.findMany({
+        where: { sessionId: input.sessionId },
+        orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
+      });
+      for (const sibling of existing) {
+        if (sibling.slot !== validated.slot) continue;
+        if (sibling.widgetKey === validated.widgetKey) continue;
+        const result = await deps.prismaLike.chatWidget.deleteMany({
+          where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
+        });
+        // Only fire onEvict when a row actually went away — a no-op
+        // delete (row already gone between findMany and deleteMany,
+        // which the mutex prevents but a future mutex-less caller
+        // could still hit) must not emit a spurious `widget_remove`
+        // SSE. Same "emit on effect" discipline the WorkspaceEmitter
+        // uses for manual removes.
+        if (result.count > 0) {
+          deps.onEvict?.(sibling.widgetKey);
+        }
+      }
+    }
+    return row;
   };
 
   const row = isSingleton

@@ -9,34 +9,46 @@ import {
   type WidgetRow,
 } from "../../src/lib/ai/widgets";
 
-// P8-A-fix — concurrent-write invariant tests for singleton-slot
-// composition. Responds to GPT's audit blocker on 55d4ee8:
+// P8-A-fix2 — concurrent-write + throw-safety invariant tests for
+// singleton-slot composition. Responds to GPT's two audits:
 //
+//   Audit 1 (on 55d4ee8, original P8-A):
 //   "two simultaneous primary writes ended with [] in the final DB
-//   state — the pre-fix upsert-then-evict ordering let each writer's
-//   post-upsert findMany see the OTHER's row and delete it."
+//   state — the unprotected upsert-then-evict ordering let each
+//   writer's post-upsert findMany see the OTHER's row and delete it."
 //
-// The fix has two layered guards:
-//   1. `upsertWidget` now evicts siblings BEFORE the upsert rather
-//      than after. Under the unprotected mutex-less case (future
-//      producer added cross-instance) this degrades to "two
-//      occupants briefly, self-heals on next write" rather than
-//      "zero occupants, stuck broken state".
-//   2. A process-local mutex keyed per `(sessionId, slot)` in
-//      `widgets.ts` serializes singleton-slot writes inside a
-//      single Node process — which is sufficient for the current
-//      set of producers (see the `slotLocks` docstring in
-//      widgets.ts for the architecture rationale).
+//   Audit 2 (on the first fix attempt, which reordered to
+//   delete-then-upsert): "keep the mutex, but revert the protected
+//   path back to upsert -> evict, because delete-before-upsert
+//   leaves the singleton slot empty if the upsert throws after the
+//   delete lands. Add a regression test that forces upsert to throw
+//   and proves the prior singleton occupant remains intact."
 //
-// These tests pin the invariant the fix enforces: two parallel
-// singleton-slot writes to the same `(sessionId, slot)` cannot
-// end with zero rows, regardless of Node microtask interleaving.
-// They DO NOT assert a specific winner — the mutex is FIFO-ish but
-// the runtime is allowed to interleave Promise.all arms arbitrarily
-// before either arm enters the critical section. What they DO
-// assert is the two strict invariants the living-workspace UX
-// depends on: exactly one survivor in the DB, and the survivor is
-// one of the two intended writers.
+// The correct shape (this fix):
+//   1. A process-local mutex keyed per `(sessionId, slot)` in
+//      `widgets.ts` serializes singleton-slot writes inside a single
+//      Node process — this is the sole concurrency guard and it
+//      suffices for the current set of producers (see the
+//      `slotLocks` docstring in widgets.ts for the architecture
+//      rationale).
+//   2. Under that mutex, `upsertWidget` runs the upsert FIRST, then
+//      evicts siblings. This ordering is throw-safe: if the upsert
+//      rejects, the eviction loop never runs and a prior occupant
+//      of the slot remains intact. The self-write is skipped in the
+//      eviction loop by the `widgetKey === validated.widgetKey`
+//      filter, so upsert-first doesn't accidentally evict the row
+//      we just installed.
+//
+// These tests pin the two invariants that shape depends on:
+//   - Concurrency: two parallel singleton-slot writes to the same
+//     `(sessionId, slot)` end with exactly one occupant (never 0,
+//     never 2), regardless of Node microtask interleaving. They do
+//     NOT assert a specific winner — the mutex is FIFO-ish but the
+//     runtime is allowed to interleave Promise.all arms arbitrarily
+//     before either arm enters the critical section.
+//   - Throw-safety: if the upsert throws during a singleton-slot
+//     write, the prior occupant of the slot must remain intact — no
+//     eviction runs on a failed write.
 
 type StubState = { rows: WidgetRow[]; nowMs: number };
 
@@ -176,14 +188,14 @@ const validConfirmDraftProps = {
 // ---- the specific repro GPT ran ----
 
 test("concurrency: two parallel singleton-slot writes to the same slot end with exactly one occupant", async () => {
-  // This is the literal case from GPT's audit blocker: two
+  // This is the literal case from GPT's first audit blocker: two
   // different-key writes into the same singleton slot fired in
   // parallel via Promise.all, unprotected by any external
-  // synchronization from the caller. Pre-fix, the old ordering
-  // (`upsert -> findMany -> deleteMany`) let each writer's
-  // post-upsert findMany see the OTHER row and delete it, ending
-  // at state.rows === []. Post-fix, the mutex serializes the
-  // delete-then-upsert sequence and exactly one occupant survives.
+  // synchronization from the caller. Pre-fix, the unprotected
+  // ordering let each writer's post-upsert findMany see the OTHER
+  // row and delete it, ending at state.rows === []. Post-fix, the
+  // mutex serializes the whole upsert-then-evict sequence and
+  // exactly one occupant survives.
   //
   // The specific survivor depends on microtask scheduling order
   // (whichever coroutine reaches the mutex acquisition first wins
@@ -251,8 +263,8 @@ test("concurrency: ten parallel singleton-slot writes converge to exactly one oc
   // (e.g. the mutex accidentally releasing all waiters instead of
   // one, a map-delete race that lets two later waiters both win the
   // set, etc.). Each write targets the same singleton slot with a
-  // distinct widgetKey, so each SHOULD evict the last survivor
-  // before installing itself. After ten writes serialize through
+  // distinct widgetKey, so each upsert installs itself and then
+  // evicts the prior survivor. After ten writes serialize through
   // the mutex, exactly one row survives.
   const { prismaLike, state } = makeStubPrisma();
   const sessionId = "s-1";
@@ -501,4 +513,74 @@ test("concurrency: parallel emitter.upsert calls to one singleton slot emit cohe
       `emitted widget_upsert must reference one of the two writers (got ${k})`,
     );
   }
+});
+
+// ---- throw-safety: upsert fails, prior occupant survives ----
+
+test("throw-safety: upsert throws — prior singleton occupant survives, no eviction runs", async () => {
+  // P8-A-fix2 regression. GPT's second audit caught that an earlier
+  // fix attempt had reordered to `delete-then-upsert`, which under
+  // a thrown upsert left the singleton slot empty (the delete had
+  // already landed but the upsert never did). The correct ordering
+  // is `upsert-then-evict`: if the upsert throws, the eviction
+  // block never runs.
+  //
+  // This test wires a stub that succeeds on the first write (to
+  // seed a prior occupant X), then monkey-patches `upsert` to throw
+  // on the second write. The assertion is two-fold:
+  //   - The second write rejects (the error bubbles up, we don't
+  //     swallow DB failures).
+  //   - The prior occupant X is still in the DB — not zero rows.
+  // A regression that reorders back to delete-first would fail this
+  // assertion with state.rows.length === 0.
+  const { prismaLike, state } = makeStubPrisma();
+  const sessionId = "s-1";
+
+  // Seed a prior occupant X in the primary singleton slot.
+  const seeded = await upsertWidget(
+    { prismaLike },
+    {
+      sessionId,
+      widgetKey: "campaigns.list",
+      kind: "campaign_list",
+      slot: "primary",
+      props: validCampaignListProps,
+    },
+  );
+  assert.ok(seeded, "seed write must succeed");
+  assert.equal(state.rows.length, 1);
+  assert.equal(state.rows[0]!.widgetKey, "campaigns.list");
+
+  // Replace the upsert with one that throws. deleteMany still works,
+  // so a buggy "delete-first" implementation would successfully
+  // remove the prior occupant before the upsert blew up.
+  prismaLike.chatWidget.upsert = async () => {
+    throw new Error("simulated db failure on upsert");
+  };
+
+  // Try to install Y into the same singleton slot. Must throw.
+  await assert.rejects(
+    upsertWidget(
+      { prismaLike },
+      {
+        sessionId,
+        widgetKey: "contacts.table",
+        kind: "contact_table",
+        slot: "primary",
+        props: validContactTableProps,
+      },
+    ),
+    /simulated db failure on upsert/,
+  );
+
+  // The prior occupant X must still be in the DB — the upsert-first
+  // ordering guarantees that no eviction runs if the upsert rejects.
+  // A delete-first ordering regression would end at state.rows ===
+  // [] (the delete of X landed, the upsert of Y threw, slot empty).
+  assert.equal(
+    state.rows.length,
+    1,
+    "prior singleton occupant must survive a thrown upsert",
+  );
+  assert.equal(state.rows[0]!.widgetKey, "campaigns.list");
 });
