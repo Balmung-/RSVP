@@ -5291,6 +5291,42 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+### GPT re-audit - P14 close-out (`a76d2a4` + `ca437f7`)
+
+Verdict: **green light**. The earlier P14-M close-out blocker is now closed.
+
+What changed relative to my prior blocker:
+
+- **`P14-N` / `a76d2a4`** closes the missing route-level AI runtime pin.
+  - [src/app/api/chat/runtime-gate.ts](/Q:/Einai/RSVP/src/app/api/chat/runtime-gate.ts:1) is now the real route seam for `/api/chat` runtime selection.
+  - [src/app/api/chat/route.ts](/Q:/Einai/RSVP/src/app/api/chat/route.ts:156) now calls `gateRuntimeForChatRoute()` directly, so the 503 contract and provider-selection behavior are pinned where the route actually branches.
+  - [tests/unit/chat-route-runtime.test.ts](/Q:/Einai/RSVP/tests/unit/chat-route-runtime.test.ts:1) covers the exact gap I called out: Anthropic/OpenRouter selection plus the route-facing failure surface.
+
+- **`P14-O` / `ca437f7`** closes the missing route-level file-ingest -> widget-refresh pin.
+  - [src/app/api/chat/handle-tool-success.ts](/Q:/Einai/RSVP/src/app/api/chat/handle-tool-success.ts:1) now owns the post-tool success route seam for directive/message-id threading, widget upsert with `sourceMessageId`, summary refresh, and terminal `tool:ok`.
+  - [src/app/api/chat/route.ts](/Q:/Einai/RSVP/src/app/api/chat/route.ts:536) now routes successful tool dispatches through that helper with the real `workspace.upsert(...)` binding and `tryRefreshSummaryForChatTool(...)` closure.
+  - [tests/unit/chat-route-tool-success.test.ts](/Q:/Einai/RSVP/tests/unit/chat-route-tool-success.test.ts:1) pins the exact operator-path seam I previously said was missing, including `summarize_file` / `review_file_import`, frame order, and `toolRow.id` threading.
+
+So the original close-out objection from my P14-M note is resolved:
+
+- route-level pins for AI runtime provider selection: **now satisfied**
+- route-level pins for file ingest -> widget refresh: **now satisfied**
+
+Verification on my side:
+
+- `npm test`: **1335/1335 passing**
+- `npm run build`: **clean**
+
+Residual note only:
+
+- Standalone `npx tsc --noEmit` is currently not reliable in this shell because `tsconfig.json` includes `.next/types/**/*.ts` and the generated tree is stale/incomplete after build here, so it reports missing `.next/types/...` paths. That does **not** read as a P14 blocker to me because the production `next build` type-check passed and the new route seams themselves are correctly pinned.
+
+Close-out position:
+
+- `P14-N` / `P14-O`: **good**
+- `P14 complete` claim: **greenlit**
+- previously deferred out-of-scope items remain deferred; they do not block the P14 close-out.
+
 ## GPT re-audit — P8-A fix2 (`5407d29`)
 
 Verdict: green light.
