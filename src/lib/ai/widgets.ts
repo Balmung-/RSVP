@@ -188,6 +188,73 @@ export async function listWidgets(
   return { widgets, skipped };
 }
 
+// Process-local mutex, keyed per `(sessionId, slot)`. Singleton-slot
+// writes (summary / primary / secondary) serialize through here so
+// the `findMany-siblings -> deleteMany -> upsert` sequence cannot
+// interleave with another writer's sequence inside the same Node
+// process. Coexist-per-key slots (action) bypass this lock entirely.
+//
+// Why process-local is the right shape:
+//   - Singleton-slot widgets today are only emitted from tools
+//     running inside the SSE chat stream, which is pinned to one
+//     Node instance for the lifetime of a given chat session.
+//   - The one other widget-write path is the confirm-route POST
+//     (`/api/chat/confirm/[messageId]`), which only touches action-
+//     slot widgets (coexist-per-key) and therefore never enters
+//     this code path.
+//   - `refreshWorkspaceSummary` writes the `workspace_rollup` widget
+//     under a single stable widgetKey, so two concurrent rollup
+//     refreshes take the UPDATE-in-place branch and touch no sibling
+//     eviction.
+// Multi-instance races across pods are therefore architecturally
+// impossible for every current singleton-slot producer. If a new
+// producer is ever added that can race across instances, this mutex
+// would need to be replaced by a DB advisory lock or SERIALIZABLE
+// transaction — the call sites of `upsertWidget` would not change.
+//
+// Why this is necessary (GPT audit 2026-04-20, blocker on 55d4ee8):
+// The original P8-A ordering was `upsert-then-evict`, which under
+// two concurrent parallel writes could cross-delete each other's
+// rows and leave the singleton slot empty. The fix is twofold:
+//   1. This mutex serializes singleton-slot writes per
+//      `(sessionId, slot)` so only one find/delete/upsert sequence
+//      runs at a time inside the process.
+//   2. `upsertWidget` is reordered to `evict-then-upsert` so the
+//      worst possible failure mode outside the mutex's protection
+//      (multi-process racing, which today cannot happen; or a
+//      future change that drops the mutex) degrades to
+//      "two occupants briefly, self-healing on next write"
+//      rather than "zero occupants, stuck broken state."
+const slotLocks = new Map<string, Promise<void>>();
+
+async function withSlotLock<T>(
+  sessionId: string,
+  slot: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = `${sessionId}:${slot}`;
+  // FIFO queue via promise chain: each waiter awaits the current
+  // holder, then installs its own holder. The while-loop re-checks
+  // rather than awaiting a captured promise because multiple waiters
+  // can unblock on the same released promise, and only the first to
+  // win the `set` should proceed; subsequent waiters loop back and
+  // wait on the new holder.
+  while (slotLocks.has(key)) {
+    await slotLocks.get(key);
+  }
+  let release!: () => void;
+  const holder = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  slotLocks.set(key, holder);
+  try {
+    return await fn();
+  } finally {
+    slotLocks.delete(key);
+    release();
+  }
+}
+
 // Insert or update a widget identified by (sessionId, widgetKey).
 // Returns the persisted `Widget` (re-parsed, same shape listWidgets
 // emits) on success, or null if validation fails — callers should
@@ -203,14 +270,22 @@ export async function listWidgets(
 // (summary/primary/secondary), any OTHER widgets already in the
 // same slot for the same session are removed so only one occupant
 // remains. Same-widgetKey re-writes are an UPDATE in place and
-// don't trigger eviction on themselves. The eviction runs AFTER
-// the upsert succeeds, so a validator rejection never removes
-// siblings (eviction would have left a slot suddenly empty with no
-// replacement to show). Callers that need the evicted widgetKeys
-// (e.g. the WorkspaceEmitter, which must emit a `widget_remove`
-// SSE frame per evicted row so the client reducer drops them)
-// pass an `onEvict` callback; other callers omit it and the
-// evictions happen silently — still correct at the DB layer.
+// don't trigger eviction on themselves.
+//
+// Ordering: for singleton slots we evict siblings FIRST and then
+// run the upsert, the whole pair serialized under `withSlotLock` so
+// two concurrent writers cannot interleave. The evict-first order
+// is also what makes the mutex-less worst case (new producer added
+// cross-instance) degrade safely — see the `slotLocks` docstring.
+// Coexist-per-key slots (today: `action`) skip the mutex and the
+// eviction entirely — confirm cards stack, they don't replace each
+// other.
+//
+// Callers that need the evicted widgetKeys (e.g. the
+// `WorkspaceEmitter`, which must emit a `widget_remove` SSE frame
+// per evicted row so the client reducer drops them) pass an
+// `onEvict` callback; other callers omit it and the evictions
+// happen silently — still correct at the DB layer.
 export async function upsertWidget(
   deps: {
     prismaLike: PrismaLike;
@@ -256,73 +331,77 @@ export async function upsertWidget(
   const sourceMessageId =
     validated.sourceMessageId === undefined ? null : validated.sourceMessageId;
 
-  const row = await deps.prismaLike.chatWidget.upsert({
-    where: {
-      sessionId_widgetKey: {
-        sessionId: input.sessionId,
-        widgetKey: validated.widgetKey,
-      },
-    },
-    create: {
-      sessionId: input.sessionId,
-      widgetKey: validated.widgetKey,
-      kind: validated.kind,
-      slot: validated.slot,
-      props: propsJson,
-      order,
-      sourceMessageId,
-    },
-    update: {
-      // Update DOES NOT touch widgetKey or sessionId — those are the
-      // stable identity. Under P8's kind-slot policy the `kind` can
-      // no longer silently migrate to an arbitrary replacement
-      // kind+slot pair (the validator rejects mismatches), but the
-      // shape stays write-through so a future kind-swap within the
-      // same slot (e.g. a tool rewriting `campaign_list` props
-      // against the same widgetKey) still works.
-      kind: validated.kind,
-      slot: validated.slot,
-      props: propsJson,
-      order,
-      sourceMessageId,
-    },
-  });
+  const isSingleton =
+    SLOT_COMPOSITION[validated.slot] === "singleton-per-slot";
 
-  // P8 — sibling eviction. Runs AFTER the upsert landed so a DB
-  // failure on the upsert can't leave the slot empty (the widgets
-  // already there remain until a successful write replaces them).
-  // `coexist-per-key` slots (today: `action`) skip eviction
-  // entirely — confirm cards stack, they don't replace each other.
-  //
-  // Finding the siblings: we ask the DB for every widget in the
-  // session and filter by slot in memory. A session typically has
-  // a single-digit number of widgets, so the scan is cheap and
-  // avoids expanding the narrow `PrismaLike` surface with a new
-  // composite `where` shape (all tests would need to teach their
-  // stub about the new predicate). Ordering doesn't matter for
-  // the filter — we pass the existing listWidgets orderBy just to
-  // reuse the PrismaLike contract verbatim.
-  if (SLOT_COMPOSITION[validated.slot] === "singleton-per-slot") {
-    const existing = await deps.prismaLike.chatWidget.findMany({
-      where: { sessionId: input.sessionId },
-      orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
-    });
-    for (const sibling of existing) {
-      if (sibling.slot !== validated.slot) continue;
-      if (sibling.widgetKey === validated.widgetKey) continue;
-      const result = await deps.prismaLike.chatWidget.deleteMany({
-        where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
+  // The DB-side work, factored out so the singleton branch can wrap
+  // it in the per-slot mutex and the coexist branch can skip the
+  // mutex entirely. Finding the siblings: we ask the DB for every
+  // widget in the session and filter by slot in memory. A session
+  // typically has a single-digit number of widgets, so the scan is
+  // cheap and avoids expanding the narrow `PrismaLike` surface with
+  // a new composite `where` shape (all tests would need to teach
+  // their stub about the new predicate).
+  const doWrite = async (): Promise<WidgetRow> => {
+    if (isSingleton) {
+      const existing = await deps.prismaLike.chatWidget.findMany({
+        where: { sessionId: input.sessionId },
+        orderBy: [{ slot: "asc" }, { order: "asc" }, { updatedAt: "asc" }],
       });
-      // Only fire onEvict when a row actually went away — a no-op
-      // delete (row already gone between findMany and deleteMany,
-      // a race under concurrent writes) must not emit a spurious
-      // `widget_remove` SSE. Same "emit on effect" discipline the
-      // WorkspaceEmitter uses for manual removes.
-      if (result.count > 0) {
-        deps.onEvict?.(sibling.widgetKey);
+      for (const sibling of existing) {
+        if (sibling.slot !== validated.slot) continue;
+        if (sibling.widgetKey === validated.widgetKey) continue;
+        const result = await deps.prismaLike.chatWidget.deleteMany({
+          where: { sessionId: input.sessionId, widgetKey: sibling.widgetKey },
+        });
+        // Only fire onEvict when a row actually went away — a no-op
+        // delete (row already gone between findMany and deleteMany,
+        // which the mutex prevents but a future mutex-less caller
+        // could still hit) must not emit a spurious `widget_remove`
+        // SSE. Same "emit on effect" discipline the WorkspaceEmitter
+        // uses for manual removes.
+        if (result.count > 0) {
+          deps.onEvict?.(sibling.widgetKey);
+        }
       }
     }
-  }
+    return deps.prismaLike.chatWidget.upsert({
+      where: {
+        sessionId_widgetKey: {
+          sessionId: input.sessionId,
+          widgetKey: validated.widgetKey,
+        },
+      },
+      create: {
+        sessionId: input.sessionId,
+        widgetKey: validated.widgetKey,
+        kind: validated.kind,
+        slot: validated.slot,
+        props: propsJson,
+        order,
+        sourceMessageId,
+      },
+      update: {
+        // Update DOES NOT touch widgetKey or sessionId — those are
+        // the stable identity. Under P8's kind-slot policy the
+        // `kind` can no longer silently migrate to an arbitrary
+        // replacement kind+slot pair (the validator rejects
+        // mismatches), but the shape stays write-through so a
+        // future kind-swap within the same slot (e.g. a tool
+        // rewriting `campaign_list` props against the same
+        // widgetKey) still works.
+        kind: validated.kind,
+        slot: validated.slot,
+        props: propsJson,
+        order,
+        sourceMessageId,
+      },
+    });
+  };
+
+  const row = isSingleton
+    ? await withSlotLock(input.sessionId, validated.slot, doWrite)
+    : await doWrite();
 
   return rowToWidget(row);
 }
