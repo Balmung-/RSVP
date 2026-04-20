@@ -13,7 +13,7 @@ import { validateDirective } from "@/lib/ai/directive-validate";
 import { createWorkspaceEmitter } from "@/lib/ai/widgets";
 import { tryRefreshSummaryForChatTool } from "@/lib/ai/workspace-summary";
 import { WORKSPACE_SUMMARY_WIDGET_KEY } from "@/lib/ai/widgetKeys";
-import { resolveRuntime } from "@/lib/ai/runtime";
+import { gateRuntimeForChatRoute } from "./runtime-gate";
 import { deriveSessionTitle } from "@/lib/ai/session-title";
 import type {
   InternalAssistantContent,
@@ -147,19 +147,17 @@ export async function POST(req: Request) {
   }
 
   // Resolve the AI runtime at request time. `AI_RUNTIME` env flips
-  // the backend (anthropic / openrouter). Resolution returns a
-  // typed failure when the selected backend is missing its API key
-  // or is unknown — we translate to a 503 so the client gets the
-  // same error-code surface as before (the "anthropic_not_configured"
-  // string is preserved for the default/current path).
-  const runtimeResolution = resolveRuntime();
-  if (!runtimeResolution.ok) {
-    return NextResponse.json(
-      { ok: false, error: runtimeResolution.reason },
-      { status: 503 },
-    );
+  // the backend (anthropic / openrouter). The gate translates the
+  // resolver's typed failure into a 503 so the client gets the same
+  // error-code surface as before (the "anthropic_not_configured"
+  // string is preserved for the default/current path). The
+  // translation itself is pinned at the route-seam level in
+  // `tests/unit/chat-route-runtime.test.ts`.
+  const gated = gateRuntimeForChatRoute();
+  if (!gated.pass) {
+    return NextResponse.json(gated.body, { status: gated.status });
   }
-  const runtime = runtimeResolution.runtime;
+  const runtime = gated.runtime;
 
   // Resolve / create the session. Ownership is enforced on load:
   // supplying someone else's session id is treated as
