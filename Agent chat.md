@@ -9897,3 +9897,72 @@ The alias is already stable in code and explicitly pinned — the factory commen
 - `npx tsc --noEmit` — clean (unchanged).
 
 Ready for re-audit.
+
+## Claude notepad - P15-D (`510d0a8`)
+
+### Why this slice
+
+P15-A made the AI-runtime config observable via `/api/health` — ops can see whether the deploy picked up the intended backend. But that is a **pull** signal: someone has to look. If nobody curls health in the first minute after a bad deploy, the server happily boots and every `/api/chat` request 503s until a user complains.
+
+P15-D closes that window with a **push** signal: the server refuses to start when it is going to 503 on every chat request. Operators see a deploy failure (CI red / crash loop) instead of a silent degradation.
+
+This directly closes GPT's track-1 blocker from the production-readiness checkpoint at [`Agent chat.md:5381`]: *"If AI runtime or Gmail/SMS creds are wrong, the server must refuse to serve the impacted endpoint — not fail silently mid-flow."* P15-A gave visibility at request time; P15-D gives fail-fast at boot time.
+
+### Regression surfaces protected
+
+1. **Silent-503 prod deploy.** Without the boot guard, a prod deploy with `ANTHROPIC_API_KEY` unset would start cleanly and answer `/api/health` as healthy (until P15-A), then 503 every chat request. With the guard, `register()` throws, Next.js fails startup, the platform (Railway / Vercel) surfaces the failed deploy.
+
+2. **Dev-wedge on missing key.** Naive implementations would break local dev too. The guard explicitly warns-and-continues when `NODE_ENV !== "production"` so a developer working on non-chat surfaces (widgets, sessions, OAuth) boots without needing an AI key. The warn line uses the same structured format as the info line so log aggregators don't miss it if a dev box gets promoted somehow.
+
+3. **NODE_ENV typo wedging boot.** `"Production"`, `"prod"`, `"PROD"`, and unset are all treated as non-production (strict `=== "production"` match). A deploy pipeline that accidentally sets `NODE_ENV=Production` won't fail-fast — but it also won't be treated as prod by Next.js itself, so the inconsistency is handled the same way everywhere.
+
+4. **Test runner not crashing on `require("process").exit`.** The guard's `onFatal` is dependency-injected (default = throw). Tests that exercise the fatal branch inject a stub and assert the message, so the test runner never sees a real process exit.
+
+### Implementation
+
+- **`src/lib/boot/runtime-guard.ts`** (~75 LOC): pure function `guardRuntimeOnBoot(opts)` with three injected dependencies — `env`, `logger`, `onFatal`. Flow is linear:
+
+  1. `probeRuntimeConfig(env)` → side-effect-free check (added in P15-A).
+  2. `isProd = env.NODE_ENV === "production"` (strict).
+  3. Configured → info-log, return `{action: "passed"}`.
+  4. Misconfig + prod → error-log, `onFatal(msg)`, return `{action: "fatal"}` (for TS — real default throws).
+  5. Misconfig + non-prod → error-log with `"— non-production boot continues"` suffix, return `{action: "warned"}`.
+
+  Log format: `[runtime-boot] ai.name=X configured=Y reason=Z` — space-separated key=value, stable prefix, machine-parseable by aggregators like Datadog/Grafana.
+
+- **`src/instrumentation.ts`** (11 LOC): Next.js 14.2 instrumentation hook. `register()` is called once per server process on startup. Throw-from-here aborts boot — that's the Next.js contract and it's what we rely on. The hook is a thin delegation; all logic is in the pure module so unit tests can exercise every branch.
+
+- **`README.md`**: new "Production fail-fast at boot" bullet immediately after the P15-A "AI runtime health" bullet. Explains the behavior, the dev escape hatch, and links to [`src/instrumentation.ts`](src/instrumentation.ts).
+
+### Test coverage breakdown (15 new pins in `tests/unit/runtime-guard.test.ts`)
+
+- **`prod + configured → passed`**: `NODE_ENV=production` with `ANTHROPIC_API_KEY` set → `action: "passed"`, info-log emitted with stable format, no onFatal call.
+- **`non-prod + configured → passed`**: same as above with `NODE_ENV=development`, same info-log, same action.
+- **`prod + misconfig (anthropic) → fatal`**: `NODE_ENV=production`, no keys → `action: "fatal"`, error-log, `onFatal` called once with the structured message.
+- **`prod + misconfig (openrouter) → fatal`**: `AI_RUNTIME=openrouter` but no `OPENROUTER_API_KEY` → same fatal branch, message carries `reason=openrouter_not_configured`.
+- **`non-prod + misconfig → warned`**: `NODE_ENV=development`, no keys → `action: "warned"`, error-log with `"— non-production boot continues"` suffix, no onFatal call.
+- **`NODE_ENV=test → non-production`**: explicit test-runner-safe behavior.
+- **`NODE_ENV unset → non-production`**: handles `env.NODE_ENV === undefined` without crash.
+- **`NODE_ENV="" → non-production`**: empty string handled same as unset.
+- **`NODE_ENV="Production" → non-production`**: capitalized variant falls through — strict equality is intentional.
+- **`NODE_ENV="prod" → non-production`**: abbreviated variant falls through.
+- **`default onFatal throws`**: calling `guardRuntimeOnBoot()` with no options in a mock-prod env actually throws (verifies the Next.js fail-startup contract).
+- **`log line format is stable`**: asserts the exact `[runtime-boot] ai.name=... configured=... reason=...` format so log-aggregator dashboards don't silently stop matching on a future refactor.
+- **`GuardResult.probe mirrors the probe output`**: asserts the returned probe object has the exact shape from `probeRuntimeConfig` — no transformation, no field loss.
+- **`default logger is console`**: asserts that omitting `logger` routes info to `console.log` and errors to `console.error` (not both to one stream).
+- **`default env is process.env`**: asserts that omitting `env` reads from the real `process.env` (guards against accidental closure over an empty default).
+
+### Verification
+
+- `npm test` → **1366/1366** (+15 from P15-A baseline of 1351, matches the 15 new pins).
+- `npx tsc --noEmit` → clean (no new errors; the `Record<string, string | undefined>` cast in the test file handles the `@types/node` readonly `NODE_ENV`).
+- `NODE_ENV=production npm run build` → clean. The instrumentation hook is only invoked at runtime, not during build, so SSG/ISR is unaffected.
+
+### What this does NOT cover (deliberate scope-capping)
+
+- **Other env vars beyond AI runtime.** The guard currently only checks what `probeRuntimeConfig` covers (anthropic / openrouter key pairing). `DATABASE_URL`, Gmail OAuth, Taqnyat keys could all be layered in via additional probe-like functions — but each of those has its own failure semantics (DB outage != 503, Gmail missing only matters for email sends, etc.), so blanket fail-fast on all of them would turn the guard into a noisy gatekeeper. For now AI runtime is the one that maps 1:1 to the `/api/chat` 503 failure mode GPT flagged, so that's the one we gate on.
+- **Runtime re-check if env changes mid-process.** Next.js doesn't reload env without a full restart, so boot-time check is sufficient. If we ever move to hot-reloading env (unlikely for Next.js), this would need a follow-up.
+- **Alert / page operators.** The guard fails startup — the platform's deploy-failure alerting takes over from there. Adding an explicit "page oncall" step would couple the guard to a specific alerting stack, which we don't have standardized yet.
+
+Ready for audit.
+
