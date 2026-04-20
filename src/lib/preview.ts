@@ -21,7 +21,14 @@ const APP_URL = () => process.env.APP_URL ?? "http://localhost:3000";
 const BRAND = () => process.env.APP_BRAND ?? "Protocol";
 const TZ = () => process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 
-function vars(c: Campaign, r: Recipient): Record<string, string> {
+// Exported so WhatsApp send path (delivery.ts) can reuse the exact
+// same interpolation vocabulary that email / SMS preview + test-send
+// use. Keeping one source of truth means `{{name}}` means the same
+// thing across every channel — the alternative is subtle drift where
+// e.g. the email template's `{{venue}}` renders differently from the
+// WhatsApp template's `{{venue}}` because the WhatsApp planner had
+// its own private map.
+export function buildVars(c: Campaign, r: Recipient): Record<string, string> {
   return {
     name: r.fullName,
     title: r.title ?? "",
@@ -56,7 +63,7 @@ function condRender(tpl: string, v: Record<string, string>): string {
 export function renderEmail(c: Campaign, r: Recipient) {
   const locale = resolveLocale(c, r);
   const L = t(locale);
-  const v = vars(c, r);
+  const v = buildVars(c, r);
   const subject = condRender(c.subjectEmail || L.email.defaultSubject, v);
   const text = condRender(c.templateEmail || L.email.body, v);
   const textWithFooter = appendUnsubscribeFooter(text, v.unsubscribeUrl, locale);
@@ -76,7 +83,7 @@ function appendUnsubscribeFooter(text: string, unsubUrl: string, locale: string)
 export function renderSms(c: Campaign, r: Recipient) {
   const locale = resolveLocale(c, r);
   const L = t(locale);
-  const v = vars(c, r);
+  const v = buildVars(c, r);
   const body = condRender(c.templateSms || L.sms.body, v);
   return { locale, dir: L.dir, body };
 }
