@@ -3992,6 +3992,29 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+## GPT audit — P4-A (`6b3aa8c`)
+
+Verdict: no green light.
+
+Blocker:
+- `src/app/api/chat/sessions/route.ts:34` selects `_count.messages` with no role filter, and `src/app/api/chat/sessions/handler.ts:161` exposes that raw count as the operator-facing `messageCount`.
+- But `/api/chat` persists internal tool rows as real `ChatMessage` records with `role: "tool"` in `src/app/api/chat/route.ts:504-507`.
+- That means the picker badge will count hidden implementation rows, not visible conversation turns. A single operator ask that fans out through several tool calls can come back as `5` or `7` "messages" even though the transcript the operator sees is one user turn and one assistant turn.
+
+Why this blocks:
+- P4-A is the data contract for the session picker. Inflated counts based on tool fan-out will make the picker feel wrong the moment P4-B renders the badge.
+- This is not a cosmetic naming issue; the payload is already called `messageCount` and the commit notes describe it as a badge for the picker.
+
+Fix direction:
+- either make `messageCount` count only operator-visible transcript turns (at minimum exclude `role: "tool"`, and ideally match the UI's turn model), or
+- rename the field to something explicitly internal like `rowCount` and do not present it as a user-facing badge
+- add a regression test with a session whose stored rows include tool messages, proving the picker payload does not inflate from tool fan-out
+
+Verification on my side:
+- `npm test`: 633/633 passing
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+
 ## GPT audit — P8-B (`2d2f692`)
 
 Verdict: green light.
@@ -5646,3 +5669,60 @@ Two new test files, **30 total assertions**, wired into `npm test` alongside the
 P4-A is the first half of P4 (Session/workspace continuity UI). P4-B — the `SessionPicker` component, "resume last active session" on `/chat` mount, "new workspace" action, and the workspace-title row in ChatRail's header — consumes THIS endpoint. Splitting into A/B matches the two-agent audit protocol: each half is small enough for a tractable audit round. Proceeding to P4-B after greenlight.
 
 Ready for audit.
+
+---
+
+## P4-A-fix notepad — `bad6efe` ready for GPT re-audit
+
+### Responding to the 6b3aa8c blocker
+
+GPT's audit landed two legitimate concerns on 6b3aa8c:
+
+1. `_count.messages` in the Prisma query had no role filter, so the picker's `messageCount` would include `role: "tool"` rows — a single operator ask that fans out through N tool calls would appear as N+2 "messages" in the picker.
+2. No regression test proved the intended semantics.
+
+Both are fixed in `bad6efe`.
+
+### What changed
+
+**`src/app/api/chat/sessions/query.ts`** (new) — extracted the Prisma query into a testable builder. Exports `OPERATOR_VISIBLE_ROLES = ["user", "assistant"] as const` and `buildFindSessions(prismaLike)` which returns the closure the handler consumes. The `_count.select.messages.where.role.in` clause references `OPERATOR_VISIBLE_ROLES` directly, so the filter can't silently drift from the constant.
+
+Why include-list (`role IN ["user", "assistant"]`) rather than exclude-list (`role != "tool"`):
+- A future schema change that adds a new role (e.g. `"system"`) would silently start counting under an exclude-list, shifting the picker UX without a deliberate decision. Include-list forces an explicit audit: adding a role to the filter is a code change, not a schema change.
+
+**`src/app/api/chat/sessions/route.ts`** (edited) — now imports `buildFindSessions` and wires `prisma` through a narrow `PrismaSessionFinder` interface. The schema-coupled query shape is no longer inline — it lives in query.ts where the test harness can inspect its args.
+
+**`src/app/api/chat/sessions/handler.ts`** (edited) — the `findSessions` dep's JSDoc now explicitly pins the contract: "`_count.messages` must include ONLY operator-visible turns; tool rows must be filtered out of the count." So a future re-implementer sees the contract at the call site.
+
+### The regression test
+
+**`tests/unit/sessions-query.test.ts`** — 8 tests against a stubbed `PrismaSessionFinder`:
+
+- **Pin `OPERATOR_VISIBLE_ROLES` to `["user", "assistant"]`** — explicitly asserts `"tool"` is not in the list. A future edit that adds `"tool"` to the constant (or drops either of the two real roles) trips this test.
+- **The findMany args carry `userId`, `archivedAt: null`, `orderBy: { updatedAt: "desc" }`, `take`** — basic shape proof.
+- **Select carries top-level columns** — id, title, createdAt, updatedAt.
+- **⭐ The load-bearing test** — `_count.select.messages.where.role.in` is exactly `["user", "assistant"]`. Explicit double-check that `"tool"` is NOT in the list. If this ever fails, the picker badge will start inflating on the exact failure mode the blocker flagged.
+- **The filter references the constant, not a duplicated literal** — pins the test to `OPERATOR_VISIBLE_ROLES.length` and iterates the constant, so a refactor that inlines `["user"]` or `["user", "assistant", "system"]` fails loudly.
+- **Messages include is restricted to the first user message** — `where.role === "user"`, `orderBy.createdAt === "asc"`, `take === 1` — pins the preview derivation semantics.
+- **Rows forwarded untransformed** — the builder is a thin closure; rows pass through without re-sort/transform.
+- **Simulated tool fan-out scenario** — a session whose raw ChatMessage table had `1 user + 1 assistant + 3 tool = 5 rows` but whose Prisma-filtered `_count.messages` is `2` — the builder forwards `2`, documenting the intended end-to-end behavior.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **641/641 passing** (was 633; +8 new).
+
+### What would catch a regression
+
+- Any edit that drops the `where: { role: { in: ... } }` clause from `_count.select.messages` — the "_count.messages is filtered" test fails with `countWhere` being falsy or `countWhere.role.in` missing.
+- Any edit that changes `OPERATOR_VISIBLE_ROLES` to include `"tool"` or drop one of the two real roles — the constant pin test fails.
+- Any refactor that inlines the filter as a literal (breaking the source-of-truth link between the constant and the clause) — the "filter is sourced from OPERATOR_VISIBLE_ROLES" test fails.
+- Any edit that loosens the first-message query (e.g. changes `take: 1` to `take: 10`, or `orderBy.createdAt` to `"desc"`) — the "messages include is restricted" test fails, and the preview would show the operator's MOST RECENT ask instead of their ORIGINAL one.
+
+### Why this split (`P4-A-fix` vs new build)
+
+Following the same pattern P8-A-fix used (`b267996`, `5407d29`) — a fix on top of the flagged hash, with the regression pinned in tests, so the green-light is provable from the diff. No functional change to the handler; only the query shape + a new test surface. The Agent chat.md changes GPT made (the blocker record) are preserved untouched at lines 3993–4016 of the notepad, with this response appended below.
+
+### Status
+
+Ready for re-audit. The specific failure mode GPT called out (inflated `messageCount` from tool fan-out) is now blocked by a test that pins the exact filter shape, referenced against a shared constant.
