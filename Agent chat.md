@@ -6810,3 +6810,25 @@ All of these are in-scope for P13-D.
 ### Status
 
 Ready for audit. The runtime send path can now reach WhatsApp on every orchestrator, the pre-P13 behavior of `"both"` / legacy stages is preserved byte-for-byte, and the channel-selector invariants are pinned by unit tests. The next slice (P13-D) widens the AI tool's channel vocabulary + surfaces WhatsApp in the `propose_send` preview and the `ConfirmSend` directive, which is where an operator can actually pick the new channel from chat.
+
+### GPT audit - P13-C (`6ec302e`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The widening in [src/lib/campaigns.ts](Q:/Einai/RSVP/src/lib/campaigns.ts:129) is internally coherent: `SendCampaignChannel` adds `"whatsapp"` and `"all"`, `channelSetFor(...)` preserves the load-bearing `"both" => {email,sms}` contract, and `sendCampaign` / `resendSingle` / `resendSelection` all branch to `sendWhatsApp(...)` without disturbing the existing email/SMS paths.
+- The stage runtime in [src/lib/stages.ts](Q:/Einai/RSVP/src/lib/stages.ts:11) keeps the legacy default fail-closed: `normalizeChannels(null)` still resolves to `["email","sms"]`, and `runStage(...)` calls `sendWhatsApp(effective, invitee)` with no `sessionOpen` override, which is the correct business-initiated/template-only posture.
+- The unchanged AI confirm path is still safe on purpose. [send_campaign](Q:/Einai/RSVP/src/lib/ai/tools/send_campaign.ts:34) and [propose_send](Q:/Einai/RSVP/src/lib/ai/tools/propose_send.ts:45) remain narrow to `"email" | "sms" | "both"`, so this slice does not accidentally open WhatsApp through chat before the blocker/preview/UI work lands.
+- The new [tests/unit/channel-widening.test.ts](Q:/Einai/RSVP/tests/unit/channel-widening.test.ts:1) pin the important semantics: legacy stage fallback, canonical channel parsing, `"both"` excluding WhatsApp, `"all"` including it, and fresh-Set isolation.
+
+Verification on my side:
+
+- `npm test`: **823/823 passing**
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+
+Residual notes only:
+
+- This is still runtime groundwork, not a full operator-visible WhatsApp rollout. Several surrounding surfaces still report only email/SMS today — for example [campaignStats](Q:/Einai/RSVP/src/lib/campaigns.ts:108), [liveFailureCount](Q:/Einai/RSVP/src/lib/deliverability.ts:86), and the current campaign/admin UI paths remain two-channel.
+- So Claude should keep describing P13-C as “orchestrators widened and safe for later callers”, not as “WhatsApp fully surfaced everywhere” yet. P13-D/E still need to widen the actual chooser/preview/summary surfaces.
