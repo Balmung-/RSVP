@@ -8311,3 +8311,108 @@ The inbound-webhook surface is now fully pinned: parseIntent + token extractors 
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per GPT residual note.
 
 Ready for audit.
+
+---
+
+## P14-I — `phrase()` activity renderer + `secretMatches` bearer comparator (hash `1375045`)
+
+### Why this slice (honest scoping)
+
+Spent ~15 min doing a P14-I scoping audit after P14-H landed. The remaining deferred items from the P14-H notepad (activity-page migration, gate-precedence extraction, compat shim cleanup) all looked marginal. Audit subagent flagged two ACTUAL gaps I hadn't surveyed:
+
+**`src/lib/activity.ts` — `phrase()`**: a bilingual-ish activity-line renderer used by **four** consumers (dashboard, per-campaign activity page, `campaign_detail` AI tool card.activity[], `recent_activity` AI tool). It dispatches over ~45 event kinds producing operator-visible `{ line, tone }` outputs. Every string is operator-facing. The tone field determines dot color in the UI (default=grey, success=green, warn=amber, fail=red). ZERO direct unit coverage.
+
+**`src/lib/webhook-auth.ts` — `secretMatches`**: 20-LOC security-sensitive bearer-token comparator used by both inbound webhook routes and the cron-tick endpoint. Does a hash-then-`timingSafeEqual` to eliminate the length-oracle that would exist in a naive `if (a.length !== b.length) return false` implementation. Also hard-fails on empty `expected` (guards against unconfigured env var silently auth'ing empty bearers). ZERO direct unit coverage.
+
+Both are pin-only slices (like P14-F) — the functions are already pure+exported, just lacked tests. Same "extract" pattern doesn't apply because there's no extraction to do; the only deliverable is the pin set.
+
+### Regression surfaces protected
+
+**(1) Tone table drift.** Each event kind maps to one of `{default, success, warn, fail}`. Tones drive operator attention — `fail` becomes a red dot, `warn` becomes amber. A silent demotion (e.g., `rsvp.vip.notified` with tier `royal` dropping from `fail` to `warn`) would lower the escalation signal on an event that absolutely needs operator attention. Load-bearing pins: `royal → fail`, `minister → warn`, `user.2fa_disabled → warn`, `stage.completed with failed > 0 → warn`, `approval.rejected → fail`, `contact.deleted → warn`, `team.deleted → warn`.
+
+**(2) Operator-visible string drift.** Each branch produces an English sentence. A careless edit that drops the period, re-orders the interpolation, or mangles a template string produces operator-visible broken grammar in the activity feed. Pinned with exact-string assertions for the high-frequency / high-stakes kinds (rsvp.submitted, import.completed, invite.sent with channel, approval.requested with plural toggle).
+
+**(3) Pluralization toggle bugs.** `recipient` vs `recipients`, `invitee` vs `invitees`, guest count `(+N)` suffix. Regressions here produce "1 invitees" level copy that jumps out. Pinned for both the `approval.requested` recipient plural and the `import.completed` invitee plural + duplicates-clause conditional.
+
+**(4) Actor fallback cascade.** `actor.fullName → actor.email → "System"`. When `actor` is null (system-emitted events like `invite.sent` / `invite.delivered`), the line must render as `"System <verb>"` — NOT `"null signed in"` or a raw id. Pinned with all three branches.
+
+**(5) `default` fallback robustness.** A new event kind added to the system before `phrase()` gets a dedicated branch MUST NOT crash the feed. The fallback produces `"<actor> · <kind> on <refType>"`. Pinned.
+
+**(6) `safeJSON` tolerance.** The `e.data` field is a JSON-stringified blob. A DB row with garbage (e.g., from a mid-migration schema mismatch) MUST NOT throw on `phrase()` — `safeJSON` catches `JSON.parse` failures and returns `{}`. Pinned with both malformed and null data.
+
+**(7) `channelLabel` mapping.** `email → "email"`, `sms → "SMS"` (uppercase), `both → "email + SMS"`, unknown string passthrough, missing → `"message"` fallback. Pinned via `invite.sent` branches.
+
+**(8) `secretMatches` security properties.** (a) correct match accepts, (b) wrong value rejects, (c) empty expected hard-fails (unconfigured env safety), (d) different-length inputs don't throw (the whole reason for the hash-first pattern), (e) hash collision property across Unicode / control chars / emoji, (f) symmetry.
+
+### Implementation — single commit `1375045`
+
+**New:**
+- `tests/unit/activity-phrase.test.ts` — 47 pins, ~646 LOC.
+- `tests/unit/webhook-auth.test.ts` — 6 pins, ~96 LOC.
+
+**Modified:**
+- `package.json` — adds both new test files.
+
+No source-file changes. Pin-only slice, same pattern as P14-F.
+
+### Test coverage breakdown
+
+**activity-phrase.test.ts — 47 tests:**
+
+- Actor fallback cascade: 3 tests (fullName wins, email fallback, null→"System")
+- `default` fallback: 2 tests (with refType, without refType)
+- `user.*` kinds: 6 tests (user.created with/without data, user.password_reset tone, user.deleted tone, user.2fa_enabled, user.2fa_disabled)
+- `approval.*`: 3 tests (singular/plural recipient, rejected tone + truncated note)
+- `invite.*`: 6 tests (sent with channel, delivered tone, failed with + without error, bounced tone, retry.ok tone)
+- `rsvp.submitted` + `rsvp.vip.notified`: 6 tests (attending 0 guests, attending N guests, declined, royal→fail, minister→warn, vip→warn)
+- `stage.*`: 3 tests (completed 0 failed→success, completed N failed→warn, failed→fail)
+- `inbound.*`: 4 tests (applied attending, applied declined, applied other, reviewed)
+- `import.completed`: 2 tests (singular, plural + duplicates clause)
+- `unsubscribe` / `contact` / `template` / `team` / `checkin`: 6 tone-focused tests
+- `safeJSON`: 2 tests (malformed, null)
+- `channelLabel`: 3 tests (both, unknown passthrough, missing)
+- Shape drift: 1 test (closed-vocab `tone`)
+
+**webhook-auth.test.ts — 6 tests:**
+
+- Correct match: true
+- Wrong value: false
+- Empty expected (unconfigured env): false even with empty sent
+- Different-length inputs: no throw + clean false
+- Hash collision property (6 diverse inputs, all round-trip)
+- Symmetry
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1120/1120 passing** in 2.9s (was 1067; +53 from the new tests)
+- 0 `not ok` lines in TAP
+- No source changes — pin-only slice
+
+### Where P14 stands — now nine slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization (email + sms routes).
+- **P14-I** (`1375045`) — activity phrase() renderer + webhook-auth secretMatches (pin-only).
+
+Test count: 825 → 1120 (+295 across nine slices). Two of nine are pin-only (P14-F, P14-I); seven are extract-and-pin.
+
+Surface coverage as of P14-I:
+- **AI tool helpers**: workspace-reducer, widget-pipeline, confirm-flow, import-outcomes, send-campaign-summary, propose-send-preview, activity-scope — all extracted + pinned.
+- **Inbound webhooks**: parseIntent + token extractors (P14-F) + provider-normalization (P14-H) — fully pinned.
+- **Operator-visible strings**: `phrase()` (~45 event kinds) — pinned for tone correctness, actor cascade, pluralization, fallback robustness.
+- **Security-sensitive helpers**: `secretMatches` — pinned for length-oracle resistance, unconfigured-env safety, hash properties.
+
+### What remains deferred (final)
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change; zero new test value. Remains a follow-up.
+- **Gate-precedence in `propose_import` / `commit_import`** — audited & formally deferred (prisma-interleaved by design).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
+
+Ready for audit.
