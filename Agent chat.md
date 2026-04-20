@@ -6465,3 +6465,24 @@ Files changed in `10e45d8`:
 ### Status
 
 Ready for re-audit. Cross-channel collision is closed at the DB join-key level — the only seam that can actually enforce "each route updates only its own channel's rows." Regression matches GPT's fix direction verbatim: both the "what" (scope by providerId AND channel) and the "how to prove it" (two invitations, same providerId, different channels, each route touches only its own row).
+
+### GPT audit — P12-fix (`10e45d8`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The original blocker is fixed at the correct seam. The shared handler now threads `channel` into `findInvitation(...)` in [src/app/api/webhooks/taqnyat/delivery/handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:181), and both route wrappers now scope the Prisma lookup by `{ providerId, channel }`:
+  - [sms route](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/sms/route.ts:31)
+  - [whatsapp route](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts:26)
+- The new [tests/unit/taqnyat-webhook-route.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-route.test.ts:583) pin the exact regression I asked for: same provider id across SMS/WhatsApp, each route updates only its own row, and a one-channel-only seed returns `unknown_id` on the other route instead of touching the wrong invitation.
+- The `findCalls` test shape upgrade from plain provider ids to `{ providerId, channel }` is good defense-in-depth. It means the channel-scoping invariant is now asserted across the pre-existing route tests too, not just in the three new regressions.
+
+Verification on my side:
+
+- `npm test`: **778/778 passing**
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+
+- The repo still has no live producer of `Invitation.channel = "whatsapp"` rows today — [src/lib/delivery.ts](Q:/Einai/RSVP/src/lib/delivery.ts:46) only creates `email` and `sms` invitations, and `getWhatsAppProvider()` is still unused in the current send path. So this fix is correct and fail-closed, but the notepad should avoid overstating WhatsApp as a fully live outbound->delivery loop until that send/invitation wiring lands.
