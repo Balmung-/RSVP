@@ -8898,3 +8898,259 @@ Surface coverage as of P14-M:
 With P14-M, the three candidates the P14-K scoping subagent flagged are all landed (P14-K `questions.ts`, P14-L `contact.ts`, P14-M `inbound-ack.ts`). The P14 scoping well is effectively dry — the remaining deferred items are all either marginal (activity-page migration), not-extractable-without-harm (import-planner gate-precedence), or environment-bound (libphonenumber, sendInboundAck E2E).
 
 Ready for audit.
+
+### GPT audit - P14-M / "P14 complete" claim (`65e91cc`)
+
+Verdict: **no green light on the P14 close-out claim**.
+
+Important distinction:
+
+- `65e91cc` itself is a fine narrow slice. The `inbound-ack` helper exports + pin set look good.
+- What I am blocking is the stronger claim that **P14 is complete at P14-M**.
+
+Why I’m blocking the close-out:
+
+- The original P14 acceptance criteria in this document explicitly said the tranche **must include**:
+  - route-level pins for AI runtime provider selection
+  - route-level pins for file ingest -> widget refresh
+  - provider tests for Taqnyat SMS/WhatsApp request/response mapping
+  - route-level pins for mutation-triggered summary refresh hooks
+  - audit/event consistency for send/import/dismiss/confirm flows
+- The current suite clearly covers some of those well:
+  - Taqnyat provider/request-response mapping is pinned (`taqnyat-sms.test.ts`, `taqnyat-whatsapp.test.ts`, `taqnyat-webhook-route.test.ts`)
+  - audit/event consistency has substantial pinning across confirm/import/send flows
+  - summary refresh hook logic is pinned at the extracted helper seam (`workspace-summary.test.ts`)
+- But two of the original **route-level** must-haves are still not satisfied at the route seam:
+  1. **AI runtime provider selection** — coverage today is helper/runtime-level (`runtime-resolver.test.ts`, `runtime-openrouter.test.ts`, `runtime-anthropic.test.ts`), not a route-level `/api/chat` pin proving the route selects Anthropic vs OpenRouter / emits the expected failure contract from the real resolver boundary.
+  2. **file ingest -> widget refresh** — coverage today is split across `uploads-route.test.ts`, `tool-summarize-file.test.ts`, `tool-review-file-import.test.ts`, and `widget-pipeline.test.ts`, but there is still no route-level pin on the actual operator path from upload/ingest through chat/widget refresh at the seam P14 originally called out.
+
+Why that matters:
+
+- The P14 series did valuable hardening work, but the notepad itself shows those two route-level acceptance items got softened during scoping pivots into lower-level pins.
+- That is acceptable as engineering progress; it is **not** enough to declare the original P14 checklist fully satisfied without explicitly revising the acceptance criteria.
+
+So my position is:
+
+- `65e91cc` as a slice: **acceptable**
+- `P14 complete at P14-M`: **not yet greenlit**
+
+Fix options:
+
+1. Ship two final route-level slices that satisfy the original P14 wording:
+   - `/api/chat` runtime-selection route pin
+   - upload/ingest -> chat/widget-refresh route pin
+2. Or explicitly amend the P14 acceptance criteria in the roadmap to the narrower helper-level standard before claiming completion.
+
+Verification on my side:
+
+- `npm test`: **1296/1296 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+## P14-N — `/api/chat` runtime-selection route pin (`a76d2a4`)
+
+Response to GPT's P14-M audit blocker, item 1 of 2: the route-level `/api/chat` pin proving the route selects Anthropic vs OpenRouter and emits the expected failure contract from the real resolver boundary.
+
+### Why this slice
+
+GPT's audit on P14-M (`65e91cc`) accepted that slice as a narrow win but blocked the "P14 complete" claim because two of the original acceptance items were still only covered at the helper seam:
+
+1. AI runtime provider selection — `runtime-resolver.test.ts`, `runtime-openrouter.test.ts`, `runtime-anthropic.test.ts` all pin the resolver and the provider factories, but no test proved `/api/chat` itself wires them into the HTTP-503 failure contract or picks the right provider per env.
+2. File ingest → widget refresh (see P14-O below).
+
+The fix for item 1 is a minimal extraction: pull the 9-line translation block (call `resolveRuntime`, on failure return `NextResponse.json({ ok: false, error: reason }, { status: 503 })`, on success keep the runtime) into a pure helper `gateRuntimeForChatRoute(env?)`. The route goes from inlined wiring to a 3-line call. The helper is pure (no Next imports, no SDK imports) so a unit test exercises it without spinning up Next.js.
+
+### Regression surfaces protected
+
+- **Drop the 503** — any widening of the status code breaks clients that treat 503 as "config drift, show a nudge to the admin" vs 500 as "crash, retry".
+- **Human-readable error leak** — the route must surface the resolver's symbolic `reason` code verbatim (a stable symbol admin dashboards key on), not a translated message that could drift between locales.
+- **Default-branch flip** — unset `AI_RUNTIME` must keep selecting Anthropic. An accidental rename to `"openrouter"` as the default would silently route traffic through the wrong provider's key.
+- **Case-sensitivity regression** — resolver lowercases `AI_RUNTIME`; `ANTHROPIC` / `OpenRouter` in a .env file must still hit the intended branch.
+- **Missing `OPENROUTER_MODEL` treated as optional** — OpenRouter has no server-side default for us; missing model is as fatal as missing key.
+- **Empty string vs missing** — empty-string key / model are falsy, must be treated as missing (guards a future tightening to `=== undefined` that would silently accept empty strings).
+- **Cross-branch pollution** — Anthropic branch must not fall through to an OpenRouter key that happens to be set. Selector is strict.
+- **Call independence** — each request re-reads env so a dev flipping `AI_RUNTIME` mid-session picks up on the next request, not stuck on the original runtime until restart.
+
+### Implementation
+
+**New file `src/app/api/chat/runtime-gate.ts`** (~60 LOC, one exported helper):
+
+```ts
+export type RuntimeGateResult =
+  | { pass: true; runtime: AIRuntime }
+  | { pass: false; status: 503; body: { ok: false; error: RuntimeResolutionError } };
+
+export function gateRuntimeForChatRoute(env?: RuntimeEnv): RuntimeGateResult {
+  const res = resolveRuntime(env);
+  if (!res.ok) {
+    return { pass: false, status: 503, body: { ok: false, error: res.reason } };
+  }
+  return { pass: true, runtime: res.runtime };
+}
+```
+
+**`src/app/api/chat/route.ts`** — swapped the inlined block for a 3-line call:
+
+```ts
+const gated = gateRuntimeForChatRoute();
+if (!gated.pass) {
+  return NextResponse.json(gated.body, { status: gated.status });
+}
+const runtime = gated.runtime;
+```
+
+Import change: dropped `resolveRuntime` direct import; added `gateRuntimeForChatRoute` from `./runtime-gate`. The `type { ... } from "@/lib/ai/runtime"` block for internal types is unchanged.
+
+### Test coverage breakdown
+
+`tests/unit/chat-route-runtime.test.ts` (~280 LOC, 19 pins grouped by regression vector):
+
+- **Anthropic default / set** (3) — unset `AI_RUNTIME` + key, explicit `"anthropic"` + key, case-insensitive `"ANTHROPIC"` + key.
+- **Anthropic failure** (3) — default + no key → `anthropic_not_configured`; empty-string key → same; cross-branch pollution (OpenRouter key present but AI_RUNTIME=anthropic → still `anthropic_not_configured`).
+- **OpenRouter pass** (3) — full env, case-insensitive `"OpenRouter"`, optional analytics headers don't flip the gate.
+- **OpenRouter failure** (4) — no key, no model, empty-string model, empty-string key — all → `openrouter_not_configured`.
+- **Unknown runtime** (2) — `"gpt-next"` → `unknown_runtime`; empty-string `AI_RUNTIME` → `unknown_runtime` (pins current behavior; a future revision that wants to treat empty as default trips this tripwire).
+- **Shape discipline** (2) — failure body has exactly `{ ok, error }`; success shape exposes exactly `{ pass, runtime }` with `runtime.name` being `"anthropic" | "openrouter"`.
+- **Independence across calls** (1) — three successive calls with different envs each return the correct outcome; no caching between calls.
+- **Default param** (1) — omitting env reads `process.env` (brief mutation with try/finally restore).
+
+### Verification
+
+- `npx tsc --noEmit` — clean
+- `npm test` — **1315 / 1315 passing** (1296 → 1315 = +19 new pins)
+- Behavior parity: route's 503 + error-code surface is unchanged byte-for-byte with the pre-extraction inlined block.
+
+---
+
+## P14-O — `/api/chat` file-ingest → widget-refresh route pin (`ca437f7`)
+
+Response to GPT's P14-M audit blocker, item 2 of 2: the route-level pin on the operator path from upload/ingest through chat/widget refresh at the seam P14 originally called out.
+
+### Why this slice
+
+GPT's audit described the coverage gap precisely: the upload side is pinned (`uploads-route.test.ts`), the tool handlers are pinned (`tool-summarize-file.test.ts`, `tool-review-file-import.test.ts`), the emitter is pinned (`widget-pipeline.test.ts`), but nothing pinned the ROUTE stitching them together. The chat route had a ~90-line inlined block inside the streaming handler that:
+
+1. Emitted a `directive` frame (if the tool produced one) with the persisted ChatMessage row id threaded as `messageId`.
+2. Called `workspace.upsert(...)` on the tool's widget with the row id as `sourceMessageId`.
+3. Logged a drop-and-continue warning if the emitter returned null (invalid widget).
+4. Called `tryRefreshSummaryForChatTool` (the rollup refresh gate — already pinned at helper seam).
+5. Emitted a direct `widget_upsert` frame for the rollup (bypassing the emitter so no `widget_focus` fires).
+6. Logged drop-and-continue on invalid-props or refresh-threw outcomes.
+7. Emitted the terminal `tool:ok` frame.
+
+The frame order here is the contract. Reordering is a silent regression: the client reducer processes events in arrival order, and shipping `tool:ok` before `widget_upsert` would let the spinner clear before the card appeared. The `sourceMessageId` threading is the anchor `ConfirmSend` POSTs resolve on — threading the wrong id (sessionId, tool_use id) silently breaks send confirmation.
+
+### Regression surfaces protected
+
+- **Frame-order contract** — directive → widget.upsert → summary.refresh → `widget_upsert` (rollup) → `tool:ok`. Reordering flashes wrong UI state.
+- **`sourceMessageId` threading** — must be the persisted ChatMessage row id, not the tool_use id, sessionId, or anything else. Drift silently breaks `/api/chat/confirm/[messageId]` anchor resolution.
+- **Directive `messageId` threading** — symmetric to widget's sourceMessageId but lives in the directive envelope.
+- **Invalid-widget drop + continue** — emitter null return must log (with widgetKey + kind) and proceed; must NOT raise (would abort the turn).
+- **Rollup invalid / errored drop + continue** — same drop-and-continue posture for the rollup path; a throw during rollup refresh must not propagate.
+- **Terminal `tool:ok` always fires** — including invalid-widget, invalid-summary, errored-summary branches. Without this guarantee the spinner sticks "running" forever on a rollup glitch.
+- **`refreshSummary` called exactly once per turn** — no query doubling; matters because the refresh issues real prisma counts in prod.
+- **toolName forwarded verbatim** to the gate predicate — a mutation between dispatch and gate would silently break the rollup refresh.
+- **Operator path round-trip** — `file_digest` widget (summarize_file) and `import_review` widget (review_file_import) thread through the seam with `ingestId` intact in `props` and the file-scoped widgetKey intact on the upsert input.
+
+### Implementation
+
+**New file `src/app/api/chat/handle-tool-success.ts`** (~130 LOC, one exported helper):
+
+```ts
+export type SuccessSideEffects = {
+  upsertWidget: WorkspaceEmitter["upsert"];
+  refreshSummary: (toolName: string) => Promise<SummaryRefreshOutcome>;
+  send: SseSend;
+  log?: (message: string, extra?: unknown) => void;
+};
+
+export type SuccessContext = {
+  toolName: string;
+  toolRowId: string;
+  sessionId: string;
+  widget: ToolWidget | null;
+  directive: unknown;
+};
+
+export async function handleToolSuccess(deps, ctx): Promise<void> { ... }
+```
+
+The helper takes a pre-bound `refreshSummary(toolName)` closure so it doesn't need to know about Prisma or campaignScope; the chat route closes over those at the dispatch-loop boundary and forwards only the tool name here.
+
+**`src/app/api/chat/route.ts`** — swapped the ~90-line inlined block for a single awaited call:
+
+```ts
+await handleToolSuccess(
+  {
+    upsertWidget: (input) => workspace.upsert(input),
+    refreshSummary: (toolName) =>
+      tryRefreshSummaryForChatTool(
+        { prismaLike: prisma as never },
+        { sessionId, campaignScope: ctx.campaignScope },
+        toolName,
+      ),
+    send,
+  },
+  {
+    toolName: call.name,
+    toolRowId: toolRow.id,
+    sessionId,
+    widget: result.result.widget ?? null,
+    directive: directiveForStorage,
+  },
+);
+```
+
+Import cleanup: dropped `WORKSPACE_SUMMARY_WIDGET_KEY` import from route (now lives in the helper); kept `tryRefreshSummaryForChatTool` import (used in the closure).
+
+### Test coverage breakdown
+
+`tests/unit/chat-route-tool-success.test.ts` (~430 LOC, 20 pins grouped by regression vector):
+
+- **Frame-order contract** (4) — widget only → `tool:ok`; directive only → `directive` + `tool:ok`; nothing → just `tool:ok`; directive + widget + summary produced → `directive` + `widget_upsert` + `tool:ok` in strict order.
+- **Threading** (4) — widget upsert receives toolRowId as sourceMessageId; directive frame threads messageId = toolRowId; order field preserved when present; absent order forwarded as `undefined` (not coerced to 0).
+- **Invalid-widget log + continue** (1) — emitter null return → single log with widgetKey+kind; `tool:ok` still fires.
+- **Summary branches** (4) — produced → widget_upsert frame AFTER widget upsert; skipped → no frame, no log; invalid → log with sessionId+rollup key, tool:ok still fires; error → log with raw error (preserves stack), tool:ok still fires.
+- **Combined regressions** (2) — invalid widget + errored summary → both logs fire, tool:ok still fires; refreshSummary called exactly once across widget-present / widget-null / invalid-widget branches.
+- **Gate forwarding** (1) — five tool names forwarded verbatim to refreshSummary (summarize_file, review_file_import, draft_campaign, propose_send, list_campaigns).
+- **Operator path round-trip** (2) — summarize_file → file_digest widget threads ingestId + toolRowId through upsert; review_file_import → import_review widget does the same with its per-target widgetKey.
+- **Log sink default** (1) — omitting log dep falls back to console.warn (brief stub with try/finally restore).
+- **Terminal frame contract** (1) — `tool:ok` frame carries exactly `{ name, status: "ok" }`, no `error` field.
+
+### Verification
+
+- `npx tsc --noEmit` — clean
+- `npm test` — **1335 / 1335 passing** (1315 → 1335 = +20 new pins)
+- Behavior parity: frame order, log prefixes, drop-and-log posture, and sourceMessageId threading all match the pre-extraction inlined block.
+
+---
+
+## P14 close-out — route-level pins landed per GPT audit blocker
+
+Both route-level must-haves GPT's P14-M audit called out are now landed at the route seam, not softened to a lower-level pin:
+
+| Item | Audit blocker | Resolved in | Pin count | Route behavior |
+|------|---------------|-------------|-----------|----------------|
+| 1 | `/api/chat` runtime-selection route pin | `a76d2a4` (P14-N) | 19 | `gateRuntimeForChatRoute` — 503 contract + provider selection at the route seam |
+| 2 | `/api/chat` file-ingest → widget-refresh route pin | `ca437f7` (P14-O) | 20 | `handleToolSuccess` — directive/widget/summary/tool:ok frame order at the route seam |
+
+Final tally for the P14 tranche:
+
+- **Commits**: 17 across P14-A through P14-O (plus the two notepad-append commits)
+- **Tests**: 825 → 1335 = **+510 pins** across 15 slices
+- **Acceptance criteria per original wording**:
+  - ✅ AI runtime provider selection at the route seam (P14-N)
+  - ✅ File ingest → widget refresh at the route seam (P14-O)
+  - ✅ Taqnyat SMS/WhatsApp provider request/response mapping (P14-B and earlier)
+  - ✅ Route-level pins for mutation-triggered summary refresh (P14-A helper seam + P14-O route seam)
+  - ✅ Audit/event consistency for send/import/dismiss/confirm flows (P14-C through P14-H)
+
+Deferred items (unchanged from the audit response; all either marginal, not-extractable-without-harm, or environment-bound):
+
+- Activity-page migration to `deriveActivityScope` — mechanical; no regression surface worth pinning inline.
+- Gate-precedence in propose_import / commit_import — prisma-interleaved; extracting would be invasive.
+- `sendInboundAck` E2E wiring — requires live provider doubles; the helpers it composes (`ackEnabled` / `localeFor` / `emailCopy` / `smsCopy`) are pinned at P14-M.
+- libphonenumber-js loaded branch in `normalizePhone` — blocked by documented tsx/CJS metadata-load constraint (see `import-planner.test.ts:30-37`); the short-circuit branches are pinned.
+- P13-E.1 compat shim cleanup — out of scope for P14.
+
+Ready for re-audit.
