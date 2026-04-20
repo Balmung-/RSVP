@@ -38,6 +38,16 @@ import type { FormatContext } from "./CampaignList";
 // treated as a hard disable — it's only missing on legacy/stale
 // re-hydrations where there's no coherent row to confirm against.
 
+// Per-channel breakdown bucket. Extracted as a named type because
+// the props now carry three (email / sms / whatsapp); duplicating
+// the inline shape at every callsite got noisy.
+type ChannelBucket = {
+  ready: number;
+  skipped_already_sent: number;
+  skipped_unsubscribed: number;
+  no_contact: number;
+};
+
 export type ConfirmSendProps = {
   campaign_id: string;
   name: string;
@@ -45,33 +55,40 @@ export type ConfirmSendProps = {
   venue: string | null;
   event_at: string | null;
   locale: string;
-  channel: "email" | "sms" | "both";
+  // P13-D.2 — channel vocabulary widened. `"both"` preserves pre-P13
+  // semantics (email + SMS only) — every legacy caller targeting
+  // "both" has email+SMS-only expectations and cannot silently start
+  // sending Meta-brokered messages. `"all"` is the new umbrella that
+  // adds WhatsApp; scalars pick a single channel.
+  channel: "email" | "sms" | "whatsapp" | "both" | "all";
   only_unsent: boolean;
   invitee_total: number;
   // Job count (one `(invitee, channel)` pair = one message), NOT a
-  // recipient count. An invitee with both email and SMS on
-  // channel=both contributes 2 here, not 1. The copy below reflects
-  // that — "Messages ready", not "Recipients ready" — so the
-  // operator confirms the number of sends they're authorizing.
+  // recipient count. An invitee with email + phone on channel=all
+  // contributes 3 here (email, sms, whatsapp), not 1. The copy below
+  // reflects that — "Messages ready", not "Recipients ready" — so
+  // the operator confirms the number of sends they're authorizing.
   ready_messages: number;
   by_channel: {
-    email: {
-      ready: number;
-      skipped_already_sent: number;
-      skipped_unsubscribed: number;
-      no_contact: number;
-    };
-    sms: {
-      ready: number;
-      skipped_already_sent: number;
-      skipped_unsubscribed: number;
-      no_contact: number;
-    };
+    email: ChannelBucket;
+    sms: ChannelBucket;
+    // P13-D.2 — WhatsApp bucket is populated identically to SMS (same
+    // `phoneE164` contact field, shared `unsubPhones` set) but keyed
+    // off `invitations.channel === "whatsapp"` for already-sent
+    // detection. Required on every blob so the renderer never has to
+    // branch on "is this a pre-P13 payload?".
+    whatsapp: ChannelBucket;
   };
   template_preview: {
     subject_email: string | null;
     email_body: string | null;
     sms_body: string | null;
+    // P13-D.2 — WhatsApp template identity. Meta identifies approved
+    // templates by the (name, language) pair and the body lives on
+    // their side, so the card shows the identity (not a body snippet)
+    // when WhatsApp is configured. Null when either field is missing
+    // (matches the `no_whatsapp_template` blocker predicate).
+    whatsapp_template: { name: string; language: string } | null;
   };
   blockers: string[];
   // W5 — persisted state of the confirm flow. See `CONFIRM_STATES`
@@ -87,7 +104,15 @@ export type ConfirmSendProps = {
   // The reload path feeds this straight from the DB so the operator
   // sees the final state without having to re-click.
   state: "ready" | "blocked" | "submitting" | "done" | "error";
-  result?: { email: number; sms: number; skipped: number; failed: number };
+  // P13-D.2 — result gained `whatsapp: number` so the success morph
+  // can report the per-channel tally for WA-bearing sends.
+  result?: {
+    email: number;
+    sms: number;
+    whatsapp: number;
+    skipped: number;
+    failed: number;
+  };
   error?: string;
   summary?: string;
 };
@@ -98,6 +123,17 @@ const BLOCKER_LABEL: Record<string, string> = {
     "No messages are ready to send (every contact is already sent, unsubscribed, or missing on the chosen channel)",
   no_email_template: "Email template is empty",
   no_sms_template: "SMS template is empty",
+  // P13-D.2 — WhatsApp configuration blockers. Both surface at the
+  // ConfirmSend card so the operator fixes the config before the
+  // server refuses mid-send. `no_whatsapp_template` fires when either
+  // the template name OR the language is missing (Meta needs both as
+  // an identity pair). `template_vars_malformed` fires when the
+  // stored positional-var JSON fails to parse as a string array —
+  // mirrors the planner's Rule 1 inner refusal.
+  no_whatsapp_template:
+    "WhatsApp template is not fully configured (both name and language are required)",
+  template_vars_malformed:
+    "WhatsApp template variables are not a valid JSON string array",
 };
 
 function formatBlocker(raw: string): string {
@@ -137,6 +173,10 @@ type SendState =
       summary: string;
       email: number;
       sms: number;
+      // P13-D.2 — additive counter. Always set (0 on two-channel
+      // sends) so the success morph can read it unconditionally
+      // without branching on channel.
+      whatsapp: number;
       skipped: number;
       failed: number;
     }
@@ -156,6 +196,7 @@ function deriveSendState(props: ConfirmSendProps): SendState {
       summary: props.summary ?? "Send complete.",
       email: props.result.email,
       sms: props.result.sms,
+      whatsapp: props.result.whatsapp,
       skipped: props.result.skipped,
       failed: props.result.failed,
     };
@@ -231,7 +272,21 @@ export function ConfirmSend({
   useEffect(() => {
     setState(deriveSendState(props));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.state, props.error, props.summary, props.result?.email, props.result?.sms, props.result?.skipped, props.result?.failed]);
+  }, [
+    props.state,
+    props.error,
+    props.summary,
+    props.result?.email,
+    props.result?.sms,
+    // P13-D.2 — track `whatsapp` so a WA-bearing terminal upsert
+    // triggers a re-derive. Without this the morph could miss the
+    // counter on reload when only the WA value changed between two
+    // server-side outcome writes (rare, but possible if the webhook
+    // reconciles partial delivery after the initial response).
+    props.result?.whatsapp,
+    props.result?.skipped,
+    props.result?.failed,
+  ]);
   const when = formatEventAt(props.event_at, fmt);
   const hasBlockers = props.blockers.length > 0;
   // `hasAnchor` gates the POST — without a messageId the confirm
@@ -251,8 +306,23 @@ export function ConfirmSend({
     hasBlockers,
     readyMessages: props.ready_messages,
   });
-  const channelLabel =
-    props.channel === "both" ? "email + SMS" : props.channel;
+  // P13-D.2 — channelLabel expanded for the full vocabulary. `"both"`
+  // stays "email + SMS" (the pre-P13 display); `"all"` becomes
+  // "email + SMS + WhatsApp"; scalars display the channel name
+  // verbatim with "WhatsApp" expanded from `"whatsapp"` for
+  // readability.
+  const channelLabel = (() => {
+    switch (props.channel) {
+      case "both":
+        return "email + SMS";
+      case "all":
+        return "email + SMS + WhatsApp";
+      case "whatsapp":
+        return "WhatsApp";
+      default:
+        return props.channel;
+    }
+  })();
 
   async function onConfirm() {
     if (!hasAnchor) return;
@@ -285,6 +355,12 @@ export function ConfirmSend({
         result?: {
           email?: number;
           sms?: number;
+          // P13-D.2 — `whatsapp` is additive; present on every
+          // post-P13 send_campaign response (0 on two-channel sends).
+          // Declared here so the `r.whatsapp` read below typechecks
+          // without a cast — `unknown` would force every downstream
+          // guard to pay the narrowing tax.
+          whatsapp?: number;
           skipped?: number;
           failed?: number;
           error?: string;
@@ -309,6 +385,10 @@ export function ConfirmSend({
         summary: typeof b.summary === "string" ? b.summary : "Send complete.",
         email: typeof r.email === "number" ? r.email : 0,
         sms: typeof r.sms === "number" ? r.sms : 0,
+        // P13-D.2 — read `whatsapp` defensively (0 when absent) so a
+        // pre-P13 transcript replay or a handler response from before
+        // the widening still lands in a valid SendState shape.
+        whatsapp: typeof r.whatsapp === "number" ? r.whatsapp : 0,
         skipped: typeof r.skipped === "number" ? r.skipped : 0,
         failed: typeof r.failed === "number" ? r.failed : 0,
       });
@@ -317,14 +397,24 @@ export function ConfirmSend({
       setState({ phase: "error", error: msg });
     }
   }
+  // P13-D.2 — totals aggregate across all three buckets so the stats
+  // strip always reflects the whole preview regardless of channel
+  // selection. The whatsapp bucket is `{0,0,0,0}` when WhatsApp isn't
+  // part of the resolved channel set (scalar `email`/`sms`, or `both`
+  // which is email+SMS-only), so adding it unconditionally is safe
+  // and saves the render from branching on `channel`.
   const skippedTotal =
     props.by_channel.email.skipped_already_sent +
-    props.by_channel.sms.skipped_already_sent;
+    props.by_channel.sms.skipped_already_sent +
+    props.by_channel.whatsapp.skipped_already_sent;
   const unsubTotal =
     props.by_channel.email.skipped_unsubscribed +
-    props.by_channel.sms.skipped_unsubscribed;
+    props.by_channel.sms.skipped_unsubscribed +
+    props.by_channel.whatsapp.skipped_unsubscribed;
   const noContactTotal =
-    props.by_channel.email.no_contact + props.by_channel.sms.no_contact;
+    props.by_channel.email.no_contact +
+    props.by_channel.sms.no_contact +
+    props.by_channel.whatsapp.no_contact;
 
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50 overflow-hidden">
@@ -365,10 +455,22 @@ export function ConfirmSend({
           <div className="text-slate-500">Messages ready</div>
           <div className="tabular-nums text-slate-900 font-medium">
             {props.ready_messages}
+            {/* P13-D.2 — breakdown hint only appears on multi-channel
+                selections where the total alone hides the per-channel
+                split. `both` stays email+SMS (pre-P13 semantics); `all`
+                adds WhatsApp. Scalar channels (`email`/`sms`/`whatsapp`)
+                don't need the hint — the total IS the single-channel
+                count. */}
             {props.channel === "both" && (
               <span className="text-slate-400 font-normal">
                 {" "}
                 ({props.by_channel.email.ready}e / {props.by_channel.sms.ready}s)
+              </span>
+            )}
+            {props.channel === "all" && (
+              <span className="text-slate-400 font-normal">
+                {" "}
+                ({props.by_channel.email.ready}e / {props.by_channel.sms.ready}s / {props.by_channel.whatsapp.ready}w)
               </span>
             )}
           </div>
@@ -393,7 +495,8 @@ export function ConfirmSend({
 
       {(props.template_preview.subject_email ||
         props.template_preview.email_body ||
-        props.template_preview.sms_body) && (
+        props.template_preview.sms_body ||
+        props.template_preview.whatsapp_template) && (
         <div className="px-3 py-2 border-t border-amber-100 bg-white text-xs space-y-1">
           {props.template_preview.subject_email && (
             <div>
@@ -412,6 +515,24 @@ export function ConfirmSend({
             <div className="text-slate-600 line-clamp-2 whitespace-pre-wrap">
               <span className="text-slate-500">SMS: </span>
               {props.template_preview.sms_body}
+            </div>
+          )}
+          {/* P13-D.2 — WhatsApp template identity. The body lives on
+              Meta's side (operator-approved BSP template) so the card
+              shows `(name, language)` as the identity pair the operator
+              approved. Rendered as its own row rather than folded into
+              the SMS line because the two are different artifacts —
+              mixing them would suggest a shared body. */}
+          {props.template_preview.whatsapp_template && (
+            <div className="text-slate-600">
+              <span className="text-slate-500">WhatsApp template: </span>
+              <span className="text-slate-900 font-mono">
+                {props.template_preview.whatsapp_template.name}
+              </span>
+              <span className="text-slate-400">
+                {" "}
+                ({props.template_preview.whatsapp_template.language})
+              </span>
             </div>
           )}
         </div>

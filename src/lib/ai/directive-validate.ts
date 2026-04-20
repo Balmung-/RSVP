@@ -104,7 +104,11 @@ function optional<T>(
 
 const TONES = ["default", "success", "warn", "fail"] as const;
 const VIP_TIERS = ["royal", "minister", "vip", "standard"] as const;
-const CHANNELS = ["email", "sms", "both"] as const;
+// P13-D.2 widening — directive confirm_send now carries the widened
+// channel vocabulary. Kept in sync with `widget-validate.ts` by
+// convention (the two files are independent gates so future
+// divergence stays possible; for now both need the same values).
+const CHANNELS = ["email", "sms", "whatsapp", "both", "all"] as const;
 
 // ---- per-kind validators ----
 //
@@ -260,6 +264,18 @@ function validateChannelBreakdown(v: unknown): boolean {
   return true;
 }
 
+// P13-D.2 — mirrors `validateWhatsAppTemplateLabel` in
+// widget-validate.ts. See the sibling file for the rationale; kept
+// local to this module per the "independent validators" constraint
+// documented at the top of this file.
+function validateWhatsAppTemplateLabel(v: unknown): boolean {
+  if (v === null) return true;
+  if (!isPlainObject(v)) return false;
+  if (!isNonEmptyString(v.name)) return false;
+  if (!isNonEmptyString(v.language)) return false;
+  return true;
+}
+
 function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isNonEmptyString(p.campaign_id)) return false;
   if (!isString(p.name)) return false;
@@ -274,10 +290,18 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isPlainObject(p.by_channel)) return false;
   if (!validateChannelBreakdown(p.by_channel.email)) return false;
   if (!validateChannelBreakdown(p.by_channel.sms)) return false;
+  // P13-D.2 — WhatsApp bucket has the same shape as email/sms;
+  // required so a directive payload missing the field is treated
+  // as drift and rejected before render.
+  if (!validateChannelBreakdown(p.by_channel.whatsapp)) return false;
   if (!isPlainObject(p.template_preview)) return false;
   if (!isStringOrNull(p.template_preview.subject_email)) return false;
   if (!isStringOrNull(p.template_preview.email_body)) return false;
   if (!isStringOrNull(p.template_preview.sms_body)) return false;
+  // P13-D.2 — WhatsApp template identity. Null when not configured.
+  if (!validateWhatsAppTemplateLabel(p.template_preview.whatsapp_template)) {
+    return false;
+  }
   if (!isStringArray(p.blockers)) return false;
   return true;
 }

@@ -49,7 +49,18 @@ export type ConfirmRow = {
 export type ConfirmSendOutcome =
   | {
       state: "done";
-      result: { email: number; sms: number; skipped: number; failed: number };
+      // P13-D.2 — `whatsapp` is an additive counter. `send_campaign`'s
+      // handler always returns it (0 on two-channel sends), so the
+      // outcome writer persists a uniform four-counter shape regardless
+      // of the caller's chosen channel. Matches `validateConfirmSendResult`
+      // in `widget-validate.ts:370-384`.
+      result: {
+        email: number;
+        sms: number;
+        whatsapp: number;
+        skipped: number;
+        failed: number;
+      };
       summary?: string;
     }
   | {
@@ -244,6 +255,12 @@ export async function runConfirmSend(
       result: {
         email: asFiniteNumber(rec.email),
         sms: asFiniteNumber(rec.sms),
+        // P13-D.2 — additive counter. `rec.whatsapp` is present on
+        // every `send_campaign` success response; coerce defensively
+        // (0 when missing) so an older transcript replay or a dispatch
+        // path that somehow omits the field still persists a valid
+        // blob the widget validator accepts.
+        whatsapp: asFiniteNumber(rec.whatsapp),
         skipped: asFiniteNumber(rec.skipped),
         failed: asFiniteNumber(rec.failed),
       },

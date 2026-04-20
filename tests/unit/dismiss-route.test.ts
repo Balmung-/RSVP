@@ -89,17 +89,30 @@ function fullConfirmSendProps(
         skipped_unsubscribed: 0,
         no_contact: 0,
       },
+      // P13-D.2 — whatsapp bucket is required on every post-P13 blob,
+      // even for single-channel (email-only) sends. Validator rejects
+      // the shape otherwise, breaking fixtures that feed focusWidget
+      // / upsertWidget via the dismiss-route pipeline.
+      whatsapp: {
+        ready: 0,
+        skipped_already_sent: 0,
+        skipped_unsubscribed: 0,
+        no_contact: 0,
+      },
     },
     template_preview: {
       subject_email: "Subject",
       email_body: "Body",
       sms_body: null,
+      whatsapp_template: null,
     },
     blockers: [] as string[],
     state,
   } as Record<string, unknown>;
   if (state === "done") {
-    base.result = { email: 5, sms: 0, skipped: 0, failed: 0 };
+    // P13-D.2 — `whatsapp` is required on the post-dispatch result.
+    // Zero is the canonical "not part of this send" value.
+    base.result = { email: 5, sms: 0, whatsapp: 0, skipped: 0, failed: 0 };
   } else if (state === "error") {
     base.error = "dispatch_failed";
   }

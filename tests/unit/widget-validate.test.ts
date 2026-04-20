@@ -449,11 +449,18 @@ test("validateWidget: confirm_send minimum shape (ready) passes", () => {
           skipped_unsubscribed: 0,
           no_contact: 8,
         },
+        whatsapp: {
+          ready: 0,
+          skipped_already_sent: 0,
+          skipped_unsubscribed: 0,
+          no_contact: 0,
+        },
       },
       template_preview: {
         subject_email: "Invitation",
         email_body: "Body...",
         sms_body: null,
+        whatsapp_template: null,
       },
       blockers: [],
       state: "ready",
@@ -518,6 +525,11 @@ test("validateWidget: contact_table — rejects unknown vip_tier", () => {
 });
 
 test("validateWidget: confirm_send — rejects unknown channel", () => {
+  // Fixture is otherwise valid — only the `channel` field is invalid,
+  // so the assertion pins the channel-enum check specifically. If
+  // `by_channel.whatsapp` or `whatsapp_template` were also missing,
+  // the rejection would be ambiguous and a channel-validation
+  // regression wouldn't surface here.
   assert.equal(
     validateWidget({
       widgetKey: "confirm_send:c-1",
@@ -547,11 +559,18 @@ test("validateWidget: confirm_send — rejects unknown channel", () => {
             skipped_unsubscribed: 0,
             no_contact: 0,
           },
+          whatsapp: {
+            ready: 0,
+            skipped_already_sent: 0,
+            skipped_unsubscribed: 0,
+            no_contact: 0,
+          },
         },
         template_preview: {
           subject_email: null,
           email_body: null,
           sms_body: null,
+          whatsapp_template: null,
         },
         blockers: [],
         state: "ready",
@@ -602,11 +621,24 @@ function buildConfirmSend(extra: Record<string, unknown>) {
           skipped_unsubscribed: 0,
           no_contact: 8,
         },
+        // P13-D.2 — required on every post-P13 confirm_send blob, even
+        // when WhatsApp isn't part of the resolved channel set. The
+        // all-zero shape is the canonical "not wanted" state and the
+        // renderer adds it to totals unconditionally.
+        whatsapp: {
+          ready: 0,
+          skipped_already_sent: 0,
+          skipped_unsubscribed: 0,
+          no_contact: 0,
+        },
       },
       template_preview: {
         subject_email: null,
         email_body: null,
         sms_body: null,
+        // P13-D.2 — whatsapp_template is required on every blob (null
+        // when unconfigured or channel set doesn't include WhatsApp).
+        whatsapp_template: null,
       },
       blockers: [],
       ...extra,
@@ -641,7 +673,7 @@ test("validateWidget: confirm_send — rejects pre-terminal with result", () => 
     validateWidget(
       buildConfirmSend({
         state: "ready",
-        result: { email: 1, sms: 1, skipped: 0, failed: 0 },
+        result: { email: 1, sms: 1, whatsapp: 0, skipped: 0, failed: 0 },
       }),
     ),
     null,
@@ -659,7 +691,7 @@ test("validateWidget: confirm_send — done accepts result + optional summary", 
   const out = validateWidget(
     buildConfirmSend({
       state: "done",
-      result: { email: 40, sms: 32, skipped: 5, failed: 0 },
+      result: { email: 40, sms: 32, whatsapp: 0, skipped: 5, failed: 0 },
       summary: "Sent 72: 40 email, 32 sms.",
     }),
   );
@@ -680,7 +712,7 @@ test("validateWidget: confirm_send — done rejects co-present error", () => {
     validateWidget(
       buildConfirmSend({
         state: "done",
-        result: { email: 1, sms: 0, skipped: 0, failed: 0 },
+        result: { email: 1, sms: 0, whatsapp: 0, skipped: 0, failed: 0 },
         error: "should not be here",
       }),
     ),
@@ -695,7 +727,7 @@ test("validateWidget: confirm_send — done rejects non-finite result counters",
     validateWidget(
       buildConfirmSend({
         state: "done",
-        result: { email: Number.NaN, sms: 0, skipped: 0, failed: 0 },
+        result: { email: Number.NaN, sms: 0, whatsapp: 0, skipped: 0, failed: 0 },
       }),
     ),
     null,
@@ -707,6 +739,7 @@ test("validateWidget: confirm_send — done rejects non-finite result counters",
         result: {
           email: 1,
           sms: 1,
+          whatsapp: 0,
           skipped: Number.POSITIVE_INFINITY,
           failed: 0,
         },
@@ -746,7 +779,185 @@ test("validateWidget: confirm_send — error rejects co-present result", () => {
       buildConfirmSend({
         state: "error",
         error: "boom",
-        result: { email: 0, sms: 0, skipped: 0, failed: 0 },
+        result: { email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0 },
+      }),
+    ),
+    null,
+  );
+});
+
+// ---- P13-D.2: WhatsApp channel + shape widening ----
+//
+// The validator is the canonical gate between the DB and the
+// renderer. A missing or malformed WhatsApp field should fail CLOSED
+// — rendering a partial blob would produce a card the operator
+// can't reason about (counts don't add up, "all" channel missing
+// its WA segment, etc.). Every invariant below represents drift
+// mode a future refactor could fall into.
+
+test("validateWidget: confirm_send — accepts channel: whatsapp", () => {
+  assert.ok(validateWidget(buildConfirmSend({ channel: "whatsapp" })));
+});
+
+test("validateWidget: confirm_send — accepts channel: all", () => {
+  assert.ok(validateWidget(buildConfirmSend({ channel: "all" })));
+});
+
+test("validateWidget: confirm_send — rejects missing by_channel.whatsapp", () => {
+  // Must not be optional — skipping the field means a pre-P13 blob
+  // that won't render coherently under the new renderer (totals would
+  // branch on "is field present" instead of always aggregating).
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        by_channel: {
+          email: {
+            ready: 1,
+            skipped_already_sent: 0,
+            skipped_unsubscribed: 0,
+            no_contact: 0,
+          },
+          sms: {
+            ready: 1,
+            skipped_already_sent: 0,
+            skipped_unsubscribed: 0,
+            no_contact: 0,
+          },
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects by_channel.whatsapp with missing counter", () => {
+  // Every counter is required; the "all zero" default is explicit.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        by_channel: {
+          email: {
+            ready: 1,
+            skipped_already_sent: 0,
+            skipped_unsubscribed: 0,
+            no_contact: 0,
+          },
+          sms: {
+            ready: 1,
+            skipped_already_sent: 0,
+            skipped_unsubscribed: 0,
+            no_contact: 0,
+          },
+          whatsapp: {
+            ready: 0,
+            skipped_already_sent: 0,
+            // skipped_unsubscribed missing
+            no_contact: 0,
+          },
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects missing template_preview.whatsapp_template", () => {
+  // Same reasoning as by_channel.whatsapp — the field has to be present
+  // (even as null) so the renderer's conditional is a simple truthy
+  // check rather than an "undefined vs null" discriminator.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — accepts whatsapp_template with name + language", () => {
+  assert.ok(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: { name: "rsvp_invitation_v1", language: "ar" },
+        },
+      }),
+    ),
+  );
+});
+
+test("validateWidget: confirm_send — rejects whatsapp_template missing language", () => {
+  // Meta identifies templates by (name, language); the pair is
+  // load-bearing. A partial object is drift.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: { name: "rsvp_invitation_v1" },
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects whatsapp_template with empty strings", () => {
+  // Empty strings pass a shallow truthy guard but aren't a valid
+  // template identity. The validator's nonEmptyString guard is what
+  // catches this.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: { name: "", language: "ar" },
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — done rejects result missing whatsapp", () => {
+  // The validator enforces all four counters on `result`, so a
+  // pre-P13 payload without `whatsapp` fails closed.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "done",
+        result: { email: 1, sms: 1, skipped: 0, failed: 0 },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — done rejects non-finite whatsapp", () => {
+  // Same finite-number discipline as email/sms/skipped/failed.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        state: "done",
+        result: {
+          email: 1,
+          sms: 1,
+          whatsapp: Number.NaN,
+          skipped: 0,
+          failed: 0,
+        },
       }),
     ),
     null,

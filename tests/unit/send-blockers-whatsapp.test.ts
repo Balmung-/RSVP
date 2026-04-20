@@ -43,6 +43,13 @@ function mkCampaign(
     templateSms: "Hi {{name}}, RSVP at {{rsvpUrl}}",
     templateWhatsAppName: "rsvp_invitation_v1",
     templateWhatsAppLanguage: "ar",
+    // P13-D.2 — `templateWhatsAppVariables` is required on
+    // `CampaignForBlockers` (the blocker layer now parses it to
+    // preflight `template_vars_malformed`). Default to `null` — the
+    // vast majority of templates don't use positional variables, so
+    // this reflects the realistic production default. Tests that
+    // exercise the malformed-vars path override it explicitly.
+    templateWhatsAppVariables: null,
     ...overrides,
   };
 }
@@ -277,6 +284,141 @@ test("whatsapp ready: unsubscribed phone does NOT block an invitee with email-on
     onlyUnsent: true,
   });
   assert.equal(blockers.includes("no_ready_messages"), false);
+});
+
+// ---- template_vars_malformed (P13-D.2) --------------------------
+//
+// The WhatsApp planner's Rule 1 inner parse refuses with
+// `template_vars_malformed` when `templateWhatsAppVariables` is a
+// non-null string that doesn't parse as `string[]`. The blocker layer
+// mirrors that refusal so the operator sees it in the preflight card
+// rather than discovering it mid-send (dispatch throws per-invitee,
+// so a partial send state would follow). Scope restricted to the
+// case where the template itself IS configured — otherwise
+// `no_whatsapp_template` fires first and the operator has to resolve
+// that before vars matter at all.
+
+test("whatsapp: null vars → no template_vars_malformed blocker", () => {
+  // `null` is the explicit opt-out (template takes no positional
+  // variables). Must NOT be treated as malformed; that would falsely
+  // block every WA send that doesn't use variables.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: null }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
+test("whatsapp: parsable string[] vars → no template_vars_malformed blocker", () => {
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      templateWhatsAppVariables: JSON.stringify(["{{name}}", "{{rsvpUrl}}"]),
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
+test("whatsapp: malformed JSON vars → template_vars_malformed blocker", () => {
+  // Operator editor bug — the field stored junk that won't parse.
+  // The planner would refuse every invitee; the preflight catches it
+  // once at the card level.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: "{not-json" }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.ok(blockers.includes("template_vars_malformed"));
+});
+
+test("whatsapp: JSON object (not array) vars → template_vars_malformed", () => {
+  // Parses as JSON but isn't a string[]. The planner accepts only
+  // `string[]`; any other JSON shape is malformed for our purposes.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: '{"foo":"bar"}' }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.ok(blockers.includes("template_vars_malformed"));
+});
+
+test("whatsapp: array with non-string elements → template_vars_malformed", () => {
+  // Numbers / nulls / nested objects in the array are not valid
+  // positional variables — the planner treats the whole array as
+  // malformed if any element isn't a string.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      templateWhatsAppVariables: JSON.stringify(["{{name}}", 42]),
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.ok(blockers.includes("template_vars_malformed"));
+});
+
+test("whatsapp: malformed vars + missing template → only no_whatsapp_template (short-circuit)", () => {
+  // Scope invariant — `template_vars_malformed` only fires when the
+  // template itself is configured. If the operator has neither
+  // template NOR valid vars, the missing template is the loudest
+  // problem and must be fixed first; emitting both would be noise
+  // (fixing the template re-raises the vars problem anyway).
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      templateWhatsAppName: null,
+      templateWhatsAppVariables: "{not-json",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.ok(blockers.includes("no_whatsapp_template"));
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
+test("both channel: malformed WA vars → NOT emitted (pre-P13 invariant)", () => {
+  // `both` is email+SMS-only. WhatsApp-specific blockers must not
+  // fire regardless of how broken the WA config is. Same invariant
+  // that gates `no_whatsapp_template` from `both` — vars malformed
+  // rides the same rails.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: "{not-json" }),
+    audience: mkAudience(),
+    channel: "both",
+    onlyUnsent: true,
+  });
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
+test("email scalar: malformed WA vars → NOT emitted", () => {
+  // Scalar email is the simplest "WA isn't wanted" case. No WA check
+  // should appear in the blocker list regardless of stored WA config.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: "{not-json" }),
+    audience: mkAudience(),
+    channel: "email",
+    onlyUnsent: true,
+  });
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
+test("all umbrella: malformed WA vars + valid WA template → template_vars_malformed fires", () => {
+  // The umbrella pulls WA into the channel set; with WA template
+  // fully configured, the vars check runs and catches the parse
+  // failure. The other-channel templates being valid doesn't mask it.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({ templateWhatsAppVariables: "{not-json" }),
+    audience: mkAudience(),
+    channel: "all",
+    onlyUnsent: true,
+  });
+  assert.ok(blockers.includes("template_vars_malformed"));
 });
 
 // ---- Combination blockers ---------------------------------------

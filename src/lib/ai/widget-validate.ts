@@ -182,7 +182,14 @@ function optional<T>(
 
 const TONES = ["default", "success", "warn", "fail"] as const;
 const VIP_TIERS = ["royal", "minister", "vip", "standard"] as const;
-const CHANNELS = ["email", "sms", "both"] as const;
+// P13-D.2 widening — confirm_send widgets now carry a WhatsApp
+// channel value alongside email / sms. `"both"` is preserved as
+// email + SMS only (pre-P13 invariant — legacy callers never meant
+// to send WhatsApp); `"all"` is the explicit three-channel umbrella.
+// Keeping the vocabulary aligned with `SendCampaignChannel` means
+// a `propose_send` widget emit passes the validator gate without a
+// second translation.
+const CHANNELS = ["email", "sms", "whatsapp", "both", "all"] as const;
 
 // W5 — persisted widget state for the action-slot widgets. The
 // spec lists five states; their mapping to the UI is:
@@ -364,15 +371,37 @@ function validateChannelBreakdown(v: unknown): boolean {
 
 // W5 — shape of the server-reported send outcome persisted on the
 // confirm_send widget after dispatch. Mirrors the audit counters in
-// `runConfirmSend`: email/sms = successful deliveries, skipped = rows
-// the router intentionally bypassed (already-sent / unsubscribed /
-// no-contact), failed = provider errors that hit the retry queue.
+// `runConfirmSend`: email/sms/whatsapp = successful deliveries per
+// channel, skipped = rows the router intentionally bypassed
+// (already-sent / unsubscribed / no-contact), failed = provider
+// errors that hit the retry queue. `whatsapp` is an additive field
+// (P13-D.2) — a legacy two-channel send still passes the gate with
+// whatsapp=0. Required (not optional) because the outcome writer
+// in `confirm-flow.ts:242-251` ALWAYS populates it now, so a blob
+// missing `whatsapp` is evidence of schema drift between the writer
+// and the validator.
 function validateConfirmSendResult(v: unknown): boolean {
   if (!isPlainObject(v)) return false;
   if (!isFiniteNumber(v.email)) return false;
   if (!isFiniteNumber(v.sms)) return false;
+  if (!isFiniteNumber(v.whatsapp)) return false;
   if (!isFiniteNumber(v.skipped)) return false;
   if (!isFiniteNumber(v.failed)) return false;
+  return true;
+}
+
+// P13-D.2 — WhatsApp template identity for the ConfirmSend preview.
+// Meta identifies an approved template by the (name, language) pair,
+// and the actual template body lives on Meta's side — our Campaign
+// row only stores the identity. When WA is configured the preview
+// shows the identity so the operator can sanity-check they picked
+// the right template. Null when either field is missing (matches
+// the `no_whatsapp_template` blocker predicate).
+function validateWhatsAppTemplateLabel(v: unknown): boolean {
+  if (v === null) return true;
+  if (!isPlainObject(v)) return false;
+  if (!isNonEmptyString(v.name)) return false;
+  if (!isNonEmptyString(v.language)) return false;
   return true;
 }
 
@@ -390,10 +419,22 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isPlainObject(p.by_channel)) return false;
   if (!validateChannelBreakdown(p.by_channel.email)) return false;
   if (!validateChannelBreakdown(p.by_channel.sms)) return false;
+  // P13-D.2 — WhatsApp bucket uses the same breakdown shape as
+  // email/sms. Required (not optional) so a widget blob missing the
+  // bucket is treated as drift rather than silently defaulted to
+  // zeros. Scalar-email sends still populate this bucket with all
+  // zeros; the card's renderer only shows the row when the value
+  // is non-zero or the channel set includes WhatsApp.
+  if (!validateChannelBreakdown(p.by_channel.whatsapp)) return false;
   if (!isPlainObject(p.template_preview)) return false;
   if (!isStringOrNull(p.template_preview.subject_email)) return false;
   if (!isStringOrNull(p.template_preview.email_body)) return false;
   if (!isStringOrNull(p.template_preview.sms_body)) return false;
+  // P13-D.2 — WhatsApp template identity. Shape: `{name, language} | null`.
+  // See `validateWhatsAppTemplateLabel` for the predicate rationale.
+  if (!validateWhatsAppTemplateLabel(p.template_preview.whatsapp_template)) {
+    return false;
+  }
   if (!isStringArray(p.blockers)) return false;
   // W5 — state drives the renderer. See the `CONFIRM_STATES` comment
   // block above for the full state machine.

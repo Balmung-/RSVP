@@ -54,6 +54,16 @@ export type CampaignForBlockers = {
   templateSms: string | null;
   templateWhatsAppName: string | null;
   templateWhatsAppLanguage: string | null;
+  // JSON-encoded `string[]` of positional expressions the planner
+  // interpolates into Meta's `{{1}}` / `{{2}}` template slots. Stored
+  // as a string so it can be saved verbatim through Prisma, parsed
+  // lazily at send time. A null value means "template takes zero
+  // variables" (perfectly valid); a non-null value that fails to
+  // parse as a string array is a config bug — the planner refuses
+  // with `template_vars_malformed` and `computeBlockers` surfaces it
+  // here so the operator sees the problem in the ConfirmSend card
+  // instead of after clicking.
+  templateWhatsAppVariables: string | null;
 };
 
 // Narrow invitee shape. `invitations` is an array of
@@ -239,11 +249,59 @@ export function computeBlockers(args: {
   // `reason: "no_template"`. Surfacing the blocker here means the
   // operator sees the problem in the ConfirmSend card rather than
   // getting a wall of failed Invitation rows after clicking.
-  if (
-    wantsWhatsApp &&
-    (!campaign.templateWhatsAppName || !campaign.templateWhatsAppLanguage)
-  ) {
+  const whatsAppTemplateConfigured =
+    !!campaign.templateWhatsAppName && !!campaign.templateWhatsAppLanguage;
+  if (wantsWhatsApp && !whatsAppTemplateConfigured) {
     blockers.push("no_whatsapp_template");
   }
+  // `template_vars_malformed` mirrors the planner's Rule 1 inner
+  // guard (`src/lib/providers/whatsapp/sendPlan.ts:98-103`) — after
+  // the (name, language) pair is confirmed configured, the planner
+  // parses `templateWhatsAppVariables` as a JSON string-array and
+  // refuses with `reason: "template_vars_malformed"` if the parse
+  // fails. Only emit when the template itself IS configured (so the
+  // planner would actually reach the parse step) and the stored JSON
+  // is present but unparseable. This matches the planner's control
+  // flow: an unconfigured template short-circuits with `no_template`
+  // before the vars check, so stacking both blockers would confuse
+  // the operator about what to fix first. Null `templateWhatsAppVariables`
+  // is a valid zero-var template (planner leaves `variables`
+  // undefined on the outbound payload), so it is not a blocker.
+  if (
+    wantsWhatsApp &&
+    whatsAppTemplateConfigured &&
+    campaign.templateWhatsAppVariables !== null &&
+    !isParsableWhatsAppVars(campaign.templateWhatsAppVariables)
+  ) {
+    blockers.push("template_vars_malformed");
+  }
   return blockers;
+}
+
+// Mirror of `tryParseStringArray` in `src/lib/providers/whatsapp/sendPlan.ts:158-172`.
+// Duplicated here rather than imported so the blocker helper does
+// not have to reach into a provider-specific module — the only
+// shared behaviour is "is this string a JSON-encoded string[]?",
+// which is trivial enough to duplicate and robust against a future
+// sendPlan refactor that changes the return shape.
+//
+// Returns true iff:
+//   - `JSON.parse(s)` succeeds
+//   - result is an Array
+//   - every entry is a string
+// Anything else (object, number, array-of-objects, malformed JSON)
+// is considered malformed and surfaces `template_vars_malformed`
+// at the blocker layer.
+function isParsableWhatsAppVars(s: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(s);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(parsed)) return false;
+  for (const entry of parsed) {
+    if (typeof entry !== "string") return false;
+  }
+  return true;
 }

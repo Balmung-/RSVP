@@ -464,11 +464,18 @@ test("validateDirective: confirm_send — valid shape round-trips", () => {
           skipped_unsubscribed: 0,
           no_contact: 8,
         },
+        whatsapp: {
+          ready: 0,
+          skipped_already_sent: 0,
+          skipped_unsubscribed: 0,
+          no_contact: 0,
+        },
       },
       template_preview: {
         subject_email: "Invitation",
         email_body: "Body...",
         sms_body: null,
+        whatsapp_template: null,
       },
       blockers: [],
     },
@@ -494,8 +501,14 @@ test("validateDirective: confirm_send — rejects unknown channel", () => {
       by_channel: {
         email: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
         sms: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+        whatsapp: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
       },
-      template_preview: { subject_email: null, email_body: null, sms_body: null },
+      template_preview: {
+        subject_email: null,
+        email_body: null,
+        sms_body: null,
+        whatsapp_template: null,
+      },
       blockers: [],
     },
   };
@@ -522,8 +535,14 @@ test("validateDirective: confirm_send — rejects non-string-array blockers", ()
       by_channel: {
         email: { ready: 1, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
         sms: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+        whatsapp: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
       },
-      template_preview: { subject_email: "s", email_body: "b", sms_body: null },
+      template_preview: {
+        subject_email: "s",
+        email_body: "b",
+        sms_body: null,
+        whatsapp_template: null,
+      },
       blockers: [{ code: "no_invitees" }] as unknown as string[],
     },
   };
@@ -547,10 +566,106 @@ test("validateDirective: confirm_send — rejects incomplete by_channel breakdow
       by_channel: {
         email: { ready: 1, skipped_already_sent: 0, skipped_unsubscribed: 0 }, // no_contact missing
         sms: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+        whatsapp: { ready: 0, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
       },
-      template_preview: { subject_email: null, email_body: null, sms_body: null },
+      template_preview: {
+        subject_email: null,
+        email_body: null,
+        sms_body: null,
+        whatsapp_template: null,
+      },
       blockers: [],
     },
   };
+  assert.equal(validateDirective(d), null);
+});
+
+// ---- P13-D.2: WhatsApp channel + shape widening ----
+//
+// Directive shape mirrors widget shape; the gates are independent
+// (on purpose — see the header comments in widget-validate.ts and
+// directive-validate.ts). Each new invariant gets its own pin here
+// so a future refactor that drifts the two validators apart gets
+// caught on first drift, not when an operator sees a blank card.
+
+function baseConfirmSendDirective() {
+  return {
+    kind: "confirm_send",
+    props: {
+      campaign_id: "c-1",
+      name: "Eid",
+      status: "active",
+      venue: null,
+      event_at: null,
+      locale: "en",
+      channel: "all",
+      only_unsent: true,
+      invitee_total: 1,
+      ready_messages: 3,
+      by_channel: {
+        email: { ready: 1, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+        sms: { ready: 1, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+        whatsapp: { ready: 1, skipped_already_sent: 0, skipped_unsubscribed: 0, no_contact: 0 },
+      },
+      template_preview: {
+        subject_email: "s",
+        email_body: "b",
+        sms_body: "s",
+        whatsapp_template: { name: "rsvp_v1", language: "ar" },
+      },
+      blockers: [],
+    },
+  };
+}
+
+test("validateDirective: confirm_send — accepts channel: whatsapp", () => {
+  const d = baseConfirmSendDirective();
+  d.props.channel = "whatsapp";
+  assert.ok(validateDirective(d));
+});
+
+test("validateDirective: confirm_send — accepts channel: all", () => {
+  // The full "all" shape — WA template populated, every per-channel
+  // bucket carrying ready counts. This is the canonical green-path
+  // directive for a post-P13 send.
+  assert.ok(validateDirective(baseConfirmSendDirective()));
+});
+
+test("validateDirective: confirm_send — rejects missing by_channel.whatsapp", () => {
+  const d = baseConfirmSendDirective();
+  const bc = d.props.by_channel as Record<string, unknown>;
+  delete bc.whatsapp;
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects missing template_preview.whatsapp_template", () => {
+  const d = baseConfirmSendDirective();
+  const tp = d.props.template_preview as Record<string, unknown>;
+  delete tp.whatsapp_template;
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_template missing language", () => {
+  const d = baseConfirmSendDirective();
+  d.props.template_preview.whatsapp_template = { name: "x" } as unknown as {
+    name: string;
+    language: string;
+  };
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_template empty name", () => {
+  const d = baseConfirmSendDirective();
+  d.props.template_preview.whatsapp_template = { name: "", language: "ar" };
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_template non-object", () => {
+  // String / number / true would pass a shallow `!= null` guard but
+  // not the object-shape check. Covering this pins the branching in
+  // `validateWhatsAppTemplateLabel`.
+  const d = baseConfirmSendDirective();
+  (d.props.template_preview as Record<string, unknown>).whatsapp_template =
+    "rsvp_v1:ar";
   assert.equal(validateDirective(d), null);
 });

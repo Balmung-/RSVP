@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { hasRole } from "@/lib/auth";
+import { channelSetFor } from "@/lib/campaigns";
 import { confirmSendWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
@@ -44,7 +45,13 @@ import { loadAudience, computeBlockers } from "./send-blockers";
 // the number that actually lands, so unsubscribed contacts are
 // subtracted from the ready count and reported separately.
 
-type Channel = "email" | "sms" | "both";
+// Channel vocabulary widened in P13-D.2 to match the runtime
+// orchestrators and the shared `computeBlockers` helper. `"both"`
+// is preserved as email+SMS only (pre-P13 invariant — every
+// legacy caller passes "both" against an email/SMS-only contract),
+// and `"all"` is the new umbrella that adds WhatsApp. Narrower
+// scalars ("whatsapp") pick a single channel.
+type Channel = "email" | "sms" | "whatsapp" | "both" | "all";
 
 type Input = {
   campaign_id: string;
@@ -79,9 +86,9 @@ export const proposeSendTool: ToolDef<Input> = {
       },
       channel: {
         type: "string",
-        enum: ["email", "sms", "both"],
+        enum: ["email", "sms", "whatsapp", "both", "all"],
         description:
-          "Which channel(s) to preview. Defaults to `both`. Matches `sendCampaign`'s channel semantics.",
+          "Which channel(s) to preview. Defaults to `both`. `both` = email + SMS (pre-P13 invariant — does NOT include WhatsApp so legacy callers cannot silently start sending Meta-brokered messages on deploy). `all` = email + SMS + WhatsApp. Scalars (`email`, `sms`, `whatsapp`) pick one channel.",
       },
       only_unsent: {
         type: "boolean",
@@ -99,7 +106,13 @@ export const proposeSendTool: ToolDef<Input> = {
       throw new Error("campaign_id:string_required");
     }
     const out: Input = { campaign_id: r.campaign_id };
-    if (r.channel === "email" || r.channel === "sms" || r.channel === "both") {
+    if (
+      r.channel === "email" ||
+      r.channel === "sms" ||
+      r.channel === "whatsapp" ||
+      r.channel === "both" ||
+      r.channel === "all"
+    ) {
       out.channel = r.channel;
     }
     if (typeof r.only_unsent === "boolean") out.only_unsent = r.only_unsent;
@@ -146,9 +159,13 @@ export const proposeSendTool: ToolDef<Input> = {
         // channel set includes WhatsApp and the template is not
         // fully configured. Harmless for the email/SMS paths —
         // the blocker helper only reads these when the channel
-        // set includes whatsapp.
+        // set includes whatsapp. `templateWhatsAppVariables` is
+        // the JSON-encoded positional-var array; a non-null value
+        // that fails to parse surfaces `template_vars_malformed`
+        // so the operator fixes the config before clicking send.
         templateWhatsAppName: true,
         templateWhatsAppLanguage: true,
+        templateWhatsAppVariables: true,
         teamId: true,
       },
     });
@@ -166,6 +183,18 @@ export const proposeSendTool: ToolDef<Input> = {
     const audience = await loadAudience(campaign.id);
     const { invitees, unsubEmails, unsubPhones } = audience;
 
+    // Resolve the channel set via the shared resolver so `"both"` /
+    // `"all"` / scalar channels collapse to the same concrete Set
+    // the real send path uses (`channelSetFor` is the single source
+    // of truth — see `src/lib/campaigns.ts:channelSetFor`). This
+    // keeps the bucket loop below byte-for-byte symmetric with
+    // `hasReadyMessage` in send-blockers.ts and with the per-channel
+    // dispatch branches in `sendCampaign`.
+    const chans = channelSetFor(channel);
+    const wantsEmail = chans.has("email");
+    const wantsSms = chans.has("sms");
+    const wantsWhatsApp = chans.has("whatsapp");
+
     const emailBucket: ChannelBreakdown = {
       ready: 0,
       skipped_already_sent: 0,
@@ -173,6 +202,19 @@ export const proposeSendTool: ToolDef<Input> = {
       no_contact: 0,
     };
     const smsBucket: ChannelBreakdown = {
+      ready: 0,
+      skipped_already_sent: 0,
+      skipped_unsubscribed: 0,
+      no_contact: 0,
+    };
+    // WhatsApp bucket is computed identically to the SMS bucket
+    // (same `phoneE164` contact field, same `unsubPhones` shared
+    // set per the Unsubscribe table's channel-less phone column).
+    // The only difference is the `invitations.channel === "whatsapp"`
+    // filter for already-sent detection — an invitee who received
+    // an SMS does not count as "already sent WhatsApp" and vice
+    // versa. This mirrors the planner's channel-scoped dedupe.
+    const whatsAppBucket: ChannelBreakdown = {
       ready: 0,
       skipped_already_sent: 0,
       skipped_unsubscribed: 0,
@@ -186,7 +228,10 @@ export const proposeSendTool: ToolDef<Input> = {
       const hasSmsSent = inv.invitations.some(
         (x) => x.channel === "sms" && x.status !== "failed",
       );
-      if (channel === "email" || channel === "both") {
+      const hasWhatsAppSent = inv.invitations.some(
+        (x) => x.channel === "whatsapp" && x.status !== "failed",
+      );
+      if (wantsEmail) {
         if (!inv.email) {
           emailBucket.no_contact += 1;
         } else if (onlyUnsent && hasEmailSent) {
@@ -197,7 +242,7 @@ export const proposeSendTool: ToolDef<Input> = {
           emailBucket.ready += 1;
         }
       }
-      if (channel === "sms" || channel === "both") {
+      if (wantsSms) {
         if (!inv.phoneE164) {
           smsBucket.no_contact += 1;
         } else if (onlyUnsent && hasSmsSent) {
@@ -208,19 +253,31 @@ export const proposeSendTool: ToolDef<Input> = {
           smsBucket.ready += 1;
         }
       }
+      if (wantsWhatsApp) {
+        if (!inv.phoneE164) {
+          whatsAppBucket.no_contact += 1;
+        } else if (onlyUnsent && hasWhatsAppSent) {
+          whatsAppBucket.skipped_already_sent += 1;
+        } else if (unsubPhones.has(inv.phoneE164)) {
+          whatsAppBucket.skipped_unsubscribed += 1;
+        } else {
+          whatsAppBucket.ready += 1;
+        }
+      }
     }
 
     // `ready_messages` is a JOB count — one `(invitee, channel)`
     // pair is one job, matching `sendCampaign`'s planner
     // (`src/lib/campaigns.ts:218-229`) which enqueues one message
-    // per pair. An invitee on channel=both with both email and SMS
-    // contributes 2 to this count, not 1. Naming reflects the
-    // semantics: operators see `Messages ready: 2` next to
-    // `Invitees: 1` and know the card is describing sends, not
-    // heads. Documented here because the previous name
+    // per pair. An invitee on channel=all with email + phone
+    // contributes 3 (email, sms, whatsapp) to this count. Naming
+    // reflects the semantics: operators see `Messages ready: 3`
+    // next to `Invitees: 1` and know the card is describing sends,
+    // not heads. Documented here because the previous name
     // `ready_total` was ambiguous and the ConfirmSend copy framed
     // the same number as a recipient count (GPT, Push 6c review).
-    const readyMessages = emailBucket.ready + smsBucket.ready;
+    const readyMessages =
+      emailBucket.ready + smsBucket.ready + whatsAppBucket.ready;
 
     // Blockers via the shared helper — same codes send_campaign
     // enforces at confirm time, same ordering the directive
@@ -234,6 +291,7 @@ export const proposeSendTool: ToolDef<Input> = {
         templateSms: campaign.templateSms,
         templateWhatsAppName: campaign.templateWhatsAppName,
         templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+        templateWhatsAppVariables: campaign.templateWhatsAppVariables,
       },
       audience,
       channel,
@@ -250,18 +308,29 @@ export const proposeSendTool: ToolDef<Input> = {
     summaryLines.push(
       `Propose send for "${campaign.name}" [${campaign.status}]: channel=${channel}, only_unsent=${onlyUnsent}.`,
     );
+    // Per-channel breakdown in the summary is built dynamically so
+    // scalar channels (e.g. `"whatsapp"`) don't say "email 0, sms 0,
+    // whatsapp N" — the model's transcript should mirror what the
+    // operator asked for. `"both"` says "email N, sms M" (not
+    // whatsapp); `"all"` adds the third entry.
+    const readyParts: string[] = [];
+    if (wantsEmail) readyParts.push(`email ${emailBucket.ready}`);
+    if (wantsSms) readyParts.push(`sms ${smsBucket.ready}`);
+    if (wantsWhatsApp) readyParts.push(`whatsapp ${whatsAppBucket.ready}`);
     summaryLines.push(
-      `${invitees.length} invitee${invitees.length === 1 ? "" : "s"}; ${readyMessages} message${readyMessages === 1 ? "" : "s"} ready to send (email ${emailBucket.ready}, sms ${smsBucket.ready}).`,
+      `${invitees.length} invitee${invitees.length === 1 ? "" : "s"}; ${readyMessages} message${readyMessages === 1 ? "" : "s"} ready to send (${readyParts.join(", ")}).`,
     );
-    if (
+    const skippedAlreadySent =
       emailBucket.skipped_already_sent +
-        smsBucket.skipped_already_sent +
-        emailBucket.skipped_unsubscribed +
-        smsBucket.skipped_unsubscribed >
-      0
-    ) {
+      smsBucket.skipped_already_sent +
+      whatsAppBucket.skipped_already_sent;
+    const skippedUnsub =
+      emailBucket.skipped_unsubscribed +
+      smsBucket.skipped_unsubscribed +
+      whatsAppBucket.skipped_unsubscribed;
+    if (skippedAlreadySent + skippedUnsub > 0) {
       summaryLines.push(
-        `Skipped: already-sent ${emailBucket.skipped_already_sent + smsBucket.skipped_already_sent}, unsubscribed ${emailBucket.skipped_unsubscribed + smsBucket.skipped_unsubscribed}.`,
+        `Skipped: already-sent ${skippedAlreadySent}, unsubscribed ${skippedUnsub}.`,
       );
     }
     if (blockers.length > 0) {
@@ -280,6 +349,23 @@ export const proposeSendTool: ToolDef<Input> = {
     // is client-local during the POST window and never hits the DB.
     const state: "ready" | "blocked" = blockers.length > 0 ? "blocked" : "ready";
 
+    // WhatsApp template identity for the preview card. Unlike the
+    // email / SMS bodies (which live on the Campaign row and render
+    // verbatim), the actual WhatsApp template body lives on Meta's
+    // side — campaigns store only the (name, language) pair that
+    // identifies an approved template. The ConfirmSend card shows
+    // these so the operator can sanity-check they picked the right
+    // template; the rendered message content is a property of Meta's
+    // approved copy, not ours. Null when either field is missing
+    // (matches the `no_whatsapp_template` blocker predicate).
+    const whatsAppTemplateLabel =
+      campaign.templateWhatsAppName && campaign.templateWhatsAppLanguage
+        ? {
+            name: campaign.templateWhatsAppName,
+            language: campaign.templateWhatsAppLanguage,
+          }
+        : null;
+
     const props = {
       campaign_id: campaign.id,
       name: campaign.name,
@@ -294,11 +380,13 @@ export const proposeSendTool: ToolDef<Input> = {
       by_channel: {
         email: emailBucket,
         sms: smsBucket,
+        whatsapp: whatsAppBucket,
       },
       template_preview: {
         subject_email: clip(campaign.subjectEmail, SUBJECT_PREVIEW_CHARS),
         email_body: clip(campaign.templateEmail, BODY_PREVIEW_CHARS),
         sms_body: clip(campaign.templateSms, BODY_PREVIEW_CHARS),
+        whatsapp_template: whatsAppTemplateLabel,
       },
       blockers,
       state,

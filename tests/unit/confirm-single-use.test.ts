@@ -175,9 +175,16 @@ test("runConfirmSend: first POST wins, dispatches, audits, persists, 200", async
   const outcome = rec.markOutcomeCalls[0].args;
   assert.equal(outcome.state, "done");
   if (outcome.state === "done") {
+    // P13-D.2 — `whatsapp` is required on the persisted outcome. The
+    // dispatch output here doesn't carry it (pre-P13 fixture shape);
+    // the outcome writer's `asFiniteNumber` defensively coerces the
+    // missing field to 0. That coercion is load-bearing: it keeps old
+    // transcript replays and abbreviated test fixtures landing on a
+    // validator-clean shape.
     assert.deepEqual(outcome.result, {
       email: 2,
       sms: 1,
+      whatsapp: 0,
       skipped: 0,
       failed: 0,
     });
@@ -360,4 +367,81 @@ test("runConfirmSend: non-releasable structured refusal also keeps the claim hel
   );
   assert.equal(resp.status, 400);
   assert.equal(rec.releaseCalls.length, 0);
+});
+
+// ---- P13-D.2: WhatsApp counter in the outcome writer ----
+
+test("runConfirmSend: WhatsApp counter from dispatch output flows into persisted outcome", async () => {
+  // The end-to-end wiring: `send_campaign` returns `{email, sms,
+  // whatsapp, skipped, failed}` → confirm-flow reads each counter
+  // off `output` → W5 writer persists the widget row with the full
+  // shape. Pinning this catches the regression where a channel field
+  // gets dropped somewhere in the pipe (validator, outcome writer,
+  // or the `rec.whatsapp` read in confirm-flow.ts).
+  const rec = buildPort({
+    dispatchResult: {
+      ok: true,
+      result: {
+        output: {
+          sent: 6,
+          email: 2,
+          sms: 1,
+          whatsapp: 3,
+          skipped: 0,
+          failed: 0,
+          summary: "Sent 6: 2 email, 1 sms, 3 whatsapp",
+        },
+      },
+    },
+  });
+  const resp = await runConfirmSend(
+    makeRow(),
+    "m-1",
+    { campaign_id: "c-1", channel: "all" },
+    fakeCtx,
+    rec.port,
+  );
+  assert.equal(resp.status, 200);
+  assert.equal(rec.markOutcomeCalls.length, 1);
+  const outcome = rec.markOutcomeCalls[0].args;
+  assert.equal(outcome.state, "done");
+  if (outcome.state === "done") {
+    assert.equal(outcome.result.whatsapp, 3);
+    assert.equal(outcome.result.email, 2);
+    assert.equal(outcome.result.sms, 1);
+  }
+});
+
+test("runConfirmSend: non-finite whatsapp counter coerces to 0 in outcome", async () => {
+  // Defensive — if a handler bug emits `NaN` or `Infinity`, the
+  // outcome writer must still produce a validator-clean blob. The
+  // validator's `isFiniteNumber` rejects both, which would drop the
+  // widget write. `asFiniteNumber` is the load-bearing coercion here.
+  const rec = buildPort({
+    dispatchResult: {
+      ok: true,
+      result: {
+        output: {
+          sent: 1,
+          email: 1,
+          sms: 0,
+          whatsapp: Number.NaN,
+          skipped: 0,
+          failed: 0,
+        },
+      },
+    },
+  });
+  await runConfirmSend(
+    makeRow(),
+    "m-1",
+    {},
+    fakeCtx,
+    rec.port,
+  );
+  const outcome = rec.markOutcomeCalls[0].args;
+  assert.equal(outcome.state, "done");
+  if (outcome.state === "done") {
+    assert.equal(outcome.result.whatsapp, 0);
+  }
 });

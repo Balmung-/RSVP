@@ -34,7 +34,11 @@ import { loadAudience, computeBlockers } from "./send-blockers";
 // it and prevent the preview). See the propose_send file-top comment
 // for the long form.
 
-type Channel = "email" | "sms" | "both";
+// Channel vocabulary mirrors `propose_send`'s Input type and
+// `SendCampaignChannel` in `@/lib/campaigns`. `"both"` is preserved
+// as email+SMS (pre-P13 invariant); `"all"` is the umbrella that
+// adds WhatsApp. Scalar values pick a single channel.
+type Channel = "email" | "sms" | "whatsapp" | "both" | "all";
 
 type Input = {
   campaign_id: string;
@@ -59,9 +63,9 @@ export const sendCampaignTool: ToolDef<Input> = {
       },
       channel: {
         type: "string",
-        enum: ["email", "sms", "both"],
+        enum: ["email", "sms", "whatsapp", "both", "all"],
         description:
-          "Which channel(s) to send on. Defaults to `both`. Mirrors `sendCampaign`'s semantics.",
+          "Which channel(s) to send on. Defaults to `both`. `both` = email + SMS (pre-P13 invariant — legacy callers remain on two-channel semantics). `all` = email + SMS + WhatsApp. Scalars pick one channel. Mirrors `sendCampaign`'s `SendCampaignChannel` vocabulary.",
       },
       only_unsent: {
         type: "boolean",
@@ -79,7 +83,13 @@ export const sendCampaignTool: ToolDef<Input> = {
       throw new Error("campaign_id:string_required");
     }
     const out: Input = { campaign_id: r.campaign_id };
-    if (r.channel === "email" || r.channel === "sms" || r.channel === "both") {
+    if (
+      r.channel === "email" ||
+      r.channel === "sms" ||
+      r.channel === "whatsapp" ||
+      r.channel === "both" ||
+      r.channel === "all"
+    ) {
       out.channel = r.channel;
     }
     if (typeof r.only_unsent === "boolean") out.only_unsent = r.only_unsent;
@@ -128,9 +138,14 @@ export const sendCampaignTool: ToolDef<Input> = {
         // the blocker helper's server-side re-check is complete
         // regardless of what `channel` the caller asked for — a
         // forged/rehydrated POST asking for "whatsapp" still hits
-        // the blocker path correctly.
+        // the blocker path correctly. `templateWhatsAppVariables`
+        // feeds the same helper's `template_vars_malformed` gate
+        // (mirrors the planner's Rule 1 inner parse step so a
+        // malformed JSON config is refused at confirm time rather
+        // than at provider dispatch).
         templateWhatsAppName: true,
         templateWhatsAppLanguage: true,
+        templateWhatsAppVariables: true,
       },
     });
     if (!campaign) {
@@ -204,6 +219,7 @@ export const sendCampaignTool: ToolDef<Input> = {
         templateSms: campaign.templateSms,
         templateWhatsAppName: campaign.templateWhatsAppName,
         templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+        templateWhatsAppVariables: campaign.templateWhatsAppVariables,
       },
       audience,
       channel,
@@ -240,10 +256,30 @@ export const sendCampaignTool: ToolDef<Input> = {
       };
     }
 
-    const total = result.email + result.sms;
+    // `total` is the sum of successful deliveries across all
+    // dispatched channels. `sendCampaign`'s return gained a
+    // `whatsapp: number` counter in P13-C (additive widening — old
+    // callers ignoring unknown keys see no change); fold it in here
+    // so the operator-visible tally matches what actually landed.
+    const total = result.email + result.sms + result.whatsapp;
     const summaryLines: string[] = [];
+    // Per-channel breakdown in the summary is only emitted for the
+    // channels the caller asked for (so a `"whatsapp"` scalar send
+    // doesn't say "0 email, 0 sms, N whatsapp"). The check uses the
+    // same `channelSetFor` resolution `computeBlockers` and
+    // `sendCampaign` use, keeping the three surfaces symmetric.
+    const breakdown: string[] = [];
+    if (channel === "email" || channel === "both" || channel === "all") {
+      breakdown.push(`${result.email} email`);
+    }
+    if (channel === "sms" || channel === "both" || channel === "all") {
+      breakdown.push(`${result.sms} sms`);
+    }
+    if (channel === "whatsapp" || channel === "all") {
+      breakdown.push(`${result.whatsapp} whatsapp`);
+    }
     summaryLines.push(
-      `Sent ${total} message${total === 1 ? "" : "s"} for "${campaign.name}": ${result.email} email, ${result.sms} sms.`,
+      `Sent ${total} message${total === 1 ? "" : "s"} for "${campaign.name}": ${breakdown.join(", ")}.`,
     );
     if (result.skipped > 0) summaryLines.push(`Skipped ${result.skipped}.`);
     if (result.failed > 0) {
@@ -260,6 +296,13 @@ export const sendCampaignTool: ToolDef<Input> = {
         only_unsent: onlyUnsent,
         email: result.email,
         sms: result.sms,
+        // Additive field — pre-P13 consumers reading only `email` /
+        // `sms` / `skipped` / `failed` see identical behaviour on
+        // two-channel sends (whatsapp stays 0). A `"whatsapp"` or
+        // `"all"` send surfaces the counter so the confirm route's
+        // outcome writer can persist it onto the widget blob and
+        // the transcript can cite it.
+        whatsapp: result.whatsapp,
         skipped: result.skipped,
         failed: result.failed,
         summary: summaryLines.join(" "),

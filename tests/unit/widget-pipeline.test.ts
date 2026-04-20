@@ -352,11 +352,24 @@ test("pipeline: confirm_send writer and confirm-route reader land on the SAME ro
         skipped_unsubscribed: 0,
         no_contact: 0,
       },
+      // P13-D.2 — `whatsapp` bucket is required on every post-P13
+      // confirm_send blob; validators reject the shape otherwise so
+      // the upsert below would drop the row and the reader would
+      // find nothing — which would misleadingly look like a
+      // writer/reader key divergence (the invariant this test is
+      // actually pinning).
+      whatsapp: {
+        ready: 0,
+        skipped_already_sent: 0,
+        skipped_unsubscribed: 0,
+        no_contact: 0,
+      },
     },
     template_preview: {
       subject_email: "Hi",
       email_body: "Body",
       sms_body: null,
+      whatsapp_template: null,
     },
     blockers: [],
     state: "ready" as const,
