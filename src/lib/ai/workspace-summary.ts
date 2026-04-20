@@ -67,7 +67,23 @@ export type WorkspaceRollupProps = {
     declined: number;
     recent_24h: number;
   };
-  invitations: { sent_24h: number };
+  // P13-E — `sent_24h` is the channel-agnostic aggregate kept for the
+  // compact "how much went out today" read. The three per-channel
+  // counters join it so the operator can see the WhatsApp rollout
+  // progress on the same strip that already shows email/SMS. We keep
+  // both the aggregate AND the breakdown rather than deriving one from
+  // the other: an authoritative aggregate lets a future channel land
+  // (e.g. push notifications) without silently under-counting the
+  // total until the validator + renderer catch up, and an explicit
+  // breakdown removes the "is it really three channels or was one
+  // dropped" ambiguity the `Xe / Ys / Zw` campaign_card row also
+  // answers.
+  invitations: {
+    sent_24h: number;
+    sent_email_24h: number;
+    sent_sms_24h: number;
+    sent_whatsapp_24h: number;
+  };
   generated_at: string;
 };
 
@@ -115,7 +131,28 @@ export async function computeWorkspaceRollup(
   // active | closed | archived` by convention); any row with an
   // unrecognised value falls out of the four buckets but still
   // contributes to `total` via the separate count below.
-  const [statusGroups, campaignTotal, inviteeTotal, responseTotal, attending, declined, recent24h, sent24h] = await Promise.all([
+  // Shared base for every Invitation count below — status whitelist +
+  // campaign scope + 24h cutoff. Extracted so a future channel addition
+  // only needs a new channel-filtered entry rather than touching four
+  // clauses. Each per-channel count adds `channel: "..."` on top.
+  const inv24hBase: Prisma.InvitationWhereInput = {
+    campaign: campaignScope,
+    status: { in: ["sent", "delivered"] },
+    sentAt: { gte: cutoff24h },
+  };
+  const [
+    statusGroups,
+    campaignTotal,
+    inviteeTotal,
+    responseTotal,
+    attending,
+    declined,
+    recent24h,
+    sent24h,
+    sentEmail24h,
+    sentSms24h,
+    sentWhatsApp24h,
+  ] = await Promise.all([
     prismaLike.campaign.groupBy({
       by: ["status"],
       where: campaignScope,
@@ -147,12 +184,25 @@ export async function computeWorkspaceRollup(
     // whose status reached sent/delivered in the last 24 hours; a
     // `failed` or `bounced` row doesn't count because it's not a
     // successful delivery from the operator's perspective.
+    //
+    // P13-E — `sent_24h` stays as the channel-agnostic aggregate
+    // (still the right number for "anything went out in 24h"). The
+    // three per-channel counts below run as separate queries filtered
+    // on `channel` so the rollup shows the same Xe / Ys / Zw split
+    // that `campaign_card` gained in D.3. A single groupBy would be
+    // cheaper, but it would require a second aggregate pass to
+    // compute the total — keeping the aggregate as its own query
+    // means the total stays honest even if a future channel lands
+    // before the per-channel counters are updated.
+    prismaLike.invitation.count({ where: inv24hBase }),
     prismaLike.invitation.count({
-      where: {
-        campaign: campaignScope,
-        status: { in: ["sent", "delivered"] },
-        sentAt: { gte: cutoff24h },
-      },
+      where: { ...inv24hBase, channel: "email" },
+    }),
+    prismaLike.invitation.count({
+      where: { ...inv24hBase, channel: "sms" },
+    }),
+    prismaLike.invitation.count({
+      where: { ...inv24hBase, channel: "whatsapp" },
     }),
   ]);
 
@@ -188,7 +238,12 @@ export async function computeWorkspaceRollup(
       declined,
       recent_24h: recent24h,
     },
-    invitations: { sent_24h: sent24h },
+    invitations: {
+      sent_24h: sent24h,
+      sent_email_24h: sentEmail24h,
+      sent_sms_24h: sentSms24h,
+      sent_whatsapp_24h: sentWhatsApp24h,
+    },
     generated_at: now.toISOString(),
   };
 }

@@ -58,7 +58,14 @@ type RollupStub = {
     attending: number;
     declined: number;
     recent24h: number;
+    // P13-E — `sent24h` is the channel-agnostic aggregate; the three
+    // per-channel counters drive the new per-channel Invitation queries.
+    // Keeping them all on state (rather than deriving sent24h from the
+    // three) means each compute test pins exactly the count it set.
     sent24h: number;
+    sentEmail24h: number;
+    sentSms24h: number;
+    sentWhatsApp24h: number;
   };
 };
 
@@ -75,6 +82,9 @@ function makeRollupStub(overrides?: Partial<RollupStub["state"]>): RollupStub {
     declined: 0,
     recent24h: 0,
     sent24h: 0,
+    sentEmail24h: 0,
+    sentSms24h: 0,
+    sentWhatsApp24h: 0,
     ...overrides,
   };
   const tick = () => new Date((state.nowMs += 1));
@@ -161,6 +171,16 @@ function makeRollupStub(overrides?: Partial<RollupStub["state"]>): RollupStub {
     invitation: {
       async count(args) {
         state.calls.push({ table: "invitation.count", where: args.where });
+        // P13-E — four queries hit this stub per compute call:
+        // one aggregate (no `channel` filter) and one each for
+        // email / sms / whatsapp. Branch on the `channel` field so the
+        // stub returns the per-channel count the test set up; the
+        // aggregate path falls through to `sent24h` unchanged so the
+        // pre-P13-E compute-correctness tests remain honest.
+        const w = args.where as Record<string, unknown>;
+        if (w.channel === "email") return state.sentEmail24h;
+        if (w.channel === "sms") return state.sentSms24h;
+        if (w.channel === "whatsapp") return state.sentWhatsApp24h;
         return state.sent24h;
       },
     },
@@ -175,7 +195,17 @@ const validRollupProps = {
   campaigns: { draft: 2, active: 1, closed: 3, archived: 0, total: 6 },
   invitees: { total: 150 },
   responses: { total: 90, attending: 60, declined: 30, recent_24h: 10 },
-  invitations: { sent_24h: 45 },
+  // P13-E — per-channel split joined the rollup. The aggregate
+  // `sent_24h` stays as the channel-agnostic "anything went out today"
+  // read; the three per-channel counts sum to the aggregate in this
+  // fixture but the compute function runs them as independent queries
+  // so the validator doesn't enforce equality.
+  invitations: {
+    sent_24h: 45,
+    sent_email_24h: 30,
+    sent_sms_24h: 12,
+    sent_whatsapp_24h: 3,
+  },
   generated_at: "2026-04-19T12:00:00.000Z",
 };
 
@@ -230,6 +260,47 @@ test("validator: rejects missing nested sections", () => {
   assert.equal(validateWidgetProps("workspace_rollup", noInvitations), false);
 });
 
+test("validator: rejects missing per-channel invitation counter (P13-E)", () => {
+  // Pre-P13-E rollup blobs carried only `sent_24h`. Now that the
+  // compute function emits three per-channel fields on every refresh,
+  // the validator rejects any blob that lacks one — silent zero-fill
+  // would make the renderer's `0w` cell indistinguishable from "field
+  // missing, pretending to be zero", exactly the drift bug `campaign_card`
+  // gained the same gate for in D.3.
+  const missingEmail = {
+    ...validRollupProps,
+    invitations: { ...validRollupProps.invitations },
+  };
+  delete (missingEmail.invitations as Record<string, unknown>).sent_email_24h;
+  assert.equal(validateWidgetProps("workspace_rollup", missingEmail), false);
+
+  const missingSms = {
+    ...validRollupProps,
+    invitations: { ...validRollupProps.invitations },
+  };
+  delete (missingSms.invitations as Record<string, unknown>).sent_sms_24h;
+  assert.equal(validateWidgetProps("workspace_rollup", missingSms), false);
+
+  const missingWhatsApp = {
+    ...validRollupProps,
+    invitations: { ...validRollupProps.invitations },
+  };
+  delete (missingWhatsApp.invitations as Record<string, unknown>)
+    .sent_whatsapp_24h;
+  assert.equal(
+    validateWidgetProps("workspace_rollup", missingWhatsApp),
+    false,
+  );
+
+  // A float or NaN on the new per-channel counters is also rejected,
+  // matching the existing per-campaign-counter behaviour.
+  const floatWhatsApp = {
+    ...validRollupProps,
+    invitations: { ...validRollupProps.invitations, sent_whatsapp_24h: 1.5 },
+  };
+  assert.equal(validateWidgetProps("workspace_rollup", floatWhatsApp), false);
+});
+
 test("validator: rejects missing / non-string generated_at", () => {
   const missing = { ...validRollupProps };
   delete (missing as Record<string, unknown>).generated_at;
@@ -258,6 +329,12 @@ test("compute: returns every counter in the expected shape", async () => {
     declined: 4,
     recent24h: 3,
     sent24h: 7,
+    // P13-E — independent per-channel counts. The stub branches on
+    // the `channel` filter so each query returns exactly what the
+    // test set up here rather than always returning `sent24h`.
+    sentEmail24h: 4,
+    sentSms24h: 2,
+    sentWhatsApp24h: 1,
   });
   const now = new Date("2026-04-19T12:00:00.000Z");
   const props = await computeWorkspaceRollup(prismaLike, {}, now);
@@ -276,7 +353,11 @@ test("compute: returns every counter in the expected shape", async () => {
     declined: 4,
     recent_24h: 3,
   });
+  // Aggregate + per-channel split all flow through.
   assert.equal(props.invitations.sent_24h, 7);
+  assert.equal(props.invitations.sent_email_24h, 4);
+  assert.equal(props.invitations.sent_sms_24h, 2);
+  assert.equal(props.invitations.sent_whatsapp_24h, 1);
   assert.equal(props.generated_at, "2026-04-19T12:00:00.000Z");
   // Own validator accepts what we just produced — pins the drift
   // defence at its tightest.
@@ -350,12 +431,26 @@ test("compute: passes campaignScope through unchanged at every call site", async
     );
   }
 
-  const invitationCount = state.calls.find(
+  // P13-E — four invitation.count calls now: one aggregate + one each
+  // for email / sms / whatsapp. Every one must pass the scope fragment
+  // through intact — the Push 2 scope-leak pattern regressing on a
+  // new-channel filter would silently mis-scope WhatsApp numbers.
+  const invitationCalls = state.calls.filter(
     (c) => c.table === "invitation.count",
   );
-  assert.ok(invitationCount);
-  const invWhere = invitationCount!.where as Record<string, unknown>;
-  assert.deepEqual(invWhere.campaign, campaignScope);
+  assert.equal(
+    invitationCalls.length,
+    4,
+    "expected 4 invitation.count calls (aggregate + 3 channels)",
+  );
+  for (const inv of invitationCalls) {
+    const w = inv.where as Record<string, unknown>;
+    assert.deepEqual(
+      w.campaign,
+      campaignScope,
+      "scope fragment preserved on invitation.count",
+    );
+  }
 });
 
 test("compute: invitation count filters to successful deliveries in 24h", async () => {
@@ -363,16 +458,48 @@ test("compute: invitation count filters to successful deliveries in 24h", async 
   const now = new Date("2026-04-19T12:00:00.000Z");
   await computeWorkspaceRollup(prismaLike, {}, now);
 
-  const invitationCount = state.calls.find(
+  // P13-E — the status + sentAt filter must be carried on EVERY
+  // invitation.count call (aggregate + 3 per-channel), not just the
+  // aggregate. A channel-filtered query that omitted the status gate
+  // would count failed / bounced rows and inflate the per-channel
+  // breakdown past the aggregate, which is exactly the kind of
+  // silent-drift bug the pin here is supposed to catch.
+  const invitationCalls = state.calls.filter(
     (c) => c.table === "invitation.count",
   );
-  const w = invitationCount!.where as Record<string, unknown>;
-  // Status filter excludes failed / bounced / queued.
-  assert.deepEqual(w.status, { in: ["sent", "delivered"] });
-  // sentAt cutoff is exactly 24h before `now`.
-  const sentAt = w.sentAt as Record<string, Date>;
+  assert.equal(invitationCalls.length, 4);
   const expectedCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  assert.equal(sentAt.gte.getTime(), expectedCutoff.getTime());
+  for (const inv of invitationCalls) {
+    const w = inv.where as Record<string, unknown>;
+    assert.deepEqual(w.status, { in: ["sent", "delivered"] });
+    const sentAt = w.sentAt as Record<string, Date>;
+    assert.equal(sentAt.gte.getTime(), expectedCutoff.getTime());
+  }
+});
+
+test("compute: per-channel invitation counts filter on the correct channel string (P13-E)", async () => {
+  // Each per-channel query must set `channel: "email"` / "sms" /
+  // "whatsapp" explicitly. Missing the channel filter would return
+  // the aggregate count under every per-channel key — the bucket
+  // numbers would match but the breakdown wouldn't mean anything.
+  const { prismaLike, state } = makeRollupStub();
+  await computeWorkspaceRollup(prismaLike, {});
+
+  const invitationCalls = state.calls.filter(
+    (c) => c.table === "invitation.count",
+  );
+  const channels = invitationCalls
+    .map((c) => (c.where as Record<string, unknown>).channel)
+    .filter((c) => c !== undefined)
+    .sort();
+  assert.deepEqual(channels, ["email", "sms", "whatsapp"]);
+
+  // The aggregate still runs WITHOUT a channel filter — one of the
+  // four calls must have `channel === undefined`.
+  const aggregates = invitationCalls.filter(
+    (c) => (c.where as Record<string, unknown>).channel === undefined,
+  );
+  assert.equal(aggregates.length, 1);
 });
 
 test("compute: recent_24h response cutoff is relative to `now`", async () => {

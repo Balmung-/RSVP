@@ -249,7 +249,16 @@ test("validateWidget: rejects workspace_rollup outside summary", () => {
     campaigns: { draft: 0, active: 0, closed: 0, archived: 0, total: 0 },
     invitees: { total: 0 },
     responses: { total: 0, attending: 0, declined: 0, recent_24h: 0 },
-    invitations: { sent_24h: 0 },
+    // P13-E — full per-channel split. Keeping the props shape valid
+    // here makes the test's rejection specifically about the slot, not
+    // about missing fields; a partial blob would also reject (correctly)
+    // but for a different reason than the test name advertises.
+    invitations: {
+      sent_24h: 0,
+      sent_email_24h: 0,
+      sent_sms_24h: 0,
+      sent_whatsapp_24h: 0,
+    },
     generated_at: "2026-04-19T10:00:00.000Z",
   };
   const out = validateWidget({

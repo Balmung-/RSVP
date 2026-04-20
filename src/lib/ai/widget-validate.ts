@@ -497,7 +497,23 @@ function validateWorkspaceRollup(p: Record<string, unknown>): boolean {
     if (!isFiniteInteger(p.responses[k])) return false;
   }
   if (!isPlainObject(p.invitations)) return false;
-  if (!isFiniteInteger(p.invitations.sent_24h)) return false;
+  // P13-E — `sent_24h` is the channel-agnostic aggregate (still the
+  // right number for "anything sent today"); the three per-channel
+  // counts join it so the renderer can show the `Xe / Ys / Zw` split
+  // that the `campaign_card` Delivered row gained in D.3. Rejecting
+  // pre-P13-E blobs that lack the per-channel fields (rather than
+  // silently zero-filling) mirrors D.3's fail-closed stance and keeps
+  // the renderer's WhatsApp column honest — a missing field pretending
+  // to be zero would make an actual zero indistinguishable from a
+  // schema-drift bug.
+  for (const k of [
+    "sent_24h",
+    "sent_email_24h",
+    "sent_sms_24h",
+    "sent_whatsapp_24h",
+  ]) {
+    if (!isFiniteInteger(p.invitations[k])) return false;
+  }
   if (!isNonEmptyString(p.generated_at)) return false;
   return true;
 }

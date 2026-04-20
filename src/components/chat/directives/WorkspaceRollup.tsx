@@ -27,7 +27,18 @@ export type WorkspaceRollupProps = {
     declined: number;
     recent_24h: number;
   };
-  invitations: { sent_24h: number };
+  // P13-E — WhatsApp joins the Delivered breakdown on the same
+  // footing as email/SMS. The aggregate `sent_24h` stays as the
+  // at-a-glance "anything sent today" number; the three per-channel
+  // counts render parenthetically as `Xe / Ys / Zw` — same pattern
+  // the campaign_card Delivered row uses in D.3, so the operator
+  // sees one consistent channel breakdown across summary + detail.
+  invitations: {
+    sent_24h: number;
+    sent_email_24h: number;
+    sent_sms_24h: number;
+    sent_whatsapp_24h: number;
+  };
   generated_at: string;
 };
 
@@ -125,6 +136,20 @@ export function WorkspaceRollup({
         </span>
         <span className="tabular-nums">
           {l.sent}: {props.invitations.sent_24h}
+          {/*
+            P13-E — three-way split matches the campaign_card Delivered
+            row. Keeping the WhatsApp column visible at zero rather than
+            conditionally hiding it: a zero that was ACTUALLY COUNTED
+            reads different from a zero that the renderer elided, and
+            the operator needs to tell "channel considered, no sends"
+            apart from "field missing pretending to be zero".
+          */}
+          <span className="text-slate-500">
+            {" "}
+            ({props.invitations.sent_email_24h}e ·{" "}
+            {props.invitations.sent_sms_24h}s ·{" "}
+            {props.invitations.sent_whatsapp_24h}w)
+          </span>
         </span>
         {age && (
           <span className="ms-auto text-mini text-slate-400">
