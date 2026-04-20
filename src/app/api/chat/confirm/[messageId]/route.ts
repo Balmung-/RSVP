@@ -13,6 +13,7 @@ import {
   confirmImportWidgetKey,
 } from "@/lib/ai/widgetKeys";
 import { tryRefreshSummaryForConfirm } from "@/lib/ai/workspace-summary";
+import { classifyPreClaim } from "@/lib/ai/confirm-preclaim";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -96,24 +97,11 @@ export const runtime = "nodejs";
 // matching widget kind in `widget-validate.ts::WIDGET_KINDS`. Keeping
 // the map typed as a closed literal is what lets TypeScript catch a
 // "we added the flow but forgot to wire up audit kinds" regression.
-type AnchorConfig = {
-  destructiveTool: "send_campaign" | "commit_import";
-  confirmAuditKind: "ai.confirm.send_campaign" | "ai.confirm.commit_import";
-  deniedAuditKind: "ai.denied.send_campaign" | "ai.denied.commit_import";
-};
-
-const ANCHOR_MAP: Record<string, AnchorConfig> = {
-  propose_send: {
-    destructiveTool: "send_campaign",
-    confirmAuditKind: "ai.confirm.send_campaign",
-    deniedAuditKind: "ai.denied.send_campaign",
-  },
-  propose_import: {
-    destructiveTool: "commit_import",
-    confirmAuditKind: "ai.confirm.commit_import",
-    deniedAuditKind: "ai.denied.commit_import",
-  },
-};
+//
+// P14-B' — ANCHOR_MAP + AnchorConfig moved to `src/lib/ai/confirm-preclaim.ts`
+// alongside the `classifyPreClaim` function that reads them. See that
+// module for the per-branch audit kind / status code / error code
+// contract — tested exhaustively in `tests/unit/confirm-preclaim.test.ts`.
 
 // The destructive-action core — claim, dispatch, classify, release,
 // audit, persist, respond — lives in `src/lib/ai/confirm-flow.ts`
@@ -181,104 +169,39 @@ export async function POST(
     );
   }
 
-  // Only known proposal tools are valid confirmation anchors. The
-  // ANCHOR_MAP entry also decides which audit kinds (and below,
-  // which pure-core runner) this request routes through.
-  const anchorConfig = row.toolName ? ANCHOR_MAP[row.toolName] : undefined;
-  if (!anchorConfig) {
-    // We don't know which destructive tool the attempt targeted, so
-    // the per-tool denied kind doesn't apply. Use the generic
-    // `ai.denied.confirm` so these events stay greppable but don't
-    // pollute the per-tool stream.
+  // P14-B' — pre-claim decisions (wrong_tool / anchor_was_error /
+  // already_confirmed / corrupt_input) are classified in
+  // `classifyPreClaim` so each branch's audit kind, status code,
+  // error code, and payload shape are unit-testable without the Next
+  // runtime. This route handler stays thin — on a denial it fires the
+  // audit event the classifier picked and returns the matching
+  // response; on `ok` it reads the anchor + parsedInput off the
+  // outcome and proceeds to dispatch. Behaviour is byte-for-byte
+  // preserved from the four pre-P14-B' inline blocks.
+  const preClaim = classifyPreClaim({
+    row: {
+      toolName: row.toolName,
+      toolInput: row.toolInput,
+      isError: row.isError,
+      confirmedAt: row.confirmedAt,
+      sessionId: row.sessionId,
+    },
+    messageId,
+  });
+  if (preClaim.kind === "denied") {
     await logAction({
-      kind: "ai.denied.confirm",
+      kind: preClaim.auditKind,
       refType: "ChatSession",
       refId: row.sessionId,
       actorId: me.id,
-      data: {
-        via: "confirm",
-        reason: "wrong_tool",
-        messageId,
-        toolName: row.toolName,
-      },
+      data: preClaim.auditData,
     });
     return NextResponse.json(
-      { ok: false, error: "wrong_tool" },
-      { status: 400 },
+      { ok: false, error: preClaim.error },
+      { status: preClaim.status },
     );
   }
-
-  // If the anchor row ITSELF was an error (e.g. propose_send /
-  // propose_import returned `forbidden` or `not_found`), there's no
-  // coherent destructive action to confirm — something likely went
-  // wrong on the UI side letting the button render at all. Refuse
-  // loudly rather than re-dispatching blind.
-  if (row.isError) {
-    await logAction({
-      kind: anchorConfig.deniedAuditKind,
-      refType: "ChatSession",
-      refId: row.sessionId,
-      actorId: me.id,
-      data: { via: "confirm", reason: "anchor_was_error", messageId },
-    });
-    return NextResponse.json(
-      { ok: false, error: "anchor_was_error" },
-      { status: 400 },
-    );
-  }
-
-  // Fast-path already_confirmed — skip toolInput parse + buildToolCtx
-  // when we already know the anchor is taken. Not race-safe on its
-  // own (two parallel reads can both see confirmedAt=null); the
-  // atomic claim inside each runConfirm* is the real guard. This
-  // exists purely so the common "refreshed the tab, clicked again"
-  // case returns 409 without doing the relatively expensive input
-  // parse and ctx build. runConfirm* repeats the same check for
-  // defense-in-depth; the single-use tests pin the check there.
-  if (row.confirmedAt) {
-    await logAction({
-      kind: anchorConfig.deniedAuditKind,
-      refType: "ChatSession",
-      refId: row.sessionId,
-      actorId: me.id,
-      data: {
-        via: "confirm",
-        reason: "already_confirmed",
-        messageId,
-        confirmedAt: row.confirmedAt.toISOString(),
-      },
-    });
-    return NextResponse.json(
-      { ok: false, error: "already_confirmed" },
-      { status: 409 },
-    );
-  }
-
-  // Recover the stored proposal input. For propose_send it's a
-  // SUPERSET-compatible pass-through for send_campaign (campaign_id,
-  // channel, only_unsent); for propose_import it's the same
-  // {ingestId, target, campaign_id?} shape commit_import's validate()
-  // expects. Either way the destructive tool's validate() rejects
-  // anything unexpected, so a forged / drifted toolInput fails
-  // cleanly in dispatch rather than landing a bad write.
-  let parsedInput: unknown = {};
-  if (row.toolInput) {
-    try {
-      parsedInput = JSON.parse(row.toolInput);
-    } catch {
-      await logAction({
-        kind: anchorConfig.deniedAuditKind,
-        refType: "ChatSession",
-        refId: row.sessionId,
-        actorId: me.id,
-        data: { via: "confirm", reason: "corrupt_input", messageId },
-      });
-      return NextResponse.json(
-        { ok: false, error: "corrupt_input" },
-        { status: 400 },
-      );
-    }
-  }
+  const { anchorConfig, parsedInput } = preClaim;
 
   const ctx = await buildToolCtx(me);
 
