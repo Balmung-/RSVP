@@ -4,6 +4,7 @@ import { hasRole } from "@/lib/auth";
 import { sendCampaign } from "@/lib/campaigns";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
+import { deriveSendCampaignSummary } from "./send-campaign-summary";
 
 // The destructive companion to `propose_send`. Same input shape; the
 // difference is that this tool actually dispatches messages through
@@ -256,37 +257,28 @@ export const sendCampaignTool: ToolDef<Input> = {
       };
     }
 
-    // `total` is the sum of successful deliveries across all
-    // dispatched channels. `sendCampaign`'s return gained a
-    // `whatsapp: number` counter in P13-C (additive widening — old
-    // callers ignoring unknown keys see no change); fold it in here
-    // so the operator-visible tally matches what actually landed.
-    const total = result.email + result.sms + result.whatsapp;
-    const summaryLines: string[] = [];
-    // Per-channel breakdown in the summary is only emitted for the
-    // channels the caller asked for (so a `"whatsapp"` scalar send
-    // doesn't say "0 email, 0 sms, N whatsapp"). The check uses the
-    // same `channelSetFor` resolution `computeBlockers` and
-    // `sendCampaign` use, keeping the three surfaces symmetric.
-    const breakdown: string[] = [];
-    if (channel === "email" || channel === "both" || channel === "all") {
-      breakdown.push(`${result.email} email`);
-    }
-    if (channel === "sms" || channel === "both" || channel === "all") {
-      breakdown.push(`${result.sms} sms`);
-    }
-    if (channel === "whatsapp" || channel === "all") {
-      breakdown.push(`${result.whatsapp} whatsapp`);
-    }
-    summaryLines.push(
-      `Sent ${total} message${total === 1 ? "" : "s"} for "${campaign.name}": ${breakdown.join(", ")}.`,
-    );
-    if (result.skipped > 0) summaryLines.push(`Skipped ${result.skipped}.`);
-    if (result.failed > 0) {
-      summaryLines.push(
-        `Failed ${result.failed} — see the campaign's activity page for per-invitee errors.`,
-      );
-    }
+    // P14-D' — the post-dispatch summary derivation
+    // (total + per-channel breakdown + pluralization + skipped/failed
+    // lines + join) lives in `deriveSendCampaignSummary` so each
+    // transformation is unit-testable without prisma / the campaigns
+    // orchestrator. The handler consumes the produced `summary` string
+    // and still pass-through its own tally counters onto the output.
+    //
+    // The breakdown filter rule (email/sms in "both"+; whatsapp only
+    // in "whatsapp"+"all") is load-bearing — a "whatsapp" scalar send
+    // that says "0 email, 0 sms, N whatsapp" would confuse operators
+    // about which channels were even attempted.
+    const { summary } = deriveSendCampaignSummary({
+      campaignName: campaign.name,
+      channel,
+      result: {
+        email: result.email,
+        sms: result.sms,
+        whatsapp: result.whatsapp,
+        skipped: result.skipped,
+        failed: result.failed,
+      },
+    });
 
     return {
       output: {
@@ -305,7 +297,7 @@ export const sendCampaignTool: ToolDef<Input> = {
         whatsapp: result.whatsapp,
         skipped: result.skipped,
         failed: result.failed,
-        summary: summaryLines.join(" "),
+        summary,
       },
     };
   },
