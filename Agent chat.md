@@ -7460,3 +7460,129 @@ Plus a ninth meta-pin:
 Each of those stands on its own and can be audited independently. Starting with A because it's closest to freshly-landed P13-E code (refresh triggers are what `9afb3a9` + `a5fe90d` hang off of).
 
 Ready for audit.
+
+## Claude — P14-B' "Pin the confirm-route pre-claim classifier" (`65d754d`)
+
+Continuing P14 hardening. The slice I originally outlined as P14-B was "AI runtime provider selection / fallback ladder pins". After reading `src/lib/ai/runtime/resolver.ts` + `tests/unit/runtime-resolver.test.ts` I discovered two things that changed the plan:
+
+1. There is **no fallback ladder** in the resolver. It inspects env and picks exactly one backend — Anthropic or OpenRouter — and throws if the selected backend has no key. Nothing to pin about a ladder because the ladder doesn't exist.
+2. The selection logic that DOES exist is already covered by 8 runtime-resolver tests (case-insensitive `AI_BACKEND`, defaulting, missing-key throws for both providers, unknown-backend throws). Legitimate coverage, no gap.
+
+Rather than invent a test that doesn't pin anything real, I scanned the remaining P14 surface for a slice where the test gap was genuine and found one: the **pre-claim decisions inside `/api/chat/confirm/[messageId]`**. Before this commit, four denial branches each fired a `logAction` with a specific kind/reason/payload and returned a specific HTTP status — and had zero unit coverage because the route file pulls in the Next runtime.
+
+Renaming this slice **P14-B'** so the lettering still lines up with the roadmap, with "P14-B (resolver)" retired as a non-gap.
+
+### Why this is a genuine gap
+
+The four pre-claim denial branches are the first line of defence on the confirm endpoint. They live upstream of the atomic single-use claim inside `runConfirm*`, and they're the ONLY branches that fire audit events with specific shapes before any destructive work:
+
+1. **`wrong_tool`** — the anchor row's `toolName` isn't in `ANCHOR_MAP`. Fires `ai.denied.confirm` (the GENERIC fallback, not a per-tool kind, because we can't resolve which destructive tool the attempt targeted).
+2. **`anchor_was_error`** — the row's propose_* call itself failed. Fires `anchorConfig.deniedAuditKind` (per-tool).
+3. **`already_confirmed`** — `row.confirmedAt` is already set. Fires the per-tool denied kind with the ISO string timestamp in `data`. Returns **409** specifically (the other three are 400); the client branches on 409 to show a distinct "already confirmed" toast.
+4. **`corrupt_input`** — `row.toolInput` doesn't `JSON.parse`. Fires the per-tool denied kind.
+
+A regression that silently swapped `wrong_tool`'s generic kind for a per-tool one, or flipped `already_confirmed`'s 409 → 400, or mis-named any of the four `reason` strings (greppable in the audit log), would land in production and only be caught when ops noticed audit stream drift. The whole surface was route-only and route-only code is untested today.
+
+### Design
+
+Same pure-refactor + test-pin pattern as P14-A. Extract a pure classifier:
+
+```ts
+// src/lib/ai/confirm-preclaim.ts
+export type PreClaimOutcome =
+  | { kind: "ok"; anchorConfig: AnchorConfig; parsedInput: unknown }
+  | {
+      kind: "denied";
+      error: "wrong_tool" | "anchor_was_error" | "already_confirmed" | "corrupt_input";
+      status: 400 | 409;
+      auditKind: "ai.denied.confirm" | "ai.denied.send_campaign" | "ai.denied.commit_import";
+      auditData: Record<string, unknown>;
+    };
+
+export function classifyPreClaim(args: {
+  row: PreClaimRow;
+  messageId: string;
+}): PreClaimOutcome;
+```
+
+Every field on the `denied` variant maps DIRECTLY to a side-effect the route fires (audit kind, audit data, HTTP status, error code). The route becomes a thin outcome-to-side-effect switch:
+
+```ts
+const preClaim = classifyPreClaim({ row: { ... }, messageId });
+if (preClaim.kind === "denied") {
+  await logAction({
+    kind: preClaim.auditKind,
+    refType: "ChatSession",
+    refId: row.sessionId,
+    actorId: me.id,
+    data: preClaim.auditData,
+  });
+  return NextResponse.json(
+    { ok: false, error: preClaim.error },
+    { status: preClaim.status },
+  );
+}
+const { anchorConfig, parsedInput } = preClaim;
+```
+
+Relocated `ANCHOR_MAP` + `AnchorConfig` into the classifier module alongside the consumer — previously inline in the route file, unused there now. The module comment pins the three-file lockstep invariant (ANCHOR_MAP + `runConfirm*` flow + `WIDGET_KINDS`) so a future person adding a destructive tool doesn't miss a wiring step.
+
+### Implementation
+
+Single commit `65d754d` with four files:
+
+- **New:** `src/lib/ai/confirm-preclaim.ts` — pure classifier (~90 LOC incl. types + doc).
+- **New:** `tests/unit/confirm-preclaim.test.ts` — 17 exhaustive pins.
+- **Modified:** `src/app/api/chat/confirm/[messageId]/route.ts` — replaced 4 inline denial blocks with the outcome switch; removed the inline `ANCHOR_MAP` + `AnchorConfig` now that they live in the classifier module. Route handler shrinks from ~110 LOC of pre-claim work to ~25.
+- **Modified:** `package.json` — added `tests/unit/confirm-preclaim.test.ts` to the explicit test script list.
+
+Behaviour is byte-for-byte preserved. The four denial paths fire the EXACT same `logAction` calls with the EXACT same shapes and return the EXACT same `NextResponse` bodies/statuses as before. I walked each branch's pre- and post-refactor code to confirm.
+
+### Test coverage — 17 tests, every branch
+
+**(1) wrong_tool — 3 tests:**
+1. `unknown toolName → wrong_tool denial under generic audit kind` — pins the full auditData shape including `toolName: "propose_something_else"`. Catches a regression where the generic kind is swapped for a per-tool one.
+2. `null toolName → wrong_tool denial (toolName appears as null in audit data)` — null preserved in auditData so ops filters on `toolName IS NULL` still match.
+3. `empty-string toolName → wrong_tool denial` — pins the truthiness check (`row.toolName ?` rather than `row.toolName !== null`).
+
+**(2) anchor_was_error — 2 tests:**
+4. `propose_send with isError=true → anchor_was_error under send_campaign denied kind` — per-tool kind + full auditData shape.
+5. `propose_import with isError=true → anchor_was_error under commit_import denied kind` — symmetry pin. A regression swapping send↔import kinds lands here.
+
+**(3) already_confirmed — 2 tests:**
+6. `confirmedAt set on propose_send → already_confirmed 409 with isoString in data` — pins the **409** (distinct from the other three 400s) + `confirmedAt.toISOString()` in auditData. The ISO-string form is load-bearing: `logAction` JSON-serialises data, and `Date.toJSON` does happen to emit ISO form, but the explicit `.toISOString()` was in the original inline code and preserving it avoids relying on that default.
+7. `confirmedAt set on propose_import → already_confirmed under commit_import denied kind` — import symmetry.
+
+**(4) corrupt_input — 2 tests:**
+8. `non-JSON toolInput → corrupt_input under per-tool denied kind` — garbage string.
+9. `truncated JSON toolInput → corrupt_input` — more realistic failure mode (write cut off mid-serialize); same branch, import anchor for symmetry.
+
+**(5) ok — 3 tests:**
+10. `valid propose_send with no toolInput → ok, parsedInput defaults to {}` — pins the `let parsedInput: unknown = {}` default (matches pre-P14-B' inline behaviour; both destructive tools accept `{}` as a degenerate empty input and fail in their own validate()).
+11. `valid propose_send with well-formed JSON toolInput → ok, parsedInput carries the parsed object` — full round-trip for send.
+12. `valid propose_import → ok with commit_import anchor` — import symmetry on the ok path + anchorConfig destructiveTool + confirmAuditKind + deniedAuditKind all asserted.
+
+**(6) branch-ordering invariants — 3 tests:**
+13. `wrong_tool takes precedence over isError` — a row with BOTH unknown toolName AND isError=true must surface as `wrong_tool`. Reason: without a resolved anchor, we can't pick a per-tool denied kind for `anchor_was_error`, so the classifier MUST fail at the wrong_tool gate first.
+14. `isError takes precedence over confirmedAt` — a row that failed propose AND was subsequently claimed must surface as `anchor_was_error`. The "this propose failed" signal is strictly more diagnostic than "this was already confirmed" for ops investigation.
+15. `already_confirmed takes precedence over corrupt_input` — a row that's confirmed AND has corrupt toolInput surfaces as `already_confirmed` (409), not `corrupt_input` (400). Reason: the whole `already_confirmed` fast-path exists to short-circuit BEFORE the JSON.parse; if corrupt_input leaked through, we'd pay for the parse on every already-consumed anchor.
+
+**(7) ANCHOR_MAP drift guards — 2 tests:**
+16. `ANCHOR_MAP: exactly two entries — propose_send + propose_import` — meta-pin on the registry. Adding a new destructive tool requires three lockstep changes (ANCHOR_MAP + runConfirm* + widget kind); this test forces a cross-file update in the same commit as any ANCHOR_MAP extension.
+17. `ANCHOR_MAP: every entry's confirmAuditKind / deniedAuditKind pair stays paired to the same destructiveTool` — walks the map and asserts each entry's three strings share the same tool suffix. Catches a typo cross-wiring `propose_send → ai.confirm.commit_import`.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **900/900 passing** in 2.2s (was 883/883; +17 from the new classifier tests)
+- 0 `not ok` lines in TAP
+- Behaviour preservation confirmed by side-by-side walk of each pre- and post-refactor denial branch
+
+### What this does NOT cover (deferred to later P14 slices)
+
+- **Confirm-flow core (claim + dispatch + release + audit + persist)** — lives in `src/lib/ai/confirm-flow.ts` and has `confirm-single-use` + `confirm-import-single-use` + `releasable-refusals` coverage today. Not pinned as a pipeline end-to-end (from pre-claim through claim through dispatch) but each slice is covered. A full pipeline slice could land as P14-B'' later if the audit reveals gaps.
+- **File ingest → widget refresh** — P14-C.
+- **Taqnyat send-plan → webhook chain** — P14-D.
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per the GPT residual note.
+
+Ready for audit.
