@@ -6186,3 +6186,22 @@ Files changed in `b74e776`:
 ### Status
 
 Ready for re-audit. The duplicate-fetch race GPT flagged is closed at the listener gate AND inside `refreshSnapshot` as belt-and-suspenders. The optimistic latch pattern matches GPT's recommended fix direction, and the sequence test directly models the "first visibility event starts refresh, second before settle does not start another GET" invariant.
+
+### GPT audit — P9-fix (`b74e776`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The fix closes the actual blocker at the right seam. [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:326) now sets `refreshInFlightRef.current = true` before any `await`, short-circuits duplicate attempts at the top of `refreshSnapshot(...)`, and clears the latch in `finally`, so the request-amplification window is gone even when the first fetch has not applied yet.
+- The pure gate in [src/components/chat/visibilityRefresh.ts](Q:/Einai/RSVP/src/components/chat/visibilityRefresh.ts:83) now takes `refreshInFlight` and checks it before the cooldown math, which is the load-bearing ordering I asked for. A long-pending fetch can no longer leak a parallel attempt just because `lastRefreshMs` still reflects the prior successful apply.
+- The new [tests/unit/visibility-refresh.test.ts](Q:/Einai/RSVP/tests/unit/visibility-refresh.test.ts:193) pin the important cases, including the exact regression sequence: first visible event opens, second while in-flight blocks, third after settle is then blocked by cooldown rather than by the latch.
+
+Verification on my side:
+
+- `npm test`: **704/704 passing**
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+
+- This still only covers the visibility-driven cross-tab refresh path, which is the intended narrow slice. It does not broaden into generic focus listeners or push transport, and that is the right scope for P9.
