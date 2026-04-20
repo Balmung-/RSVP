@@ -9990,3 +9990,79 @@ This directly closes GPT's track-1 blocker from the production-readiness checkpo
 - **Alert / page operators.** The guard fails startup — the platform's deploy-failure alerting takes over from there. Adding an explicit "page oncall" step would couple the guard to a specific alerting stack, which we don't have standardized yet.
 
 Ready for audit.
+
+## Claude notepad - P15-D.1 (`f76b490`)
+
+### Why this sub-slice
+
+GPT blocked P15-D with two correct findings that I missed:
+
+1. **Next 14 hook was inert.** The `instrumentation.ts` file existed and the helper was unit-tested, but `experimental.instrumentationHook: true` wasn't set in [`next.config.js`](/Q:/Einai/RSVP/next.config.js:19) — which Next 14 requires for the hook to be invoked at all. My local `NODE_ENV=production npm run build` passed cleanly because the build itself doesn't run `register()`; only server start does. So "tsc + build + tests" was insufficient proof of the hook actually firing.
+
+2. **Throw alone is not fail-fast on Next 14.** Even with the flag on, Next's `NextNodeServer.prepareImpl` CATCHES throws from `register()` and logs `"Failed to prepare server Error: An error occurred while loading instrumentation hook"` — but then **keeps the port bound and returns HTTP 500 for every request.** That's worse than the silent-503 on `/api/chat` that the guard was meant to prevent: a live container with no healthy code path looks like a working deploy to naive uptime checks, so nothing triggers a rollback.
+
+I verified GPT's blocker by running the actual startup proof they asked for — turned out `[runtime-boot] ai.name=anthropic configured=false reason=anthropic_not_configured` WAS logged (so the hook was running after I added the flag), but the process stayed alive and served 500s. Both fixes were required.
+
+### Implementation
+
+- **[`next.config.js`](/Q:/Einai/RSVP/next.config.js)**: added `experimental.instrumentationHook: true` alongside the existing `serverActions` block, with a comment explaining the Next 14 requirement vs Next 15 default-on behavior.
+
+- **[`src/lib/boot/runtime-guard.ts`](/Q:/Einai/RSVP/src/lib/boot/runtime-guard.ts)**: added `registerBootGuard(opts)` as a Next-specific wrapper. Pure `guardRuntimeOnBoot()` unchanged — still throws in prod+misconfig for unit-test observability. The wrapper calls the guard inside try/catch, and on catch in `NODE_ENV=production` calls `process.exit(1)`. The exit callable is dependency-injected (`opts.exit`) so unit tests can assert the call without terminating the test runner.
+
+  Key design choice: the wrapper re-throws after `exit(1)` as belt-and-suspenders. In real prod, `process.exit(1)` kills the process before the throw has any effect. In unit tests the `exit` spy is a no-op, so the re-throw gives `assert.throws` something to catch. This way both observability paths (real exit + test stub) work.
+
+- **[`src/instrumentation.ts`](/Q:/Einai/RSVP/src/instrumentation.ts)**: switched import from `guardRuntimeOnBoot` to `registerBootGuard`. Expanded the header comment to explicitly call out both requirements (flag + exit backstop) so a future reader porting this to Next 15 knows exactly which pieces become unnecessary.
+
+- **[`tests/unit/runtime-guard.test.ts`](/Q:/Einai/RSVP/tests/unit/runtime-guard.test.ts)**: 4 new pins on `registerBootGuard`:
+  - **prod + misconfig** → exit(1) called exactly once, throw propagates for test double
+  - **prod + configured** → no exit, no throw
+  - **non-prod + misconfig** → no exit, no throw (guard warns; wrapper's catch is unreachable)
+  - **unexpected throw in non-production propagates** — defensive pin: if a future refactor makes the guard throw where it shouldn't, the wrapper must not silently swallow. It re-throws so Next logs it. Without this pin, a silent-swallow regression wouldn't be caught.
+
+- **[`README.md:105`](/Q:/Einai/RSVP/README.md:105)**: reworded the fail-fast bullet to name both mechanisms explicitly — the `instrumentationHook` flag requirement and the `process.exit(1)` backstop. Old bullet said "guard throws from register() and the server fails to start"; that's half-true (throws, yes, but server DOES start serving 500s without the exit), so the new wording is both more accurate and more useful for a future Next 15 upgrade review.
+
+### Real boot proofs (Next 14.2.35, port 3398 / 3399)
+
+**Proof 1 — fail-fast (misconfig):**
+
+Command:
+```
+NODE_ENV=production AI_RUNTIME=anthropic ANTHROPIC_API_KEY= OPENROUTER_API_KEY= PORT=3398 npx next start
+```
+
+Observations:
+- Log: `[runtime-boot] ai.name=anthropic configured=false reason=anthropic_not_configured`
+- Process state at T+4s: DEAD
+- `curl --max-time 2 http://localhost:3398/api/health`: HTTP=000, connection refused
+- No "Ready in Xms" message — server never bound the port
+
+**Proof 2 — pass-through (configured via .env.local):**
+
+Command:
+```
+NODE_ENV=production PORT=3399 npx next start
+```
+
+Observations:
+- Log: `[runtime-boot] ai.name=openrouter configured=true`
+- Log: ` ✓ Ready in 428ms`
+- Process state at T+4s: ALIVE
+- `curl http://localhost:3399/api/health`: HTTP=200
+- Body: `{"ok":true,"db":"down",...,"ai":{"name":"openrouter","configured":true}}`
+
+The health probe confirms end-to-end: `/api/health` surfaces `ai.configured: true` exactly when the boot guard passed, from the same env source. DB down is expected (no local Postgres), not related.
+
+### Verification
+
+- `npm test`: **1370/1370** (+4 from P15-D's 1366)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+- Real `next start` boot proofs (both fail-fast and pass-through): green, as documented above
+
+### What this still doesn't cover
+
+- **Edge runtime `process.exit`.** The wrapper calls `process.exit(1)` unconditionally in prod. In Node runtime (what our app uses for all server code) that's fine. If a future slice adds Edge middleware that also runs `instrumentation.ts`, `process.exit` may be undefined there. Not addressing preemptively since the repo has no Edge code today and adding a `typeof process.exit === "function"` gate would dilute the clarity for the actual Node path.
+- **Log visibility in standalone output.** `next build` with `output: "standalone"` emits `.next/standalone/server.js`, which is what a real Docker deploy runs. The standalone run in the fail-fast proof didn't emit our log to stdout (possibly .env.local not inherited in that boot, since we used `next start` for the actual proofs). Both `next start` proofs above did show the log. If stdout capture ever fails in a real deploy, the exit code alone is still enough signal — that's the load-bearing piece.
+
+Ready for audit.
+
