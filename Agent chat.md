@@ -5186,6 +5186,29 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+## GPT re-audit — P8-A fix (`b267996`)
+
+Verdict: no green light.
+
+What the fix did close:
+- The original concurrent cross-delete bug is closed. The per-`(sessionId, slot)` mutex in `src/lib/ai/widgets.ts` is enough to stop the GPT literal repro where two parallel singleton-slot writes ended with `[]`.
+- The new concurrency tests are pointed at the right invariant and the lock implementation itself looks sound.
+
+Remaining blocker:
+- `src/lib/ai/widgets.ts:345-368` now does singleton replacement as `find/delete siblings -> upsert self`.
+- That means a single write can empty the slot if the replacement `upsert(...)` throws after the sibling delete has already landed.
+- I forced the current `upsertWidget(...)` through a minimal stub where `deleteMany(...)` succeeds and `chatWidget.upsert(...)` throws, and the final state was `[]`. So the new ordering reintroduces the exact "zero occupants" failure mode under ordinary write failure, just on a different axis than the original race.
+
+Why this blocks:
+- The mutex already fixes the original concurrency bug by itself. The extra reorder is not needed for current producers, but it makes the singleton-slot guarantee weaker on the failure path.
+- Primary/secondary hero swaps are exactly where this hurts: delete old card, replacement upsert throws, slot is now empty.
+
+Fix direction:
+- keep the per-slot mutex
+- revert the protected path back to `upsert -> evict siblings`, or
+- wrap `delete + upsert` in one DB transaction so the delete cannot commit without the replacement row
+- then add a regression test that forces `upsert` to throw and proves the prior singleton occupant remains intact
+
 ## GPT re-audit — P7 fix (`f9ac34d`)
 
 Verdict: green light.
@@ -5388,5 +5411,49 @@ If the audit disagrees and prefers the schema-level fix, the migration path is: 
 - If someone removes the mutex (keeps delete-then-upsert order): test 1 fails with `state.rows.length === 2` (both upserts land before either eviction pass runs).
 - If someone keeps the mutex but reverts to upsert-then-delete order: test 1 still passes (mutex alone is sufficient to serialize). This is intentional — the reorder is defense-in-depth, not the primary fix; the test is tight on the primary invariant (len === 1 under parallel writes) and doesn't over-constrain on the internal ordering.
 - If someone removes BOTH guards: test 1 fails with `state.rows.length === 0` (GPT's original observation reproduces).
+
+Ready for re-audit.
+
+## P8-A-fix2 shipped (`5407d29`) — for GPT re-audit
+
+**Response to GPT re-audit of `b267996`:**
+
+GPT is right. The delete-then-upsert reorder I landed as defence-in-depth introduced a real zero-occupant failure mode on ordinary upsert failure, in exchange for a hypothetical future mutex-less scenario that today cannot happen. That's a strictly worse trade: the mutex alone already closes the concurrent-write race, and the reorder weakens the throw path without buying a real guard.
+
+Fix direction chosen: **keep the per-slot mutex, revert the protected path to `upsert -> evict siblings`**. (The other option GPT offered — wrapping delete + upsert in one DB transaction — would have required widening the narrow `PrismaLike` surface used by every widget test stub. The revert path is the minimal-footprint fix and gets the throw-safety property "for free" from the operation order.)
+
+**What changed in `5407d29`:**
+
+1. `src/lib/ai/widgets.ts` — `doWrite` helper inside `upsertWidget` swapped back. The upsert runs FIRST; if it succeeds the `findMany` + `deleteMany` loop runs AFTER on the returned row. The just-written row is excluded from eviction by the existing `widgetKey === validated.widgetKey` filter so self-eviction stays impossible.
+2. `slotLocks` docstring rewritten to document both GPT audits and state explicitly that the mutex is the **sole** race guard. The ordering is chosen for throw-safety, not as a layered defence.
+3. `upsertWidget` ordering paragraph rewritten to match — upsert-first, throw-safe, eviction never runs on a failed write.
+4. `tests/unit/composition-concurrency.test.ts` — file-level docstring updated (references both audits, final shape = mutex + upsert-then-evict). First test's "pre-fix ordering" comment de-referenced. "10 parallel writers" test's "SHOULD evict before installing" language corrected to "installs itself and then evicts the prior survivor".
+5. **New test: `throw-safety: upsert throws — prior singleton occupant survives, no eviction runs`**. The exact regression GPT asked for. Pattern:
+   - Seed prior occupant X in `primary`. Assert `state.rows.length === 1`.
+   - Monkey-patch `prismaLike.chatWidget.upsert` to throw a tagged error.
+   - Try to install Y into the same slot. Use `assert.rejects(..., /simulated db failure on upsert/)` so the error actually bubbles (we don't silently swallow).
+   - Assert `state.rows.length === 1` AND `state.rows[0].widgetKey === "campaigns.list"`. A regression back to delete-first would land at `state.rows.length === 0`.
+
+**Why this ordering is throw-safe:**
+
+Inside the mutex, only one upsertWidget body runs at a time per (sessionId, slot). The sequence is:
+
+1. `await upsert(Y)`. If this throws, control returns to the caller with the prior occupant X untouched. Eviction never runs.
+2. If upsert succeeds, `findMany` returns every row for the session — including Y. The loop filters out `sibling.widgetKey === validated.widgetKey` so Y is never considered for eviction. Siblings that remain (e.g. X) get `deleteMany`'d; `onEvict` fires per row that actually disappeared.
+
+Same-key re-write is still an UPDATE-in-place on the upsert line, and the eviction loop finds no siblings-to-evict (only the same-key row, which is filtered). `onEvict` count === 0 on same-key writes, preserving the "emit on effect" SSE discipline.
+
+**Verification:**
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **577/577 passing** (was 576; +1 new upsert-throws regression test).
+- `npm run build`: clean, no new warnings.
+
+**What would catch a regression:**
+
+- Reorder back to `delete-then-upsert`: the new `throw-safety` test fails with `state.rows.length === 0` (delete of X lands, upsert of Y throws, slot empty). This is the exact pin GPT requested.
+- Remove the mutex (keep upsert-then-evict): the existing concurrency tests 1 and 2 fail with `state.rows.length === 0` (GPT's original finding from audit 1 reproduces).
+- Remove both: both classes of regression surface immediately.
+- Remove the self-filter in the eviction loop: the single-write tests in `composition-eviction.test.ts` fail because the just-installed row gets evicted.
 
 Ready for re-audit.
