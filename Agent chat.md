@@ -7586,3 +7586,128 @@ Behaviour is byte-for-byte preserved. The four denial paths fire the EXACT same 
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per the GPT residual note.
 
 Ready for audit.
+
+## Claude — P14-C "Pin the import-outcome derivations" (`a6cd91e`)
+
+Continuing P14 hardening. This slice sits on the file-ingest → widget-refresh pipeline noted as a follow-up in P14-A. Before committing to a test surface I did a proper scoping audit of the ingest test coverage — same honesty-check pattern I applied before pivoting P14-B → P14-B'.
+
+### Scoping — what's actually covered vs. gaps
+
+The ingest pipeline today has strong edge coverage and thin middle coverage:
+
+**Already covered:**
+- `import-planner.test.ts` (508 LOC) pins the planner's counter arithmetic (willCreate, created, duplicatesExisting, duplicatesWithin, invalid, capped). Planner parity between preview and commit modes is pinned AT the planner.
+- `releasable-import-refusals.test.ts` pins the six releasable refusal codes + `classifyImportOutcome`.
+- `confirm-import-single-use.test.ts` pins the atomic single-use claim semantics for commit_import.
+- `ingest-orchestrator.test.ts` + `ingest-review.test.ts` + `ingest-extractors.test.ts` + `ingest-access.test.ts` cover the upload → extract → review stages.
+- `tool-summarize-file.test.ts` + `tool-review-file-import.test.ts` cover the read-only ingest tools' pure `build*Result` formatters + widget validation.
+- `confirm-preclaim.test.ts` (from P14-B') covers `propose_import` / `commit_import` as anchor names on the confirm route.
+
+**Real gap I found:** the three post-planner data derivations in `propose_import` + `commit_import`:
+
+1. **`expected` fold (preview-side)** — `{newRows, existingSkipped: duplicatesExisting + duplicatesWithin, conflicts: 0, invalid}`. A regression picking only `duplicatesExisting` (or only `duplicatesWithin`) would halve the operator-visible count on the preview card.
+2. **`blockers` + `state`** — `["nothing_to_commit"]` vs `[]`, `"blocked"` vs `"ready"`. A flipped ternary would paint the confirm button on a blocked preview.
+3. **`result` rollup (commit-side)** — `{created, existingSkipped: duplicatesExisting, duplicatesInFile: duplicatesWithin, invalid, errors: Math.max(0, willCreate - created)}`. A "harmonize with preview" refactor would collapse `duplicatesInFile` into `existingSkipped`, silently losing the in-file-dupe signal; removing the `Math.max` would leak a negative errors count under future planner bugs.
+4. **`nothing_to_commit` two-conjunct threshold** — `created === 0 && willCreate === 0`. Dropping the `willCreate === 0` conjunct would fold "partial-write-then-driver-skip" into this branch, which then routes through `RELEASABLE_IMPORT_REFUSALS` and releases the claim — allowing a re-confirm to replay the planner potentially double-writing.
+
+Those four branches had ZERO unit coverage before this slice: the route-level tests don't spin up the planner, and the planner-level tests don't look at how its report is SHAPED for the widget / refusal gate.
+
+**Rejected candidates** (not genuine gaps or wrong extraction surface):
+- Gate-precedence tests in propose_import / commit_import (role → ownership → campaign → file-status) — these interleave with prisma calls and can't be cleanly extracted as a pure classifier the way P14-B' did. Extracting would require passing pre-fetched data through the classifier, which is more surgery than signal.
+- Summary-line formatter tests — cosmetic, lower regression value, branches caught incidentally by the derivation tests.
+- Widget-props shape tests — already validated by `validateWidgetProps` in `widget-validate.ts` at emission time; failures are LOUD (throw at dispatch) rather than silent drift.
+- Gate-ordering asymmetry between propose_import and commit_import (propose does file-status AFTER campaign; commit does file-status BEFORE campaign) — noticed it in scoping but both outcomes are releasable refusals and the distinction is which error message the operator sees. Low-consequence.
+
+### Design
+
+Three pure helpers in `src/lib/ai/tools/import-outcomes.ts`:
+
+```ts
+export function deriveProposeImportCounters(report: PlannerReport): {
+  expected: { newRows; existingSkipped; conflicts; invalid };
+  blockers: string[];
+  state: "ready" | "blocked";
+};
+
+export function deriveCommitImportResult(report: PlannerReport): {
+  created; existingSkipped; duplicatesInFile; invalid; errors;
+};
+
+export function shouldRefuseNothingToCommit(report: PlannerReport): boolean;
+```
+
+Each takes a `PlannerReport` and returns a narrow, typed output the handler can slot directly into its `ToolResult`. The handlers become thinner:
+
+- `propose_import.ts` — replaces 16 LOC of inline blocker/expected/state derivation with one destructuring call.
+- `commit_import.ts` — replaces the `nothing_to_commit` conjunct check + the 5-field result rollup with two calls (and keeps `const errors = result.errors` as a local alias for the summary-line formatter that uses it).
+
+### Implementation — single commit `a6cd91e`
+
+**New:**
+- `src/lib/ai/tools/import-outcomes.ts` — the three helpers with typed outputs (~130 LOC incl. doc).
+- `tests/unit/import-outcomes.test.ts` — 27 pins.
+
+**Modified:**
+- `src/lib/ai/tools/propose_import.ts` — imports + delegates preview derivation.
+- `src/lib/ai/tools/commit_import.ts` — imports + delegates `nothing_to_commit` gate + result rollup.
+- `package.json` — adds the new test file.
+
+Net LOC: 569 lines added (helpers + tests + their doc comments), 50 removed from the two handlers. Handlers shrink; test surface grows by 27 exhaustive pins.
+
+Behaviour is byte-for-byte preserved. Every helper output was derived by reading the pre-refactor inline expression directly — I walked each transformation side-by-side to confirm.
+
+### Test coverage — 27 tests, grouped by regression vector
+
+**(1) `deriveProposeImportCounters` — 9 tests:**
+1. `expected.newRows equals willCreate` — the operator-facing "rows that would land" anchor.
+2. `expected.existingSkipped folds duplicatesExisting + duplicatesWithin` — THE fold regression vector.
+3. `expected.conflicts is ALWAYS 0` — guard against someone pulling it from `report.something`.
+4. `expected.invalid equals report.invalid` — straight pass-through.
+5. `expected has EXACTLY four fields (shape drift guard)` — `validateConfirmImport` pins four fields; this pins the helper output shape BEFORE the validator fires at emission.
+6. `willCreate > 0 → blockers is empty, state is 'ready'` — happy-path.
+7. `willCreate === 0 → blockers = ['nothing_to_commit'], state = 'blocked'` — the all-skipped path.
+8. `willCreate === 0 still folds duplicates into existingSkipped` — blocked state shouldn't zero the breakdown counters.
+9. `state ternary is NOT inverted — blockers non-empty means blocked` — guard against a one-character typo flipping the ternary.
+
+**(2) `deriveCommitImportResult` — 8 tests:**
+10. `created equals report.created (NOT willCreate)` — driver-skip must surface.
+11. `existingSkipped ONLY counts duplicatesExisting (NOT within)` — the split regression vector (most important for commit).
+12. `duplicatesInFile maps to report.duplicatesWithin` — rename safety.
+13. `result has EXACTLY five fields (shape drift guard)` — mirror of #5 for commit.
+14. `errors = Math.max(0, willCreate - created)` — happy-path clamp.
+15. `errors clamped to 0 when created > willCreate` — defence-in-depth clamp.
+16. `errors = 0 in the identity happy path` — no-op case.
+17. `invalid passes through from report.invalid` — straight pass-through.
+
+**(3) `shouldRefuseNothingToCommit` — 5 tests:**
+18. `true when BOTH created === 0 AND willCreate === 0` — happy-path refusal.
+19. `false when willCreate > 0 (even if created === 0)` — the CRITICAL case. A partial-write-then-driver-skip must NOT release the claim.
+20. `false when created > 0 (even if willCreate === 0)` — pathological but covered.
+21. `false on a happy-path commit (both > 0)` — sanity.
+22. `other counters (invalid, dupes) do NOT affect the gate` — guard against `&& invalid === 0` slipping in.
+
+**(4) Cross-helper preview/commit parity invariants — 3 tests:**
+23. `expected.newRows === result.created when willCreate === created` — THE parity contract the whole confirm gate exists to uphold. Pinned at the helper seam.
+24. `expected.invalid === result.invalid always` — state-independent.
+25. `expected.existingSkipped === result.existingSkipped + result.duplicatesInFile` — the fold/split arithmetic relation.
+
+**(5) Type-signature drift guards — 2 tests:**
+26. `ProposeImportExpected has all and only the pinned fields` — compile-time + runtime.
+27. `CommitImportResult has all and only the pinned fields` — compile-time + runtime.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **927/927 passing** in 2.6s (was 900/900; +27 from the new derivation tests)
+- 0 `not ok` lines in TAP
+- Byte-for-byte behaviour preservation confirmed by side-by-side walk of each pre- and post-refactor derivation
+
+### What this does NOT cover (deferred)
+
+- **Gate-precedence invariants in `propose_import` / `commit_import`** — role → ownership → campaign → file-status. Interleaves with prisma; cleanest extraction path unclear. Could be a future slice if a regression surfaces.
+- **Summary-line formatters** — cosmetic; branches covered incidentally.
+- **Widget props shape composition** — covered at emission by `validateWidgetProps`.
+- **Taqnyat send-plan → webhook chain** — P14-D.
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred.
+
+Ready for audit.
