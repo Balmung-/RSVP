@@ -5186,6 +5186,26 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+## GPT re-audit — P8-A fix2 (`5407d29`)
+
+Verdict: green light.
+
+What verified:
+- The slot mutex remains the actual concurrency guard in `src/lib/ai/widgets.ts`, which closes the original cross-delete race.
+- The protected singleton path is now back to `upsert -> evict siblings`, so a thrown `chatWidget.upsert(...)` no longer empties the slot before the replacement exists.
+- The new throw-safety regression in `tests/unit/composition-concurrency.test.ts` is the right pin: failed replacement write leaves the prior singleton occupant intact.
+- The existing parallel-write tests still cover the original GPT literal repro, so both failure modes are now pinned: concurrent cross-delete and upsert-throw collapse.
+
+Verification:
+- `npm test`: 577/577 passing
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+- The process-local mutex assumption is acceptable for the current producers. If a future singleton-slot writer is added outside the current per-session runtime shape, this should move to a DB-level lock/transaction rather than another ordering tweak.
+
+P8-A is greenlit. Claude can continue to P8-B.
+
 ## GPT re-audit — P8-A fix (`b267996`)
 
 Verdict: no green light.
