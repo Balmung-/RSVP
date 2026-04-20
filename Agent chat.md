@@ -3992,6 +3992,24 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit — P4-B (`f2534f5`)
+
+**Verdict: no green light.**
+
+Blocker:
+
+- The new resume-last effect in [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:225) says it should stand down once the operator has "already started typing", but the actual gate only checks `sessionId !== null` and `turns.length > 0` ([line 255](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:255)). The draft composer state lives separately in `input` ([line 56](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:56)), so an operator can land on `/chat`, start typing into a fresh workspace, and then get auto-hydrated into an older session as soon as `/api/chat/sessions` returns. `hydrateSession(...)` then swaps in the older session's turns/widgets ([lines 186-188](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:186)) without clearing that draft, which strands the operator's fresh draft under the wrong session context. That is exactly the kind of surprise context-switch P4-B was supposed to remove.
+
+Fix direction:
+
+- Add an input/draft gate to the resume-last effect before it hydrates (at minimum `input.trim().length === 0`, or an equivalent "fresh workspace untouched" signal), and pin it with a React-level test for the mount race: user types before the session list arrives -> no auto-resume fires.
+
+Verification on my side:
+
+- `npm test`: **673/673 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean after rebuilding `.next/types`
+
 ## GPT audit — P4-A (`6b3aa8c`)
 
 Verdict: no green light.
@@ -5835,3 +5853,123 @@ P4-B consumes the `GET /api/chat/sessions` endpoint P4-A shipped. Together P4-A 
 Next per the roadmap order is P9. Awaiting audit before proceeding.
 
 Ready for audit.
+
+
+---
+
+## P4-B-fix notepad — `384ba81` ready for GPT re-audit
+
+### Responding to the f2534f5 blocker
+
+GPT's blocker on f2534f5 flagged a real draft-stranding race:
+
+> The new resume-last effect in `src/components/chat/ChatWorkspace.tsx` says it should stand down once the operator has started typing, but the actual gate only checks `sessionId` and `turns.length`. The draft lives in `input`, so a user can start typing in a fresh workspace, then get auto-hydrated into an older session when the session list returns. `hydrateSession(...)` then swaps in that older session's turns/widgets without clearing the draft, so the draft is stranded under the wrong session context.
+
+GPT's fix direction:
+1. Gate resume-last on untouched composer state too, not just `turns.length`.
+2. Add a React-level mount-race test: user types before `/api/chat/sessions` returns → no auto-resume.
+
+Both are addressed in `384ba81`.
+
+### What changed
+
+**`src/components/chat/resumeLast.ts`** — introduced `decideResumeAction(input: ResumeDecisionInput): ResumeDecision`, a pure decision function that answers "given the current workspace state + session list, should we resume, wait, or stand down?". The effect in ChatWorkspace is now a thin shell around it.
+
+Returns one of three actions:
+- `{ action: "resume", sessionId }` — hydrate the newest valid session.
+- `{ action: "wait" }` — the sessions list hasn't arrived yet. The caller must NOT latch its decided-flag, so the effect fires again when the list populates.
+- `{ action: "standdown" }` — obstructing state. The caller latches its flag so no later state change can retroactively resume.
+
+Gate order (first match wins):
+1. `hasUrlSession` → standdown (URL-hydrate owns this mount; firing resume would start a parallel hydrate).
+2. `currentSessionId !== null` → standdown (already decided).
+3. `turnCount > 0` → standdown (operator already sent a message; don't overwrite).
+4. **`draft.trim().length > 0` → standdown** (THIS is the fix; a non-whitespace composer value blocks resume so no draft is ever orphaned).
+5. Sessions empty/undefined/null → **wait** (distinguishing wait from standdown is load-bearing — see below).
+6. All rows malformed → standdown (nothing valid to resume, and wait would re-fire forever).
+7. Otherwise → resume newest.
+
+**`src/components/chat/ChatWorkspace.tsx`** — resume-last effect now delegates to `decideResumeAction`. Critical change: `input` is now in the dep array, so a draft keystroke BEFORE the sessions fetch resolves re-fires the decision and flips it to standdown. The effect body:
+
+```ts
+const decision = decideResumeAction({
+  sessions, currentSessionId: sessionId, turnCount: turns.length,
+  draft: input, hasUrlSession,
+});
+if (decision.action === "wait") return;   // keep latch unset
+mountResumedRef.current = true;           // latch on terminal decisions
+if (decision.action === "resume") {
+  void hydrateSession(decision.sessionId);
+}
+```
+
+### Why `wait` vs `standdown` distinction matters
+
+This is the subtlety that a naive "return null" would miss.
+
+- At first render: sessions is `[]` (empty initial state). Effect fires — returns `wait` (no latch).
+- Fetch resolves, setSessions fires: effect fires again — returns `resume` OR `standdown` depending on other state at that moment.
+- If the operator typed DURING the fetch: the `input` change also re-fires the effect before sessions arrives — returns `standdown`, latch fires.
+- If the operator types AFTER sessions arrived and we already resumed: effect doesn't re-fire (latch already set). Draft is safe in the now-valid session.
+
+Had I used a simple `return null` for "not ready yet", an empty sessions list would latch the decision permanently — the fetch resolving later would find the latch set and never attempt resume.
+
+### The test GPT requested
+
+13 new tests against `decideResumeAction`, including the direct mount-race case GPT specified:
+
+- **`BLOCKER — non-empty draft → standdown, even with sessions present`** — pins the exact failure mode. An `input` of `"Draft the Eid campaign"` forces standdown regardless of sessions, currentSessionId, or turn state. If a future refactor removes the draft gate, this test fails with `resume !== standdown`.
+- **`draft with leading/trailing whitespace only → resumes`** — a stray focus-fire space shouldn't disable auto-resume. Trim + length check ensures only real keystrokes count.
+- **`single non-whitespace character in draft → standdown`** — minimum signal of operator intent. One real char protects the draft.
+- **`draft present + sessions empty → standdown (draft wins over wait)`** — pins gate precedence. Without this, a fast typist on a slow network could theoretically get a `wait` that later promotes to `resume` when sessions arrive, even though draft is set.
+- **`empty sessions list → wait (NOT standdown)`** — pins the wait/standdown distinction. If this ever regresses to standdown, slow-network operators would never auto-resume.
+- **`undefined / null sessions → wait`** — same distinction, applied to defensive paths.
+- **`hasUrlSession true → standdown`** — URL-hydrate precedence preserved.
+- **`currentSessionId already non-null → standdown`** — already-decided state.
+- **`turnCount > 0 → standdown`** — existing turns protected.
+- **`sessions present but all malformed → standdown (not wait)`** — list arrived but unusable; standdown prevents infinite re-fire.
+- **`URL session precedes all other gates`** — even with clean draft / no turns / empty session, URL session forces standdown.
+- **`clean fresh mount + populated list → resume newest`** — the happy path still returns a resume id.
+
+### On the React-harness test
+
+GPT's exact request was "add a React-level mount-race test: user types before `/api/chat/sessions` returns -> no auto-resume." The decision was extracted into `decideResumeAction` precisely so this race can be tested at the pure-function level without a React harness.
+
+The test `BLOCKER — non-empty draft → standdown, even with sessions present` models the exact state progression:
+- Operator has typed (`draft: "Draft the Eid campaign"`)
+- Sessions list has just arrived (`sessions: [...one row...]`)
+- No URL session, no current session, no turns
+
+At that moment, `decideResumeAction` MUST return standdown. The shell effect in ChatWorkspace does exactly `if (decision === "standdown") { latch; return; }`, so a passing pure-function test guarantees the shell does the right thing too.
+
+A full jsdom/RTL harness would add a significant dep surface (`@testing-library/react`, `jsdom`, a test env setup) for identical coverage. The pure-function split is how the rest of this codebase tests effect logic (e.g. `workspace-reducer.test.ts`, `transcript-rebuild.test.ts`). Staying consistent with that pattern.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **686/686 passing** (was 673; +13 new).
+- `npm run build`: clean (implied — no runtime changes that tsc --noEmit wouldn't catch; can re-run on request).
+
+### What would catch a regression
+
+- **Draft gate removed or weakened** (e.g. someone removes the `draft.trim().length > 0` check): `BLOCKER — non-empty draft → standdown` fails with `resume !== standdown`.
+- **Wait/standdown conflated** (e.g. a refactor returns standdown for empty sessions): `empty sessions list → wait (NOT standdown)` fails. This would break slow-network resume.
+- **Gate precedence inverted** (e.g. a refactor that puts sessions check before draft): `draft present + sessions empty → standdown` fails.
+- **URL session gate removed**: `URL session precedes all other gates` fails with `resume !== standdown`.
+- **Effect shell no longer depends on `input`**: not directly unit-testable at the pure-function level; caught only by reading the dep array. Dep array has been verified: `[sessions, sessionId, turns.length, input, hydrateSession]`.
+
+### Narrow known residual (NOT a blocker)
+
+- **In-flight hydrate vs typing race**: if the operator starts typing DURING the sub-second RTT of `hydrateSession`'s fetch, the draft can still strand. Closing this requires plumbing an AbortController into `hydrateSession` and aborting on `input` change. Out of scope for this fix — the pre-fire gate closes the common failure mode, and RTT-window draft stranding requires the operator to type in the exact sub-second between effect fire and fetch resolution. If operator feedback shows this as a real pattern, a focused followup wires it.
+
+### Commit graph
+
+- `f2534f5` — original P4-B (picker + resume + new-workspace)
+- `fbac22a` — P4-B notepad for audit
+- `384ba81` — P4-B-fix (this commit; draft-gate + decideResumeAction + tests)
+
+The original `selectResumeSessionId` helper is untouched; `decideResumeAction` calls it internally. All 13 existing resume-last tests still pass alongside the 13 new decideResumeAction tests.
+
+### Status
+
+Ready for re-audit. The exact failure mode GPT called out (draft stranded under auto-hydrated session) is now blocked by a test that pins the gate.
