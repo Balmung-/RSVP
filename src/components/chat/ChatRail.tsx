@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import clsx from "clsx";
 import { DirectiveRenderer } from "./DirectiveRenderer";
@@ -48,6 +49,7 @@ export function ChatRail({
   phase,
   topError,
   onSend,
+  header,
 }: {
   turns: Turn[];
   fmt: FormatContext;
@@ -56,6 +58,11 @@ export function ChatRail({
   phase: Phase;
   topError: string | null;
   onSend: () => void;
+  // P4-B — optional slot rendered above the transcript. ChatWorkspace
+  // mounts the SessionPicker here; passing ReactNode keeps this rail
+  // ignorant of the picker's props (sessions list, currentTitle, etc.)
+  // and reusable in a chat-only view where sessions don't exist.
+  header?: ReactNode;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,6 +162,11 @@ export function ChatRail({
 
   return (
     <div className="flex flex-col h-full min-w-0 border-e border-ink-100 bg-white">
+      {header && (
+        <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+          {header}
+        </div>
+      )}
       <div
         ref={listRef}
         className="flex-1 overflow-y-auto px-4 py-6 space-y-6"

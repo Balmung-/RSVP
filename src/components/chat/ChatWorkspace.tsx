@@ -1,10 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
+import { SessionPicker } from "./SessionPicker";
+import { selectResumeSessionId } from "./resumeLast";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
+import type { SessionListItem } from "@/app/api/chat/sessions/handler";
+import { deriveSessionTitle } from "@/lib/ai/session-title";
 import {
   reduceFocusRequest,
   reduceTurns,
@@ -58,6 +62,12 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   // WorkspaceDashboard fires even when the same widgetKey is focused
   // twice in a row (refining a filter twice should re-focus twice).
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
+  // P4-B — the picker's session list. Populated on mount and
+  // refreshed when a fresh session id appears (after the first send
+  // on a new workspace). A failed fetch leaves this empty; the
+  // picker degrades to "no recent workspaces" rather than blocking
+  // the operator's ability to start a new thread.
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
 
   // Latest sessionId for use inside async SSE callbacks. Keeping a
   // mirror ref avoids the closure-over-state stale-value trap when
@@ -185,6 +195,82 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     },
     [setSessionId],
   );
+
+  // P4-B — fetch the picker's session list. Called on mount and
+  // again after a first send on a fresh workspace produces a new
+  // server-assigned id (see the sessionId watch below). Swallows
+  // errors on purpose: a failed fetch leaves the picker empty,
+  // which is an acceptable degraded state — the operator can still
+  // compose in the current workspace.
+  const refreshSessions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chat/sessions", {
+        credentials: "same-origin",
+      });
+      if (!res.ok) return;
+      const body = (await res.json()) as { sessions?: SessionListItem[] };
+      if (Array.isArray(body.sessions)) setSessions(body.sessions);
+    } catch {
+      /* silent — picker stays empty, not a blocker */
+    }
+  }, []);
+
+  // Initial fetch. Runs in parallel with the URL-hydrate effect
+  // above — both are independent and we don't need to sequence
+  // them. The resume-last effect below waits for both signals.
+  useEffect(() => {
+    void refreshSessions();
+  }, [refreshSessions]);
+
+  // P4-B — resume-last. If the operator landed on /chat with NO
+  // `?session=` in the URL, pick the newest session from the list
+  // and hydrate it. Runs at most once (`mountResumedRef`) so a
+  // subsequent fetch (e.g. after creating a new session) doesn't
+  // re-yank the workspace back to the newest row.
+  //
+  // Gate: only if sessionId is still null AND turns are empty. If
+  // the operator already started typing or clicked a picker item
+  // before the list arrived, we don't want to blow their work
+  // away by hydrating over it.
+  const mountResumedRef = useRef(false);
+  useEffect(() => {
+    if (mountResumedRef.current) return;
+    if (typeof window === "undefined") return;
+    const hasUrlSession = new URLSearchParams(window.location.search).get(
+      "session",
+    );
+    if (hasUrlSession) {
+      // URL-based hydrate is already in flight from the other
+      // mount effect — don't double-hydrate.
+      mountResumedRef.current = true;
+      return;
+    }
+    if (sessions.length === 0) return; // wait for list, or nothing to resume
+    if (sessionId !== null) {
+      // Operator already picked something (or a race against the
+      // refresh) — stand down.
+      mountResumedRef.current = true;
+      return;
+    }
+    if (turns.length > 0) {
+      mountResumedRef.current = true;
+      return;
+    }
+    const resumeId = selectResumeSessionId(sessions);
+    mountResumedRef.current = true;
+    if (resumeId) void hydrateSession(resumeId);
+  }, [sessions, sessionId, turns.length, hydrateSession]);
+
+  // When a fresh session id appears (from the server's `event:
+  // session` frame on the first send of a new workspace), the
+  // picker's `sessions` list is stale — pull it again so the new
+  // row shows up. Gate on "id not already in the list" so this
+  // does NOT re-fetch on every hydrate of a known session.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (sessions.some((s) => s.id === sessionId)) return;
+    void refreshSessions();
+  }, [sessionId, sessions, refreshSessions]);
 
   // ---- send -------------------------------------------------------
 
@@ -337,6 +423,51 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     [],
   );
 
+  // P4-B — picker callback. `null` = "New workspace": reset to the
+  // fresh-session state (null id, empty turns + widgets, URL clear,
+  // composer cleared). A non-null id = switch: hydrate the picked
+  // session; no-op if it's the current one. We do NOT touch the
+  // `sessions` list here — switching sessions doesn't change
+  // picker contents.
+  const handlePickSession = useCallback(
+    (id: string | null) => {
+      if (id === null) {
+        abortRef.current?.abort();
+        setSessionId(null);
+        setTurns([]);
+        setWidgets([]);
+        setInput("");
+        setTopError(null);
+        setFocusRequest(null);
+        return;
+      }
+      if (id === sessionIdRef.current) return;
+      abortRef.current?.abort();
+      void hydrateSession(id);
+    },
+    [hydrateSession, setSessionId],
+  );
+
+  // Current title for the picker trigger. Preference order:
+  //   1. The server title from the session list (fresh after every
+  //      refresh; matches what other tabs would show).
+  //   2. A client-derived title from the first user turn, using the
+  //      same `deriveSessionTitle` algo the server runs on create.
+  //      This is the live-state fallback for the seconds between a
+  //      fresh workspace's first send and the next `refreshSessions`.
+  //   3. null — SessionPicker then shows its "new workspace" filler.
+  const currentTitle = useMemo<string | null>(() => {
+    if (sessionId) {
+      const row = sessions.find((s) => s.id === sessionId);
+      if (row?.title && row.title.length > 0) return row.title;
+    }
+    const firstUser = turns.find(
+      (t): t is Extract<Turn, { kind: "user" }> => t.kind === "user",
+    );
+    if (firstUser) return deriveSessionTitle(firstUser.text);
+    return null;
+  }, [sessionId, sessions, turns]);
+
   return (
     <div
       // Height budget: viewport minus header (h-14) minus compact
@@ -357,6 +488,15 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           phase={phase}
           topError={topError}
           onSend={() => void send()}
+          header={
+            <SessionPicker
+              sessions={sessions}
+              currentSessionId={sessionId}
+              currentTitle={currentTitle}
+              onPick={handlePickSession}
+              fmt={fmt}
+            />
+          }
         />
       </div>
       <div className="md:order-2 order-1 min-h-0 bg-ink-50">
