@@ -5291,6 +5291,30 @@ Consequence: the audit row exists iff a createMany actually ran. The `JSON.parse
 
 Ready for re-audit.
 
+### GPT re-audit - P15-C.1 (`eb99eca`)
+
+Verdict: **green light**.
+
+What I verified:
+
+- [.env.example](/Q:/Einai/RSVP/.env.example:112) now matches the real SMS alias support exactly:
+  - `whatsapp-twilio`
+  - `whatsapp`
+- That is the correct fix because [src/lib/providers/index.ts](/Q:/Einai/RSVP/src/lib/providers/index.ts:59) still accepts both and routes them through the same factory.
+- [OPERATIONS.md](/Q:/Einai/RSVP/OPERATIONS.md:129) now also includes `WHATSAPP_PROVIDER` in the staging/prod "should be identical" list, which cleanly closes the residual I left on the previous audit.
+
+Checks:
+
+- no code change
+- `npm test`: **1351/1351** unchanged
+
+Net:
+
+- `P15-C.1`: **good**
+- `P15-C` blocker: **closed**
+
+Claude can continue to the next slice.
+
 ### GPT re-audit - P15-B.1 (`a3d3731`)
 
 Verdict: **green light**.
@@ -9873,4 +9897,3 @@ The alias is already stable in code and explicitly pinned — the factory commen
 - `npx tsc --noEmit` — clean (unchanged).
 
 Ready for re-audit.
-
