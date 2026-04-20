@@ -6719,3 +6719,94 @@ Residual notes only:
 
 - This is still a foundation slice, not a live operator path yet. The repo still has no real caller of `sendWhatsApp(...)` outside tests, and the current campaign send/resend paths still iterate only email + SMS.
 - The new WhatsApp campaign fields are also still not wired through the create/edit/duplicate UI surfaces, so Claude should keep describing P13-B as outbound-core groundwork, not as fully shipped WhatsApp sending.
+
+
+---
+
+## P13-C — runtime channel widening (WhatsApp through sendCampaign / resendSingle / resendSelection / runStage) — commit `6ec302e`
+
+### What landed
+
+`6ec302e` threads `sendWhatsApp` (P13-B) through every runtime orchestrator that previously only iterated `sendEmail` + `sendSms`. After this commit, a stage or a `sendCampaign` call can dispatch WhatsApp alongside the existing channels. UI composition and the AI tool surface are **not** touched — that's P13-D.
+
+### Files changed
+
+- [src/lib/campaigns.ts](Q:/Einai/RSVP/src/lib/campaigns.ts:1) — `sendCampaign`, `resendSingle`, `resendSelection` widened.
+- [src/lib/stages.ts](Q:/Einai/RSVP/src/lib/stages.ts:1) — `CHANNELS` const + `runStage` dispatch widened.
+- [tests/unit/channel-widening.test.ts](Q:/Einai/RSVP/tests/unit/channel-widening.test.ts:1) — new; 14 tests for `normalizeChannels` + `channelSetFor`.
+- [package.json](Q:/Einai/RSVP/package.json:17) — added test file to the test script.
+
+### Design decisions worth auditing
+
+1. **`"both"` preserves pre-P13 semantics — email + SMS ONLY, NOT WhatsApp.**
+   Every existing caller of `sendCampaign` (admin UI bulk send, approvals re-fire, AI `send_campaign` tool) passes `channel: "both"`. These were written against the email+sms contract. Flipping `"both"` to silently include WhatsApp would start sending Meta-brokered messages for every unaudited caller on deploy. Operators who WANT all three channels pass the new `"all"` value explicitly. This is the load-bearing invariant of the entire slice — a dedicated unit test pins it (see `channelSetFor: 'both' stays email + sms`) so a future "simplification" that maps `"both"` to `{email, sms, whatsapp}` lands with a loud red test.
+
+2. **`CampaignStage.channels` default stays `"email,sms"`.**
+   `normalizeChannels(null)` returns `["email", "sms"]`, not `["email", "sms", "whatsapp"]`. Same rationale as `"both"`: every pre-P13 stage row was saved under the old default. If the fallback flipped silently, those legacy stages would fire WhatsApp on their next cron tick. A test covers this (`normalizeChannels: null / undefined / empty fall back to email,sms`).
+
+3. **WhatsApp reuses `phoneE164` — no new contact field.**
+   An invitee with a phone number is eligible for both SMS and WhatsApp. A campaign targeting `"all"` fans out two phone jobs per invitee (one SMS, one WhatsApp). Dedup between the two channels does NOT happen in the dispatcher — the `decideWhatsAppMessage` planner + provider enforce template-vs-session discipline on the WA side, and SMS is independent. An operator who wants one-or-the-other picks the scalar channel explicitly.
+
+4. **`sessionOpen` left undefined on every orchestrated send.**
+   `runStage`, `sendCampaign`, `resendSingle`, and `resendSelection` all call `sendWhatsApp(campaign, invitee)` with no third arg. The planner's Rule 2 (session-text fallback) requires `sessionOpen === true` explicitly, so all orchestrated sends take the template path. This is correct: orchestrated sends are business-initiated and cannot assume the 24h session window is open for every invitee simultaneously. The planner's safety default (refuse session-text without explicit opt-in) is pinned at the P13-A test layer AND at the P13-B choreography layer, so this doesn't need a dedicated P13-C test.
+
+5. **Job loop structure unchanged — just a new branch.**
+   Each orchestrator kept its existing "build a job list, then `mapConcurrent` with capacity 5" structure. The only change is a third `if` in the job builder (guarded on `phoneE164`) and a third arm in the concurrent mapper. Keeps the shape auditable against the pre-P13 version: the email + sms branches are byte-identical in logic, which is what an auditor comparing the old file to the new one should see.
+
+6. **Return shape gained `whatsapp: number` — no existing field changed.**
+   `sendCampaign` and `resendSelection` now return `{..., whatsapp, ...}`. Existing consumers (AI tool's `send_campaign`, admin page) read only `email`, `sms`, `skipped`, `failed`; they don't enumerate keys and don't break when a new counter appears. Adding rather than replacing counters keeps the audit trail forward-readable (old events with no WhatsApp counter still parse; new events carry the extra field).
+
+### Unit-testable surfaces (14 tests)
+
+Extracted `channelSetFor` from `sendCampaign`'s body and exported it so the channel-resolution invariant is pinnable without spinning up Prisma. Same treatment `normalizeChannels` already had (exported from stages.ts). Both are pure functions.
+
+**normalizeChannels** (8 tests):
+- null/undefined/empty fall back (pre-P13 default)
+- empty string is distinct from null (explicit deselect)
+- "whatsapp" alone accepted
+- "email,sms,whatsapp" accepts all three
+- output order is canonical CHANNELS-declaration order (not input order)
+- whitespace tolerated around tokens
+- unknown tokens filtered without poisoning the valid ones
+- case-insensitive on input
+- `CHANNELS` constant itself exposes all three scalar channels
+
+**channelSetFor** (6 tests):
+- scalar "email" / "sms" / "whatsapp" each resolve to singleton set
+- "both" stays `{email, sms}` — NOT whatsapp (the load-bearing invariant)
+- "all" resolves to `{email, sms, whatsapp}` (the new umbrella)
+- returned Set is a fresh instance per call (no shared mutable state between concurrent sends)
+
+### What P13-C does NOT yet do (deliberate scope gates)
+
+- **AI tool `send_campaign`**: `Channel = "email" | "sms" | "both"` unchanged. Its validate() rejects `"whatsapp"` / `"all"`. Narrower type remains a subtype of the widened `SendCampaignChannel`, so the call-site compiles unchanged — the tool cannot reach WhatsApp yet.
+- **AI tool `propose_send`**: same situation. Its preview doesn't compute WhatsApp counts.
+- **`send-blockers.ts`**: `Channel` still narrow. No `no_whatsapp_template` blocker emitted. Extending the blocker vocabulary requires paired UI that surfaces the new blockers, which is P13-D.
+- **Admin UI** (`src/app/campaigns/[id]/page.tsx`): `singleResend` / `bulkResend` cast `channel` as `"email" | "sms"` and reject anything else. The runtime can take a `"whatsapp"` scalar, but the UI doesn't surface it yet. P13-D.
+- **`approvals.ts`**: approval re-fire casts `row.channel as "email" | "sms" | "both"`. The SendApproval row's `channel` column is written by the approval-creation flow (not in scope here) so no `"whatsapp"` value can reach this cast today.
+- **Stage editor UI**: stage-create/edit form doesn't yet offer a `whatsapp` checkbox. The `CHANNELS` constant accepts it; the form just doesn't render it.
+
+All of these are in-scope for P13-D.
+
+### What would catch a regression
+
+- **`"both"` silently flipped to include WhatsApp**: `channelSetFor: 'both' stays email + sms` fails loudly. Also the matching `channelSetFor('all')` test ensures `"all"` keeps being the umbrella so a "let's merge both and all" simplification doesn't fly.
+- **`normalizeChannels` default changed from `"email,sms"` to `"all"`-equivalent**: the null/undefined test fails. Catches the silent-WA-send-on-deploy footgun for legacy stages.
+- **Channel widening typo** (e.g. someone mis-spells `"whatapp"` in CHANNELS): the `normalizeChannels: 'whatsapp' alone is accepted` test fails — the stored column literally says `"whatsapp"` and the planner expects the same literal.
+- **Set aliasing regression** (channelSetFor returns a shared Set): the "fresh instance per call" test fails. A shared mutable Set would let one send's mutation corrupt another concurrent send's channel set.
+- **Return-shape shrinkage** (dropping the new `whatsapp` counter): tsc fails at every call site that destructures `const { whatsapp } = await sendCampaign(...)`. Currently no such caller exists — but the return-shape additions are still in the type, so any future destructuring caller gets the correct shape.
+
+### Verification on my side
+
+- `npx tsc --noEmit`: clean
+- `npm test`: **823/823 passing** (809 before + 14 new)
+
+### Commit graph
+
+- `414e535` — P13-A (schema + pure planner)
+- `1db0682` — P13-B (`sendWhatsApp` deps-injected core + 9 choreography tests)
+- `6ec302e` — P13-C (this commit; orchestrator widening + 14 tests)
+
+### Status
+
+Ready for audit. The runtime send path can now reach WhatsApp on every orchestrator, the pre-P13 behavior of `"both"` / legacy stages is preserved byte-for-byte, and the channel-selector invariants are pinned by unit tests. The next slice (P13-D) widens the AI tool's channel vocabulary + surfaces WhatsApp in the `propose_send` preview and the `ConfirmSend` directive, which is where an operator can actually pick the new channel from chat.
