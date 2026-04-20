@@ -72,11 +72,32 @@ export interface TaqnyatWebhookDeps {
   // as a callback (not a string) so env isn't captured at module
   // load time — tests flip it per-case.
   getSecret: () => string | undefined;
-  // Ownership-free lookup by providerId. Unlike the dispatch path's
-  // session-owned queries, a DLR webhook has no authenticated user —
-  // Taqnyat writes for ALL operators' sends. providerId is the only
-  // join key available.
-  findInvitation: (providerId: string) => Promise<InvitationRow | null>;
+  // Channel-scoped lookup by providerId.
+  //
+  // Why (providerId, channel) and not providerId alone:
+  //   - Invitation.providerId is indexed but NOT unique (schema.prisma
+  //     @@index([providerId])). A Taqnyat SMS messageId and a Meta
+  //     wamid are drawn from different ID spaces but nothing at the
+  //     DB level prevents a collision — one random string against
+  //     another over a large campaign corpus will eventually overlap.
+  //   - Even without a numeric collision, the lookup reveals a
+  //     correctness seam: a WhatsApp DLR that arrives at the SMS
+  //     route (e.g. operator misconfigured Taqnyat's two webhook
+  //     URLs) would otherwise find an SMS invitation row and flip
+  //     its state, with the EventLog carrying the wrong channel tag.
+  //   - Scoping by channel makes each route only ever act on rows
+  //     for its own channel. The caller passes the channel string
+  //     that matches what the send path wrote into Invitation.channel
+  //     ("sms" for SMS, "whatsapp" for WhatsApp — NOT "taqnyat-sms" /
+  //     "taqnyat-whatsapp"; those are audit-only tags).
+  //
+  // Ownership-free: a DLR webhook has no authenticated user — Taqnyat
+  // writes for ALL operators' sends. (providerId, channel) is the
+  // only join key available.
+  findInvitation: (
+    providerId: string,
+    channel: string,
+  ) => Promise<InvitationRow | null>;
   updateInvitation: (
     id: string,
     data: {
@@ -160,7 +181,7 @@ export async function handleTaqnyatDeliveryWebhook(
     };
   }
 
-  const inv = await deps.findInvitation(parsed.providerId);
+  const inv = await deps.findInvitation(parsed.providerId, channel);
   if (!inv) {
     // Unknown providerId — idempotent 200, same as the existing
     // /api/webhooks/delivery contract. Most common cause: a DLR

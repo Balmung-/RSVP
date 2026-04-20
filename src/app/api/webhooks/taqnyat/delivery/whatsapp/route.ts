@@ -23,9 +23,9 @@ export async function POST(req: Request) {
     "whatsapp",
     {
       getSecret: () => process.env.TAQNYAT_WEBHOOK_SECRET,
-      findInvitation: (providerId) =>
+      findInvitation: (providerId, channel) =>
         prisma.invitation.findFirst({
-          where: { providerId },
+          where: { providerId, channel },
           select: { id: true, status: true, deliveredAt: true },
         }),
       updateInvitation: async (id, data) => {

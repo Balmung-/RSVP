@@ -36,7 +36,12 @@ const NOW = new Date("2026-04-20T12:00:00Z");
 // effect — findInvitation calls, updateInvitation writes, eventLog
 // rows — so each test can assert on exactly what was touched.
 type SideEffects = {
-  findCalls: string[];
+  // Tracks both providerId AND channel. The handler scopes its DB
+  // lookup by (providerId, channel) to prevent a cross-channel ID
+  // collision (an SMS messageId landing on a Meta wamid-shaped row,
+  // or vice versa) from flipping the wrong invitation's state.
+  // Asserting on channel here pins that invariant at the test layer.
+  findCalls: Array<{ providerId: string; channel: string }>;
   updates: Array<{
     id: string;
     status: string;
@@ -54,6 +59,11 @@ type SideEffects = {
 function mkDeps(opts: {
   secret?: string | undefined;
   invitation?: InvitationRow | null;
+  // Per-channel seeding for cross-channel regression tests. When set,
+  // findInvitation returns the row matching the looked-up channel (or
+  // null if that channel isn't seeded). Takes precedence over
+  // `invitation`.
+  invitationByChannel?: Partial<Record<string, InvitationRow | null>>;
   effects?: SideEffects;
 } = {}): { deps: TaqnyatWebhookDeps; effects: SideEffects } {
   const effects: SideEffects = opts.effects ?? {
@@ -63,8 +73,12 @@ function mkDeps(opts: {
   };
   const deps: TaqnyatWebhookDeps = {
     getSecret: () => ("secret" in opts ? opts.secret : SECRET),
-    findInvitation: async (providerId) => {
-      effects.findCalls.push(providerId);
+    findInvitation: async (providerId, channel) => {
+      effects.findCalls.push({ providerId, channel });
+      if (opts.invitationByChannel) {
+        const val = opts.invitationByChannel[channel];
+        return val === undefined ? null : val;
+      }
       return opts.invitation === undefined ? null : opts.invitation;
     },
     updateInvitation: async (id, data) => {
@@ -337,7 +351,9 @@ test("handler: 200 noted:unknown_id when providerId isn't in DB", async () => {
   );
   assert.equal(r.status, 200);
   assert.deepEqual(r.body, { ok: true, noted: "unknown_id" });
-  assert.deepEqual(effects.findCalls, ["unknown-msg"]);
+  assert.deepEqual(effects.findCalls, [
+    { providerId: "unknown-msg", channel: "sms" },
+  ]);
   assert.equal(effects.updates.length, 0);
   assert.equal(effects.eventLogs.length, 0);
 });
@@ -489,7 +505,9 @@ test("handler (WhatsApp): Meta envelope delivered → DB + EventLog written with
     applied: true,
     status: "delivered",
   });
-  assert.deepEqual(effects.findCalls, ["wamid.XYZ"]);
+  assert.deepEqual(effects.findCalls, [
+    { providerId: "wamid.XYZ", channel: "whatsapp" },
+  ]);
   assert.equal(effects.updates[0].status, "delivered");
   const logData = JSON.parse(effects.eventLogs[0].data) as {
     channel: string;
@@ -564,4 +582,160 @@ test("handler: failed → delivered IS allowed (carrier-retry recovery)", async 
   assert.equal(effects.updates[0].status, "delivered");
   assert.deepEqual(effects.updates[0].deliveredAt, NOW);
   assert.equal(effects.eventLogs[0].kind, "invite.delivered");
+});
+
+// ---- Cross-channel collision (P12-fix regression) ----------------
+//
+// Invitation.providerId is indexed but NOT unique (prisma/schema.prisma
+// line ~195). Nothing at the DB level prevents an SMS messageId and a
+// Meta wamid from colliding — they're drawn from different issuers'
+// random namespaces and over a large campaign corpus will eventually
+// overlap. An even more likely failure: the operator misconfigures
+// Taqnyat's two webhook URLs and a WhatsApp DLR lands on the SMS
+// endpoint (or vice versa). Without channel scoping, the lookup would
+// find a row from the OTHER channel, flip its state, and write an
+// EventLog carrying the wrong channel tag.
+//
+// These tests pin the invariant: each route filters by channel and
+// therefore can never touch rows that don't belong to it.
+
+test("handler (SMS): WhatsApp-only invitation with same providerId returns unknown_id", async () => {
+  // Seed ONLY a WhatsApp-channel invitation at this providerId. The
+  // SMS route's lookup must be scoped such that it does not find it.
+  const { deps, effects } = mkDeps({
+    invitationByChannel: {
+      whatsapp: { id: "inv-wa-collide", status: "sent", deliveredAt: null },
+    },
+  });
+  const r = await handleTaqnyatDeliveryWebhook(
+    req({ messageId: "shared-id", status: "delivered" }),
+    parseTaqnyatSmsDlr,
+    "sms",
+    deps,
+  );
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: true, noted: "unknown_id" });
+  // Critical invariants: the lookup was attempted WITH channel="sms",
+  // and no writes happened against the WhatsApp row.
+  assert.deepEqual(effects.findCalls, [
+    { providerId: "shared-id", channel: "sms" },
+  ]);
+  assert.equal(effects.updates.length, 0);
+  assert.equal(effects.eventLogs.length, 0);
+});
+
+test("handler (WhatsApp): SMS-only invitation with same providerId returns unknown_id", async () => {
+  // Mirror of the above: a DLR that somehow arrives at the WhatsApp
+  // route (wrong-URL config, or an actual namespace collision) must
+  // not update an SMS-channel row.
+  const { deps, effects } = mkDeps({
+    invitationByChannel: {
+      sms: { id: "inv-sms-collide", status: "sent", deliveredAt: null },
+    },
+  });
+  const r = await handleTaqnyatDeliveryWebhook(
+    req({
+      entry: [
+        {
+          changes: [
+            {
+              value: {
+                statuses: [{ id: "shared-id", status: "delivered" }],
+              },
+            },
+          ],
+        },
+      ],
+    }),
+    parseTaqnyatWhatsAppDlr,
+    "whatsapp",
+    deps,
+  );
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: true, noted: "unknown_id" });
+  assert.deepEqual(effects.findCalls, [
+    { providerId: "shared-id", channel: "whatsapp" },
+  ]);
+  assert.equal(effects.updates.length, 0);
+  assert.equal(effects.eventLogs.length, 0);
+});
+
+test("handler: when both channels share a providerId, each route updates only its own row", async () => {
+  // The strongest form of the invariant: TWO rows exist with the
+  // same providerId, one per channel. Each route call must find
+  // exactly the one matching its channel and leave the other
+  // untouched. This is what GPT's blocker asked for verbatim.
+  const smsRow: InvitationRow = {
+    id: "inv-sms-pair",
+    status: "sent",
+    deliveredAt: null,
+  };
+  const waRow: InvitationRow = {
+    id: "inv-wa-pair",
+    status: "sent",
+    deliveredAt: null,
+  };
+  const { deps, effects } = mkDeps({
+    invitationByChannel: { sms: smsRow, whatsapp: waRow },
+  });
+
+  // Fire the SMS route first. Must land on smsRow only.
+  const rSms = await handleTaqnyatDeliveryWebhook(
+    req({ messageId: "pair-id", status: "delivered" }),
+    parseTaqnyatSmsDlr,
+    "sms",
+    deps,
+  );
+  assert.equal(rSms.status, 200);
+  assert.deepEqual(rSms.body, {
+    ok: true,
+    applied: true,
+    status: "delivered",
+  });
+  assert.equal(effects.updates.length, 1);
+  assert.equal(effects.updates[0].id, "inv-sms-pair");
+  assert.equal(effects.eventLogs.length, 1);
+  const smsLog = JSON.parse(effects.eventLogs[0].data) as { channel: string };
+  assert.equal(smsLog.channel, "taqnyat-sms");
+
+  // Now fire the WhatsApp route with the SAME providerId. Must land
+  // on waRow only — smsRow remains at exactly one update from above.
+  const rWa = await handleTaqnyatDeliveryWebhook(
+    req({
+      entry: [
+        {
+          changes: [
+            {
+              value: {
+                statuses: [{ id: "pair-id", status: "delivered" }],
+              },
+            },
+          ],
+        },
+      ],
+    }),
+    parseTaqnyatWhatsAppDlr,
+    "whatsapp",
+    deps,
+  );
+  assert.equal(rWa.status, 200);
+  assert.deepEqual(rWa.body, {
+    ok: true,
+    applied: true,
+    status: "delivered",
+  });
+  assert.equal(effects.updates.length, 2);
+  assert.equal(effects.updates[1].id, "inv-wa-pair");
+  assert.equal(effects.eventLogs.length, 2);
+  const waLog = JSON.parse(effects.eventLogs[1].data) as { channel: string };
+  assert.equal(waLog.channel, "taqnyat-whatsapp");
+
+  // Both lookups happened, each with its own channel. This is the
+  // line that would have failed prior to the fix — without channel
+  // scoping, the SMS route would have randomly found EITHER row
+  // based on DB ordering, not the SMS one specifically.
+  assert.deepEqual(effects.findCalls, [
+    { providerId: "pair-id", channel: "sms" },
+    { providerId: "pair-id", channel: "whatsapp" },
+  ]);
 });
