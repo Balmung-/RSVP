@@ -8416,3 +8416,118 @@ Surface coverage as of P14-I:
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
 
 Ready for audit.
+
+---
+
+## P14-J — `render()` + `escapeHtml()` template primitives + Prisma error classifiers (hash `0250650`)
+
+### Why this slice (honest scoping)
+
+After P14-I landed, re-ran the scoping discipline. P14-I cleaned up the two biggest gaps the subagent had flagged (phrase() and secretMatches). Deferred items from that entry (activity-page migration, gate-precedence, compat shim) remained marginal. Re-surveyed `src/lib/*.ts` for any other small, pure, widely-called, ZERO-coverage helpers.
+
+Two surfaced:
+
+**`src/lib/template.ts`** — 15 LOC, two pure functions with ZERO direct unit coverage:
+- `render(template, vars)`: `{{token}}` interpolator. Called on **every invitation sent** (subject, body, HTML branches), **every template preview**, **every default-template resolution** (i18n.ts pulls the Arabic / English dictionary through `render`). One of the most-hot call sites in the whole invitation flow.
+- `escapeHtml(s)`: 5-char HTML encoder (`& < > " '`). Called on every operator-typed field that is re-rendered as HTML anywhere in the UI — campaign descriptions, notes, template previews. The security property.
+
+**`src/lib/prisma-errors.ts`** — 21 LOC, two instanceof-guarded classifiers with ZERO direct unit coverage:
+- `isUniqueViolation(e)`: P2002 detection. Used by every `create` / `upsert` path to translate "duplicate key" into a user-visible message.
+- `isNotFound(e)`: P2025 detection. Used by every `update` / `delete` path to translate "record missing" into soft-recovery branches.
+
+Both are **pin-only** slices — same pattern as P14-F and P14-I half-B. Functions are already pure + exported; deliverable is the pin set.
+
+### Regression surfaces protected
+
+**(1) `render` — unknown-token fallback.** A regression from `vars[key] ?? ""` to `vars[key] ?? key` would leak literal `{{foo}}` into sent invitations. Load-bearing pin: `render("Hi {{name}}", {}) === "Hi !"`.
+
+**(2) `render` — `??` vs `||` semantics.** The current impl uses `??` so explicit empty-string values render as empty, NOT fall through to fallback. A regression to `||` would conflate empty strings with missing. Pinned with `render("[{{brand}}]", { brand: "" }) === "[]"`.
+
+**(3) `render` — one-pass security discipline.** If a var value contains `{{secret}}` and the engine re-scanned the output, a `name={{secret}}` injection could leak the `secret` var. The current `String.prototype.replace` is one-pass by construction. Pinned: `render("Hi {{name}}", { name: "{{secret}}", secret: "SHOULD-NOT-APPEAR" }) === "Hi {{secret}}"` with an explicit `!result.includes("SHOULD-NOT-APPEAR")` assertion.
+
+**(4) `render` — no auto-escape.** `render` deliberately does NOT HTML-escape. That's `escapeHtml`'s job, called separately on untrusted fields. Pinned: `render("Hi {{name}}", { name: "<b>bold</b>" }) === "Hi <b>bold</b>"`. A refactor that adds auto-escape would silently break the plain-text template path (which passes `<` through as a literal for the email client to render).
+
+**(5) `render` — whitespace / dot-path / invalid-shape handling.** Regex is `/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g`. Pinned:
+- `{{ name }}` tolerated (leading/trailing whitespace in braces)
+- `{{user.name}}` resolves via FLAT key lookup `"user.name"` (NOT nested)
+- `{{var_1}}` / `{{var2}}` work (underscores + digits)
+- `{{ }}` / `{{with-dash}}` / `{{has space}}` do NOT match → render verbatim (the correct failure mode — operator sees the typo)
+
+**(6) `escapeHtml` — ordering.** `&` MUST be encoded first. If `&` ran after `<`, then `<` → `&lt;` would be re-encoded as `&amp;lt;`. The killer pin: `escapeHtml("<\"&'>") === "&lt;&quot;&amp;&#39;&gt;"` (ampersand encoded once, at the right position).
+
+**(7) `escapeHtml` — numeric apostrophe entity.** `&#39;` is used (not `&apos;`) because `&apos;` isn't HTML4-safe. Pinned: `escapeHtml("don't") === "don&#39;t"`.
+
+**(8) `escapeHtml` — canonical XSS payload.** `<script>alert('xss')</script>` round-tripped. Pinned.
+
+**(9) Prisma classifiers — `instanceof` discipline.** Duck-typed `{ code: "P2002" }` POJO and plain `Error` with `.code = "P2002"` MUST NOT classify. Pinned against a "simpler" refactor to `(e as any)?.code === "P2002"` which would let any custom error or attacker-controlled JSON forge the classification.
+
+**(10) Prisma classifiers — code discrimination.** P2002 and P2025 are mutually exclusive. Copy-paste regression guard: P2002 must classify only as unique violation, P2025 must classify only as not-found. Pinned both directions.
+
+**(11) Prisma classifiers — weird-input safety.** These run inside `catch (e: unknown)` where `e` can be anything. Pinned no-throw across `{null, undefined, "P2002", 42, 0, "", true, false}`.
+
+### Implementation — single commit `0250650`
+
+**New:**
+- `tests/unit/template-render.test.ts` — 26 pins, ~264 LOC.
+- `tests/unit/prisma-errors.test.ts` — 14 pins, ~146 LOC.
+
+**Modified:**
+- `package.json` — adds both new test files to the `test` script.
+
+No source-file changes. Pin-only slice.
+
+### Test coverage breakdown
+
+**template-render.test.ts — 26 tests:**
+
+- `render` basic substitution (4): single token, multiple distinct tokens, repeated same token (hot path — `{{brand}}` in subject + sign-off), adjacent tokens with no separator.
+- `render` unknown/missing (3): unknown token → empty, explicit-undefined value → empty, explicit empty-string value → empty (distinct from missing; `??` semantics).
+- `render` whitespace + token-name rules (4): `{{ name }}` tolerated, dots literal (flat lookup), underscores+digits, invalid shapes leak verbatim.
+- `render` security properties (2): one-pass discipline + no auto-escape.
+- `render` edge cases (4): empty template, no-tokens passthrough, token-at-start, token-at-end.
+- `escapeHtml` per-char (5): `&`, `<`, `>`, `"`, `'`.
+- `escapeHtml` combined (4): all-five-ordering (`<"&'>` round-trip), empty, plain-text passthrough, canonical XSS payload.
+
+**prisma-errors.test.ts — 14 tests:**
+
+- `isUniqueViolation` (6): P2002 true, P2025 false, P2003 false, plain Error with .code="P2002" false, POJO `{code:"P2002"}` false, weird inputs no-throw.
+- `isNotFound` (6): mirror.
+- Mutual exclusivity (2): P2002-only-unique, P2025-only-not-found.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1160/1160 passing** in 2.8s (was 1120; +40 from the new tests)
+- 0 `not ok` lines in TAP
+- No source changes — pin-only slice
+
+### Where P14 stands — now ten slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization (email + sms routes).
+- **P14-I** (`1375045`) — activity phrase() renderer + webhook-auth secretMatches (pin-only).
+- **P14-J** (`0250650`) — template render/escapeHtml + Prisma error classifiers (pin-only).
+
+Test count: 825 → 1160 (+335 across ten slices). Three of ten are pin-only (P14-F, P14-I, P14-J); seven are extract-and-pin.
+
+Surface coverage as of P14-J:
+- **AI tool helpers**: workspace-reducer, widget-pipeline, confirm-flow, import-outcomes, send-campaign-summary, propose-send-preview, activity-scope — all extracted + pinned.
+- **Inbound webhooks**: parseIntent + token extractors (P14-F) + provider normalization (P14-H) — fully pinned.
+- **Operator-visible strings**: `phrase()` (~45 event kinds) — pinned for tone correctness, actor cascade, pluralization, fallback robustness.
+- **Security-sensitive helpers**: `secretMatches` (length-oracle resistance), `escapeHtml` (XSS ordering), `render` one-pass discipline — all pinned.
+- **Template primitives**: `render` (invitation-flow hot path) + `escapeHtml` (operator HTML-escape primitive) — pinned for core correctness + security properties.
+- **Error classifiers**: `isUniqueViolation` + `isNotFound` — pinned for `instanceof` discipline + code discrimination.
+
+### What remains deferred (final)
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change; zero new test value. Remains a follow-up.
+- **Gate-precedence in `propose_import` / `commit_import`** — audited & formally deferred (prisma-interleaved by design).
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — out of scope for P14.
+
+Ready for audit.
