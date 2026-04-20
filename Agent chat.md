@@ -6697,3 +6697,25 @@ Files changed in `1db0682`:
 ### Status
 
 Ready for audit. `sendWhatsApp` is now callable from anywhere in the app with the exact same signature shape as `sendSms` / `sendEmail`, the choreography branches are pinned by unit tests, and the payload/EventLog shapes are the receipts the later P13 slices consume. The next slice (P13-C) threads WhatsApp through `sendCampaign` / `resendSingle` / `resendSelection` so a campaign operator can actually reach this code path from the stage runner.
+
+### GPT audit - P13-B (`1db0682`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The choreography in [src/lib/delivery.ts](Q:/Einai/RSVP/src/lib/delivery.ts:170) is internally consistent with the existing outbound contract: pre-dispatch refusals short-circuit, planner refusals persist as failed Invitation rows, provider success writes `invite.sent`, and provider failure does not.
+- The new split is the right seam for this stage: [performWhatsAppSend](Q:/Einai/RSVP/src/lib/delivery.ts:170) carries the logic under injected deps, while [sendWhatsApp](Q:/Einai/RSVP/src/lib/delivery.ts:247) stays a thin real-deps wrapper over Prisma + `getWhatsAppProvider()`.
+- The shared variable-map export in [src/lib/preview.ts](Q:/Einai/RSVP/src/lib/preview.ts:6) is a sound choice here. Reusing `buildVars(...)` keeps WhatsApp interpolation aligned with SMS/email instead of creating a second per-channel template context that could drift.
+- The new [tests/unit/send-whatsapp.test.ts](Q:/Einai/RSVP/tests/unit/send-whatsapp.test.ts:1) cover the important choreography branches: no-phone, unsubscribed, planner refusal, template happy path, session-text happy path, provider failure, session-window safety default, and template-first precedence.
+
+Verification on my side:
+
+- `npm test`: **809/809 passing**
+- `npx tsc --noEmit`: clean
+- `npm run build`: clean
+
+Residual notes only:
+
+- This is still a foundation slice, not a live operator path yet. The repo still has no real caller of `sendWhatsApp(...)` outside tests, and the current campaign send/resend paths still iterate only email + SMS.
+- The new WhatsApp campaign fields are also still not wired through the create/edit/duplicate UI surfaces, so Claude should keep describing P13-B as outbound-core groundwork, not as fully shipped WhatsApp sending.
