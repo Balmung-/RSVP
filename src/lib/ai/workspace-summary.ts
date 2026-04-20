@@ -289,3 +289,124 @@ export async function refreshWorkspaceSummary(
     },
   );
 }
+
+// ---- P14-A: route-trigger helpers ----
+//
+// The chat route fires a refresh after a counter-moving tool call; the
+// confirm route fires a refresh after a successful destructive dispatch.
+// Both gates used to live inline as `if (call.name === "draft_campaign")`
+// / `if (status === 200)` branches with their own try/catch and null
+// handling — small, but impossible to unit-test without spinning up
+// the Next.js runtime around them. Extracting the gate+refresh+catch
+// into a single pure function with a discriminated-union outcome means:
+//
+//   - The route becomes a thin outcome-to-side-effect switch (emit SSE,
+//     log warning, or no-op); the gate condition, the error-swallow
+//     posture, and the "is the compute result even valid" check all sit
+//     under unit tests.
+//   - A regression that widens / narrows either gate (e.g. "also
+//     refresh on commit_import in the chat route") has to update one
+//     function + its pin, not search-replace two route files.
+//   - The "invalid" branch (compute produced something the validator
+//     rejected) stays a belt-and-braces path — it can only be reached
+//     today by a refactor in `computeWorkspaceRollup` that breaks the
+//     produces-validated-shape-by-construction contract, but the
+//     outcome type makes the existence of that branch grep-visible
+//     instead of buried inside a conditional.
+//
+// Keep both helpers alongside `refreshWorkspaceSummary` (not in the
+// routes) so the full refresh surface lives in one file — anyone
+// reading this module sees the full lifecycle (compute → refresh →
+// trigger-gate) before jumping into either route.
+
+// Outcome shape shared by both trigger helpers.
+//
+//   - `skipped`  — the gate predicate returned false; no compute ran.
+//                  The caller must do nothing (no emit, no log).
+//   - `produced` — compute + upsert landed and returned a real widget
+//                  row. The caller emits `widget_upsert` (chat route)
+//                  or relies on the next `workspace_snapshot` (confirm
+//                  route — no SSE channel open there).
+//   - `invalid`  — compute returned props that upsertWidget's internal
+//                  validateWidget rejected. Defensive branch; the
+//                  caller logs and drops.
+//   - `error`    — refreshWorkspaceSummary threw (usually a prisma
+//                  failure). The error is preserved on the outcome so
+//                  the caller can log it with the right prefix rather
+//                  than the helper owning a tag the test can't pin.
+export type SummaryRefreshOutcome =
+  | { kind: "skipped" }
+  | { kind: "produced"; widget: Widget }
+  | { kind: "invalid" }
+  | { kind: "error"; error: unknown };
+
+// Set of tool-call names that move rollup counters in a way the chat
+// route can refresh (i.e. the handler wrote to the DB on this turn).
+// Exported as a readonly tuple so the pin below can iterate the full
+// set — a new entry has to show up both in the route wiring and in the
+// test's "triggers refresh" loop, catching the half-landed regression
+// where someone wires the gate but forgets the test (or vice versa).
+//
+// `draft_campaign` is the only entry today — `send_campaign` and
+// `commit_import` are destructive and intercepted by dispatch() on the
+// chat route; their real writes happen via the confirm route, which
+// has its own helper below.
+export const CHAT_TOOLS_REFRESHING_SUMMARY = ["draft_campaign"] as const;
+
+export type ChatToolRefreshingSummary =
+  (typeof CHAT_TOOLS_REFRESHING_SUMMARY)[number];
+
+function isChatToolRefreshingSummary(
+  name: string,
+): name is ChatToolRefreshingSummary {
+  return (CHAT_TOOLS_REFRESHING_SUMMARY as readonly string[]).includes(name);
+}
+
+// Called from the chat route after a tool dispatch returns OK. Fires
+// the refresh only when the tool was one of the counter-movers listed
+// above; every other tool (read-only, destructive-intercepted, or just
+// not touching the rollup's counters) is a no-op so the route doesn't
+// waste a query on every turn.
+export async function tryRefreshSummaryForChatTool(
+  deps: { prismaLike: WorkspaceSummaryPrismaLike },
+  args: {
+    sessionId: string;
+    campaignScope: Prisma.CampaignWhereInput;
+    now?: Date;
+  },
+  toolName: string,
+): Promise<SummaryRefreshOutcome> {
+  if (!isChatToolRefreshingSummary(toolName)) return { kind: "skipped" };
+  try {
+    const rollup = await refreshWorkspaceSummary(deps, args);
+    if (rollup === null) return { kind: "invalid" };
+    return { kind: "produced", widget: rollup };
+  } catch (error) {
+    return { kind: "error", error };
+  }
+}
+
+// Called from the confirm route after the destructive dispatch returns.
+// Fires the refresh only on the true-success path (HTTP 200); every
+// other status either released the anchor (retryable refusal) or held
+// the claim (dispatch-throw / in-write refusal), and neither moved
+// counters. A non-200 refresh would run queries for nothing AND emit
+// a misleading "fresh" timestamp to the operator.
+export async function tryRefreshSummaryForConfirm(
+  deps: { prismaLike: WorkspaceSummaryPrismaLike },
+  args: {
+    sessionId: string;
+    campaignScope: Prisma.CampaignWhereInput;
+    now?: Date;
+  },
+  status: number,
+): Promise<SummaryRefreshOutcome> {
+  if (status !== 200) return { kind: "skipped" };
+  try {
+    const rollup = await refreshWorkspaceSummary(deps, args);
+    if (rollup === null) return { kind: "invalid" };
+    return { kind: "produced", widget: rollup };
+  } catch (error) {
+    return { kind: "error", error };
+  }
+}

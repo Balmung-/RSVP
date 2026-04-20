@@ -12,7 +12,7 @@ import {
   confirmSendWidgetKey,
   confirmImportWidgetKey,
 } from "@/lib/ai/widgetKeys";
-import { refreshWorkspaceSummary } from "@/lib/ai/workspace-summary";
+import { tryRefreshSummaryForConfirm } from "@/lib/ai/workspace-summary";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -502,25 +502,34 @@ export async function POST(
   // W7 — refresh the workspace rollup after a successful destructive
   // action. Both flows move counters the rollup tracks: a send moves
   // `invitations.sent_24h`; an import moves `invitees.total` (or
-  // creates Contact rows for the operator's contact book). Gated on
-  // HTTP 200 so we only refresh on the true-success path —
-  // structured refusals (blockers, forbidden, etc.) land as 400 with
-  // `body.ok: false` and don't move counters; dispatch-throws keep
-  // the anchor claimed and also don't refresh (wasted work, and the
-  // next real action will refresh anyway). Errors are swallowed by
-  // design: the operator already got their outcome in `body`, and a
-  // stale rollup surfaces in a later snapshot once the next mutation
-  // refreshes.
-  if (status === 200) {
-    try {
-      await refreshWorkspaceSummary(
-        { prismaLike: prisma as never },
-        { sessionId: row.sessionId, campaignScope: ctx.campaignScope },
-      );
-    } catch (err) {
-      console.warn(`[confirm] workspace rollup refresh failed`, err);
-    }
+  // creates Contact rows for the operator's contact book). The gate
+  // (only refresh on the true-success path) lives in
+  // `tryRefreshSummaryForConfirm` so the predicate + error-swallow
+  // posture sit under unit tests; this branch just translates the
+  // outcome into the matching side effect.
+  //
+  // Non-200 statuses either released the anchor (retryable refusal —
+  // no counters moved) or held the claim (dispatch-throw / in-write
+  // refusal — the next real action will refresh anyway). Errors are
+  // swallowed by design: the operator already got their outcome in
+  // `body`, and a stale rollup surfaces in a later snapshot once the
+  // next mutation refreshes. No SSE channel is open on this route,
+  // so a successful "produced" outcome is a silent persist — the
+  // next `workspace_snapshot` picks it up.
+  const summaryOutcome = await tryRefreshSummaryForConfirm(
+    { prismaLike: prisma as never },
+    { sessionId: row.sessionId, campaignScope: ctx.campaignScope },
+    status,
+  );
+  if (summaryOutcome.kind === "error") {
+    console.warn(
+      `[confirm] workspace rollup refresh failed`,
+      summaryOutcome.error,
+    );
   }
+  // "skipped" / "produced" / "invalid" — no-op. No SSE channel on this
+  // route; the refreshed rollup lands in the DB and is picked up by the
+  // next workspace_snapshot (session reload or next chat turn).
 
   return NextResponse.json(body, { status });
 }

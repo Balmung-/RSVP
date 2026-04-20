@@ -7,8 +7,11 @@ import {
   validateWidgetProps,
 } from "../../src/lib/ai/widget-validate";
 import {
+  CHAT_TOOLS_REFRESHING_SUMMARY,
   computeWorkspaceRollup,
   refreshWorkspaceSummary,
+  tryRefreshSummaryForChatTool,
+  tryRefreshSummaryForConfirm,
   type WorkspaceSummaryPrismaLike,
 } from "../../src/lib/ai/workspace-summary";
 import { WORKSPACE_SUMMARY_WIDGET_KEY } from "../../src/lib/ai/widgetKeys";
@@ -590,4 +593,298 @@ test("refresh: separate sessions each get their own summary row", async () => {
   assert.ok(stub.state.rows.every((r) => r.widgetKey === WORKSPACE_SUMMARY_WIDGET_KEY));
   const sessionIds = stub.state.rows.map((r) => r.sessionId).sort();
   assert.deepEqual(sessionIds, ["s-1", "s-2"]);
+});
+
+// ---- (d) P14-A: route-trigger helpers ----
+//
+// The chat and confirm routes each gate a refresh call behind a small
+// predicate (tool name == "draft_campaign" / status == 200). Pre-P14-A
+// those predicates were inline in the routes, which have Next runtime
+// dependencies (NextResponse, session cookies, SSE emitters) and can't
+// be loaded from a plain node test without heavy mocking. P14-A
+// extracts the predicate + refresh + error-swallow posture into
+// `tryRefreshSummaryFor{ChatTool,Confirm}` so every outcome branch
+// (`skipped` / `produced` / `invalid` / `error`) is pin-testable here.
+//
+// What a regression in any of these pins would mean in production:
+//   - "skipped" fails closed  → a refresh runs when it shouldn't (e.g.
+//     on every read-only tool call), wasting four counter queries per
+//     chat turn. Not a correctness bug, but a real perf regression at
+//     scale.
+//   - "skipped" fails open    → the refresh STOPS running on the tool
+//     that should trigger it (e.g. draft_campaign stops refreshing),
+//     and the dashboard's counter strip silently goes stale until the
+//     next unrelated mutation.
+//   - "produced" regression   → the helper returns the widget but the
+//     route doesn't emit SSE; dashboard reloads see the correct row on
+//     next snapshot but live updates silently break.
+//   - "error"/"invalid"       → the error escapes the try/catch and
+//     aborts the chat turn OR the confirm response, losing the model's
+//     reply / the operator's confirmation outcome.
+
+test("tryRefreshSummaryForChatTool: refreshes on draft_campaign, produces widget outcome", async () => {
+  // Happy path pin — the one tool that MUST trigger a refresh in the
+  // chat route. If the gate ever narrows (someone removes
+  // "draft_campaign" from CHAT_TOOLS_REFRESHING_SUMMARY without
+  // noticing this test), the rollup silently stops updating in the
+  // live SSE stream.
+  const stub = makeRollupStub({ campaignCount: 7 });
+  const outcome = await tryRefreshSummaryForChatTool(
+    { prismaLike: stub.prismaLike },
+    { sessionId: "s-1", campaignScope: {} },
+    "draft_campaign",
+  );
+  assert.equal(outcome.kind, "produced");
+  if (outcome.kind === "produced") {
+    assert.equal(outcome.widget.widgetKey, WORKSPACE_SUMMARY_WIDGET_KEY);
+    assert.equal(outcome.widget.kind, "workspace_rollup");
+    assert.equal(outcome.widget.slot, "summary");
+  }
+  // A counter query actually ran — compute did not short-circuit.
+  assert.ok(stub.state.calls.length > 0, "expected compute queries to run");
+  // The row landed in the DB — the caller's "produced" emit is safe
+  // to send because the widget is already persisted.
+  assert.equal(stub.state.rows.length, 1);
+});
+
+test("tryRefreshSummaryForChatTool: skips any tool name not in CHAT_TOOLS_REFRESHING_SUMMARY", async () => {
+  // The gate's negative space. Every one of these names has a reason
+  // to NOT trigger a refresh in the chat route:
+  //   - list_campaigns / get_campaign — read-only, nothing to refresh.
+  //   - propose_send / propose_import — dispatch-intercepted here;
+  //     their real writes happen via the /confirm route which has its
+  //     own helper.
+  //   - send_campaign / commit_import — destructive; dispatch refuses
+  //     them here, they never run on this route.
+  //   - empty string — handler for a broken tool envelope.
+  // If the gate ever widens to accept one of these (e.g. someone adds
+  // "propose_send" thinking it moves counters), the refresh would
+  // start running on propose calls — waste a query on every propose
+  // turn AND emit a spurious widget_upsert that the client re-orders.
+  const nonTriggering = [
+    "list_campaigns",
+    "get_campaign",
+    "propose_send",
+    "propose_import",
+    "send_campaign",
+    "commit_import",
+    "draft_campaign_preview",
+    "",
+  ];
+  for (const name of nonTriggering) {
+    const stub = makeRollupStub({ campaignCount: 3 });
+    const outcome = await tryRefreshSummaryForChatTool(
+      { prismaLike: stub.prismaLike },
+      { sessionId: "s-1", campaignScope: {} },
+      name,
+    );
+    assert.equal(
+      outcome.kind,
+      "skipped",
+      `expected "${name}" to skip the refresh`,
+    );
+    // Compute did NOT run — no counter queries, no upsert. This is the
+    // load-bearing half of the pin: the gate returning early before
+    // touching prisma is what makes the non-triggering case cheap.
+    assert.equal(
+      stub.state.calls.length,
+      0,
+      `"${name}" should not have issued any counter queries`,
+    );
+    assert.equal(
+      stub.state.rows.length,
+      0,
+      `"${name}" should not have written a rollup row`,
+    );
+  }
+});
+
+test("tryRefreshSummaryForChatTool: captures thrown errors as { kind: 'error' } without rethrowing", async () => {
+  // Error-swallow posture pin. The chat route's try/catch around
+  // the old inline refresh was there BECAUSE a thrown error here
+  // would abort the streaming turn mid-response and lose the
+  // model's reply. The helper MUST preserve that behaviour —
+  // return an `error` outcome and let the route log it, never
+  // rethrow. If this pin regresses, a transient prisma failure
+  // (connection drop, deadlock) would kill the chat turn.
+  const boom = new Error("prisma connection dropped");
+  const { prismaLike } = makeRollupStub();
+  // Override one of the underlying counters to throw. compute calls
+  // campaign.count first in the Promise.all — forcing it to reject
+  // exercises the catch path.
+  const throwingPrismaLike: WorkspaceSummaryPrismaLike = {
+    ...prismaLike,
+    campaign: {
+      ...prismaLike.campaign,
+      async count() {
+        throw boom;
+      },
+    },
+  };
+  const outcome = await tryRefreshSummaryForChatTool(
+    { prismaLike: throwingPrismaLike },
+    { sessionId: "s-1", campaignScope: {} },
+    "draft_campaign",
+  );
+  assert.equal(outcome.kind, "error");
+  if (outcome.kind === "error") {
+    // The raw error is preserved so the route can log it with its
+    // own prefix. Losing this reference would degrade logs to
+    // "something went wrong" with no diagnostic signal.
+    assert.equal(outcome.error, boom);
+  }
+});
+
+test("tryRefreshSummaryForChatTool: returns { kind: 'invalid' } when upsertWidget rejects", async () => {
+  // Defensive branch. `refreshWorkspaceSummary` returns null when
+  // upsertWidget's validateWidget step rejects — reachable today
+  // only via an empty sessionId (upsertWidget's own guard) or a
+  // future compute refactor that produces malformed props. Either
+  // path MUST surface as "invalid", not as "produced", so the
+  // route logs-and-drops instead of emitting a widget_upsert with
+  // a null payload. The empty sessionId path is a stand-in for the
+  // compute-produces-bad-shape case that's currently unreachable;
+  // the outcome wiring is identical either way.
+  const stub = makeRollupStub({ campaignCount: 1 });
+  const outcome = await tryRefreshSummaryForChatTool(
+    { prismaLike: stub.prismaLike },
+    { sessionId: "", campaignScope: {} }, // upsertWidget rejects empty sessionId
+    "draft_campaign",
+  );
+  assert.equal(outcome.kind, "invalid");
+  // No row persisted — the empty sessionId short-circuited inside
+  // upsertWidget BEFORE the write landed.
+  assert.equal(stub.state.rows.length, 0);
+});
+
+test("tryRefreshSummaryForConfirm: refreshes on status 200, produces widget outcome", async () => {
+  // Happy path pin for the confirm route. A successful send or import
+  // (200) moves counters the rollup tracks (`sent_24h` / `invitees.total`).
+  // If this gate regresses closed, every send/import silently leaves
+  // the rollup stale until the next unrelated mutation refreshes it.
+  const stub = makeRollupStub({
+    campaignCount: 4,
+    inviteeCount: 80,
+    sent24h: 5,
+    sentEmail24h: 3,
+    sentSms24h: 1,
+    sentWhatsApp24h: 1,
+  });
+  const outcome = await tryRefreshSummaryForConfirm(
+    { prismaLike: stub.prismaLike },
+    { sessionId: "s-1", campaignScope: {} },
+    200,
+  );
+  assert.equal(outcome.kind, "produced");
+  if (outcome.kind === "produced") {
+    assert.equal(outcome.widget.widgetKey, WORKSPACE_SUMMARY_WIDGET_KEY);
+    assert.equal(outcome.widget.kind, "workspace_rollup");
+    assert.equal(outcome.widget.slot, "summary");
+  }
+  assert.equal(stub.state.rows.length, 1);
+});
+
+test("tryRefreshSummaryForConfirm: skips every non-200 status", async () => {
+  // Gate's negative space. Every non-200 status on the confirm route
+  // is either a released-anchor refusal (blocker, forbidden, etc.)
+  // where no DB write happened OR a dispatch-throw / in-write refusal
+  // where the claim is held and the next real action will refresh
+  // anyway. Refreshing on ANY of these would waste four queries AND
+  // emit a "fresh" generated_at timestamp that doesn't match a real
+  // mutation.
+  //
+  // Sweep a handful of real statuses the confirm route can produce:
+  //   400 — structured refusal, anchor released OR held (depends on
+  //         error code whitelist); neither case moved counters.
+  //   401 — unauth (shouldn't reach here in practice but defensive).
+  //   403 — forbidden (scope check failed; no write).
+  //   404 — row not found / ownership mismatch (no write).
+  //   409 — already_confirmed on the idempotency gate (no new write).
+  //   500 — dispatch-throw (anchor held, no refresh).
+  // Plus 0 as the "unset status" edge case in case a refactor forgets
+  // to populate status before calling this helper — the gate MUST NOT
+  // treat that as "success".
+  const statuses = [0, 400, 401, 403, 404, 409, 500];
+  for (const status of statuses) {
+    const stub = makeRollupStub({ campaignCount: 3 });
+    const outcome = await tryRefreshSummaryForConfirm(
+      { prismaLike: stub.prismaLike },
+      { sessionId: "s-1", campaignScope: {} },
+      status,
+    );
+    assert.equal(
+      outcome.kind,
+      "skipped",
+      `expected status ${status} to skip the refresh`,
+    );
+    assert.equal(
+      stub.state.calls.length,
+      0,
+      `status ${status} should not have issued any counter queries`,
+    );
+    assert.equal(
+      stub.state.rows.length,
+      0,
+      `status ${status} should not have written a rollup row`,
+    );
+  }
+});
+
+test("tryRefreshSummaryForConfirm: captures thrown errors as { kind: 'error' } without rethrowing", async () => {
+  // Error-swallow posture pin. Mirror of the chat-tool pin above —
+  // the confirm route has already sent its response body before this
+  // refresh runs, so a throw here would surface as an unhandled
+  // promise rejection and break the request finalisation without
+  // affecting the operator's outcome. Must stay swallowed.
+  const boom = new Error("prisma timed out");
+  const { prismaLike } = makeRollupStub();
+  const throwingPrismaLike: WorkspaceSummaryPrismaLike = {
+    ...prismaLike,
+    campaign: {
+      ...prismaLike.campaign,
+      async count() {
+        throw boom;
+      },
+    },
+  };
+  const outcome = await tryRefreshSummaryForConfirm(
+    { prismaLike: throwingPrismaLike },
+    { sessionId: "s-1", campaignScope: {} },
+    200,
+  );
+  assert.equal(outcome.kind, "error");
+  if (outcome.kind === "error") {
+    assert.equal(outcome.error, boom);
+  }
+});
+
+test("tryRefreshSummaryForConfirm: returns { kind: 'invalid' } when upsertWidget rejects", async () => {
+  // Same defensive branch as the chat-tool variant — if a future
+  // refactor breaks compute's produces-validated-shape invariant,
+  // or an empty sessionId slips past an earlier guard, the outcome
+  // surfaces as "invalid" rather than a null widget leaking into
+  // the caller. Empty sessionId is again the concrete trigger.
+  const stub = makeRollupStub({ campaignCount: 1 });
+  const outcome = await tryRefreshSummaryForConfirm(
+    { prismaLike: stub.prismaLike },
+    { sessionId: "", campaignScope: {} },
+    200,
+  );
+  assert.equal(outcome.kind, "invalid");
+  assert.equal(stub.state.rows.length, 0);
+});
+
+test("CHAT_TOOLS_REFRESHING_SUMMARY is the one-and-only gate list — drift catches here", () => {
+  // Meta-pin on the exported tuple. The chat route's gate is driven
+  // by this list; changing the list without updating the positive
+  // and negative pins above is the exact drift scenario that would
+  // leave the rollup half-wired (refresh fires on X but tests only
+  // cover Y). The assertion below forces a test update the moment
+  // the tuple changes.
+  //
+  // Today: exactly one entry — `draft_campaign`. `send_campaign` and
+  // `commit_import` are destructive and run on the confirm route (see
+  // `tryRefreshSummaryForConfirm`); read-only tools don't move
+  // counters.
+  assert.deepEqual(CHAT_TOOLS_REFRESHING_SUMMARY, ["draft_campaign"]);
 });
