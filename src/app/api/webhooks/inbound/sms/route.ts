@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ingest } from "@/lib/inbound";
 import { secretMatches } from "@/lib/webhook-auth";
+import { normalizeInboundSms } from "@/lib/inbound-normalize";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,6 +12,12 @@ export const runtime = "nodejs";
 //
 // Auth: shared bearer in x-inbound-secret. Providers that can't send
 // a header can include it as a query string secret (?key=<token>) too.
+//
+// P14-H: the coalesce rules for Twilio / Unifonic / Msegat key-casing
+// variants (`From | from | sender`, `Body | body | message`, etc.)
+// and the `missing_fields` short-circuit live in
+// `src/lib/inbound-normalize.ts`. This route only does auth, URL
+// parsing, and `ingest()` handoff.
 
 export async function POST(req: Request) {
   const secret = process.env.INBOUND_WEBHOOK_SECRET;
@@ -27,18 +34,16 @@ export async function POST(req: Request) {
   }
 
   const fd = await req.formData();
-  const from = String(fd.get("From") ?? fd.get("from") ?? fd.get("sender") ?? "");
-  const to = String(fd.get("To") ?? fd.get("to") ?? fd.get("recipient") ?? "");
-  const body = String(fd.get("Body") ?? fd.get("body") ?? fd.get("message") ?? "");
-  const providerId = String(fd.get("MessageSid") ?? fd.get("messageId") ?? "") || null;
-  if (!from || !body) return NextResponse.json({ ok: false, error: "missing_fields" }, { status: 400 });
+  const result = normalizeInboundSms(fd);
+  if (!result.ok) {
+    return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
+  }
 
   const outcome = await ingest({
     channel: "sms",
-    providerId,
-    fromAddress: from,
-    toAddress: to || null,
-    body,
+    ...result.sms,
+    // Email-only fields, inbound SMS has neither. Kept explicit so
+    // the `ingest()` call-shape is the same regardless of channel.
     subject: null,
     rawHeaders: null,
   });
