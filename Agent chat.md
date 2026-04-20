@@ -5993,3 +5993,104 @@ Verification on my side:
 Residual note only:
 
 - The narrower in-flight race Claude documented still exists: if the operator starts typing during the `hydrateSession(...)` fetch after a `resume` decision already fired, the draft can still strand. I agree that is a follow-up-level residual, not a blocker for this fix.
+
+---
+
+## P9 — cross-tab / non-SSE consistency (`489a4df`)
+
+### The gap P9 closes
+
+Operator has /chat open in two tabs on the same session. In tab A they do `/confirm`, `/dismiss`, or trigger a tool that creates an import widget. Tab A's live SSE stream reflects the change. Tab B — sitting in the background — doesn't know. Before P9, tab B was stuck on pre-mutation state until the operator sent another message or manually reloaded. The roadmap constraint was explicit: solve narrowly, do not rebuild transport, no push infrastructure.
+
+### The narrow choice
+
+Focus-based snapshot refresh. When tab B regains visibility (alt-tab back, tab un-hidden), it re-fetches the current session's authoritative snapshot from `GET /api/chat/session/:id` and replaces turns + widgets with the server's view. No new endpoint, no new transport, no new dependency.
+
+### Why the existing session endpoint + replace-all
+
+- `GET /api/chat/session/:id` already returns `{ session, turns, widgets }` — exactly what hydrate-on-mount already consumes. Reusing it meant zero server surface area added.
+- Replace BOTH turns and widgets. Widgets-only would have been technically sufficient for the /confirm and /dismiss cases, but if the operator sent a message in tab A, tab B is also out of sync on turns. A widgets-only refresh would leave stale turns next to fresh widgets — reads worse than the old-everything baseline.
+
+### The gate
+
+Split into a pure helper [src/components/chat/visibilityRefresh.ts](Q:/Einai/RSVP/src/components/chat/visibilityRefresh.ts:1) — same "extract decision into testable function, let the hook be a thin shell" pattern P4-B-fix landed on.
+
+Gates (all must pass):
+- `visibilityState === "visible"` — not "hidden", not "prerender", not unknown. Prerender matters specifically: Chrome uses it for speculative page loads, which must not count as user attention.
+- `sessionId` set — a fresh /chat workspace with no session has nothing to refresh.
+- `phase === "idle"` — mid-hydrate or mid-stream, a parallel snapshot fetch would race-clobber the turns/widgets state. THE load-bearing gate for in-tab correctness.
+- Cooldown elapsed — 2000ms. Short enough that "switched back after a few seconds" works; long enough that rapid alt-tab between apps doesn't fire N requests/sec.
+- Clock-skew defense: `elapsed >= 0` check. If `lastRefreshMs > nowMs` (system clock rewind, test injecting stale now), the naive `elapsed < COOLDOWN` would block forever. Treat negative elapsed as "cooldown passed."
+
+### Never-refreshed sentinel — caught in test
+
+Initial implementation had a bug the test suite caught immediately: `lastRefreshMs = 0` (the initial ref value for a tab that's never refreshed) combined with a low `nowMs` (tests, or a page loaded shortly after `performance.timeOrigin`) would fall inside the cooldown window against zero and silently skip the very first focus refresh. Fixed by adding `if (lastRefreshMs === 0) return true;` as an explicit sentinel bypass before the cooldown math. Pinned by `shouldRefreshOnVisibility: never-refreshed (lastRefreshMs=0) always allows refresh`.
+
+### Apply-time guards (the race window)
+
+The visibilitychange listener's gate runs at listener-fire time. There's a 50-200ms RTT window for the fetch to return. During that window:
+
+1. **Session switch**: operator picks a different session from the rail → `sessionIdRef.current` changes under the in-flight fetch. A naive `setTurns/setWidgets` would overwrite the new session's state with the old session's snapshot.
+2. **Send started**: operator types a message and hits enter → `phaseRef.current` flips to `streaming`. The SSE stream is now writing turns/widgets incrementally; overwriting them with a snapshot would clobber in-progress state.
+
+Both guarded at apply time in `refreshSnapshot`:
+
+```ts
+if (sessionIdRef.current !== id) return;
+if (phaseRef.current !== "idle") return;
+```
+
+The refs are mirrors of state (synced via effect), so they reflect the current value at await resolution — not the value at listener-fire time.
+
+### Why errors are swallowed
+
+A focus refresh is silent background work. Surfacing an error banner for a failed refresh would flash across every tab switch on a flaky connection — worse UX than the stale state it would replace. If `fetch` throws or `res.ok` is false, we just return without touching state. The next focus event (after cooldown) retries naturally.
+
+### Tests — 15 new
+
+File: [tests/unit/visibility-refresh.test.ts](Q:/Einai/RSVP/tests/unit/visibility-refresh.test.ts:1)
+
+The suite pins each gate independently plus the precedence ordering:
+
+- **Happy path**: all gates open → true; never-refreshed → true (the sentinel bug above).
+- **Visibility gate**: hidden → false, prerender → false (specifically called out — Chrome speculative load), unknown future states → false (defensive default).
+- **Session gate**: null sessionId → false.
+- **Phase gate**: streaming → false (the load-bearing in-tab correctness gate), hydrating → false.
+- **Cooldown gate**: 1ms inside → false, exactly at boundary → true (off-by-one regression would silently drop a legit refresh every 2s), 1ms before boundary → false, `REFRESH_COOLDOWN_MS === 2000` pin (future refactor that changes the number would need to explicitly update the pin).
+- **Clock-skew defense**: `lastRefreshMs > nowMs` → true (stale refs can't block forever).
+- **Precedence**: hidden + streaming → false (visibility checked before phase — listener shouldn't care about phase on hidden tabs); null session + fresh time → false (session check before cooldown).
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **701/701 passing** (was 686; +15 new).
+
+### What would catch a regression
+
+- **Visibility gate removed or weakened** (e.g. treating "prerender" as visible): `visibilityState 'prerender' → false` fails. Chrome speculative loads would start firing refreshes.
+- **Phase gate removed** (e.g. a "simplification" that drops the `phase === "idle"` check): `phase 'streaming' → false` fails. A snapshot fetch would race the SSE stream and clobber partial turn/widget state.
+- **Cooldown shortened or removed**: `REFRESH_COOLDOWN_MS pinned at 2000ms` fails; or `lastRefresh 1ms ago → false` fails. Rapid alt-tab between apps would hammer the endpoint.
+- **Cooldown off-by-one**: `exactly at cooldown boundary → true` or `one ms inside cooldown boundary → false` catches `<=` / `<` confusion.
+- **Clock-skew defense dropped**: `lastRefreshMs AFTER nowMs → true` fails. A clock rewind mid-session would block refresh forever.
+- **Never-refreshed sentinel regresses**: `never-refreshed (lastRefreshMs=0) always allows refresh` fails. First-ever focus refresh on a tab would silently no-op.
+- **Apply-time guards weakened**: not unit-testable at the pure-function level — caught by reading `refreshSnapshot`. Both checks (`sessionIdRef !== id` and `phaseRef !== "idle"`) are required; dropping either opens the race described above.
+
+### Commit graph
+
+- `489a4df` — P9 (pure helper + ChatWorkspace wiring + 15 tests)
+
+Files changed:
+- [src/components/chat/visibilityRefresh.ts](Q:/Einai/RSVP/src/components/chat/visibilityRefresh.ts:1) (new)
+- [src/components/chat/ChatWorkspace.tsx](Q:/Einai/RSVP/src/components/chat/ChatWorkspace.tsx:1) (phaseRef + lastRefreshMsRef + refreshSnapshot + visibilitychange effect)
+- [tests/unit/visibility-refresh.test.ts](Q:/Einai/RSVP/tests/unit/visibility-refresh.test.ts:1) (new, 15 tests)
+- [package.json](Q:/Einai/RSVP/package.json:17) (test script entry)
+
+### Narrow known residuals (not blockers)
+
+- **Tab focus without visibility change**: some browsers/OSes don't flip `visibilityState` on every window-focus event (e.g. clicking a floating partially-hidden window). This is intentional — `visibilitychange` is the canonical "tab became primary" signal, and a pure `focus` listener would also fire on in-page focus changes. If operator feedback surfaces the gap, a `window.addEventListener("focus", ...)` with the same gate would cover it.
+- **Cross-tab drift during active stream**: if tab B's phase is `streaming` when it regains visibility, the refresh is skipped (phase gate). Once the stream completes and the operator alt-tabs, the next focus event refreshes. So the gap self-heals — it just isn't closed mid-stream. Acceptable; a mid-stream refresh would clobber SSE state.
+- **No WebSocket/SSE-based push**: by design. The roadmap specifically flagged a full push infrastructure as over-scope.
+
+### Status
+
+Ready for audit. The cross-tab consistency gap for /confirm, /dismiss, and import-widget mutations is closed at the narrowest seam that solves it. Every gate is pinned by a test that names the regression it catches.
