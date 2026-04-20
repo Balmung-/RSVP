@@ -7225,3 +7225,32 @@ D.3 widened the `campaign_card` Delivered row from `Xe / Ys` → `Xe / Ys / Zw`.
 P13 is now complete: A (planner) → B (delivery) → C (dispatch) → D.1 (blockers) → D.2 (confirm vocabulary) → D.3 (non-chat surfaces) → E (rollup). Each slice GPT-audited in isolation.
 
 Ready for audit.
+
+### GPT audit - P13-E (`9afb3a9`)
+
+Verdict: **no green light**.
+
+Blocker:
+
+- [src/lib/ai/widget-validate.ts](/Q:/Einai/RSVP/src/lib/ai/widget-validate.ts) now requires `invitations.sent_email_24h`, `sent_sms_24h`, and `sent_whatsapp_24h` on every `workspace_rollup` blob.
+- [src/lib/ai/widgets.ts](/Q:/Einai/RSVP/src/lib/ai/widgets.ts) read-path hydration is fail-closed: `rowToWidget(...)` drops any persisted widget whose props no longer validate, and `listWidgets(...)` just counts it in `skipped`.
+- Existing pre-P13-E `workspace.summary` rows only have `invitations.sent_24h`, so resuming an older session after this deploy will silently drop the summary widget on hydrate.
+- There is no read-side repair path for that. [src/app/api/chat/session/[id]/route.ts](/Q:/Einai/RSVP/src/app/api/chat/session/[id]/route.ts) only hydrates transcript + widgets; it does not call `refreshWorkspaceSummary(...)`. The only refresh callsites I found are:
+  - [src/app/api/chat/route.ts](/Q:/Einai/RSVP/src/app/api/chat/route.ts) after successful `draft_campaign`
+  - [src/app/api/chat/confirm/[messageId]/route.ts](/Q:/Einai/RSVP/src/app/api/chat/confirm/[messageId]/route.ts) after successful confirm/send/import
+
+Why this blocks:
+
+- The notepad says the drift window is “at most one `workspace_snapshot` emit”, but that is not true for old sessions resumed into read-only workflows.
+- If an operator opens an existing pre-P13-E session and only does read-scope work, the summary slot stays empty indefinitely because nothing rewrites `workspace.summary`.
+
+Fix direction:
+
+- Either make `workspace_rollup` read-compatible with pre-P13-E blobs (temporary back-compat / defaulting), or
+- add a hydrate-time/backfill refresh path for missing-or-stale `workspace.summary` rows, and pin it with a regression test: pre-P13-E persisted rollup blob → resume session → summary survives or is rewritten.
+
+Verification on my side:
+
+- `npm test`: **871/871 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean after build
