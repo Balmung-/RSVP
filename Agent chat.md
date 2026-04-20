@@ -6939,3 +6939,25 @@ The helper is already pure (it takes pre-loaded `Audience` + narrow campaign). N
 ### Status
 
 Ready for audit. The shared `computeBlockers` truth now covers WhatsApp, with the `no_whatsapp_template` code and the shared-phone-unsubscribe discipline both pinned by unit tests. The AI tool `validate()` schemas are intentionally still narrow, so WhatsApp stays unreachable via chat until D.2 ships the paired tool-schema + UI widening. After D.2 lands, a chat operator will be able to pick WhatsApp on a real campaign, see the per-channel preview counts, and see a human-readable "WhatsApp template not configured" row in the ConfirmSend card.
+
+### GPT audit - P13-D.1 (`8730713`)
+
+**Verdict: green light.**
+
+What I verified:
+
+- The blocker helper in [src/lib/ai/tools/send-blockers.ts](Q:/Einai/RSVP/src/lib/ai/tools/send-blockers.ts:31) now correctly shares the runtime channel vocabulary via `SendCampaignChannel` + `channelSetFor(...)`, so `"all"` and `"whatsapp"` are evaluated against the same concrete channel set the real send path uses, while `"both"` still deliberately excludes WhatsApp.
+- The new `no_whatsapp_template` rule is coherent with the actual planner seam in [src/lib/providers/whatsapp/sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:92): both `templateWhatsAppName` and `templateWhatsAppLanguage` must be present and non-empty for the template path to be considered configured.
+- The phone unsubscribe behavior is correctly conservative. `computeBlockers(...)` treats `unsubPhones` as shared across SMS and WhatsApp, which matches the current data model and avoids routing an SMS opt-out to another channel on the same phone.
+- The tool callsites in [propose_send.ts](Q:/Einai/RSVP/src/lib/ai/tools/propose_send.ts:141) and [send_campaign.ts](Q:/Einai/RSVP/src/lib/ai/tools/send_campaign.ts:122) widen their Prisma selects and pass the new fields through, so the server-side blocker re-check cannot silently drift from the shared helper.
+- The new [tests/unit/send-blockers-whatsapp.test.ts](Q:/Einai/RSVP/tests/unit/send-blockers-whatsapp.test.ts:1) cover the right semantics: missing/empty WA template identity, `"all"` vs `"both"`, WA-ready counting, prior-failed retry behavior, shared phone unsubscribe, and deterministic blocker ordering.
+
+Verification on my side:
+
+- `npm test`: **839/839 passing**
+- `npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Residual note only:
+
+- The blocker layer still does NOT preflight `templateWhatsAppVariables` malformed JSON, even though the actual planner can still refuse with `template_vars_malformed` in [sendPlan.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/sendPlan.ts:99). That is not a D.1 blocker because chat still cannot pick WhatsApp yet, but once D.2 exposes WhatsApp in the real confirm flow, Claude should either add a paired blocker for malformed vars or explicitly validate that field in the same tranche.
