@@ -121,6 +121,79 @@ export type UpsertWidgetInput = {
 
 // ---- helpers ----
 
+// P13-E read-compat — zero-fill the per-channel 24h counters on a
+// `workspace_rollup` row that pre-dates the P13-E widening. Before
+// P13-E the rollup carried only `invitations.sent_24h`; the compute
+// helper now writes three additional per-channel counters
+// (`sent_email_24h` / `sent_sms_24h` / `sent_whatsapp_24h`) and the
+// validator rejects blobs that lack them. That strict gate is the
+// right forward-direction drift guard between compute and renderer
+// within a single version, but it WOULD strand old persisted rows:
+// a session reopened for read-only work with no subsequent write
+// would never run `refreshWorkspaceSummary`, so its pre-P13-E row
+// would fail revalidation and the summary widget would silently
+// disappear for the remainder of the session.
+//
+// Scope: narrow to `workspace_rollup` and to the three exact fields
+// the widening introduced. The aggregate `sent_24h` stays strict —
+// if that's missing, the row is genuinely malformed, not
+// cross-version.
+//
+// Lifecycle: on the next write-path event (any successful
+// `draft_campaign` in the chat route or any successful confirm in
+// the confirm route) the refresh helper rewrites the row with real
+// per-channel counts, so this compat path becomes a no-op in
+// practice after a single mutation. It can be removed once ops
+// confirm all persisted rollup rows have the new shape (one full
+// refresh cycle across all sessions).
+//
+// Why zero-fill rather than eager-refresh on hydrate: an eager
+// refresh would require threading `campaignScope` / `ctx` through
+// `rowToWidget`, which is a layering violation — `widgets.ts` is
+// scope-agnostic by design. Zero-fill keeps this module pure; the
+// worst-case UX is that a read-only session briefly renders the
+// rollup with `(0e · 0s · 0w)` until the next mutation, which is
+// visibly better than the alternative (widget disappears).
+function normalizePreP13ERollup(
+  kind: string,
+  parsed: unknown,
+): unknown {
+  if (kind !== "workspace_rollup") return parsed;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return parsed;
+  }
+  const props = parsed as Record<string, unknown>;
+  const inv = props.invitations;
+  if (inv === null || typeof inv !== "object" || Array.isArray(inv)) {
+    return parsed;
+  }
+  const invObj = inv as Record<string, unknown>;
+  // Only zero-fill when at least one per-channel field is missing;
+  // when all four are present we leave the blob exactly as-is so a
+  // post-P13-E row round-trips without mutation.
+  if (
+    "sent_email_24h" in invObj &&
+    "sent_sms_24h" in invObj &&
+    "sent_whatsapp_24h" in invObj
+  ) {
+    return parsed;
+  }
+  return {
+    ...props,
+    invitations: {
+      ...invObj,
+      sent_email_24h:
+        typeof invObj.sent_email_24h === "number" ? invObj.sent_email_24h : 0,
+      sent_sms_24h:
+        typeof invObj.sent_sms_24h === "number" ? invObj.sent_sms_24h : 0,
+      sent_whatsapp_24h:
+        typeof invObj.sent_whatsapp_24h === "number"
+          ? invObj.sent_whatsapp_24h
+          : 0,
+    },
+  };
+}
+
 // Parse a DB row into a `Widget`, or null if the stored blob has
 // drifted from the validator-approved shape. Silent drop (vs throw)
 // so a single bad row doesn't blank an entire session's dashboard —
@@ -133,6 +206,13 @@ export function rowToWidget(row: WidgetRow): Widget | null {
   } catch {
     return null;
   }
+  // Normalize known cross-version shapes before strict validation.
+  // Today this only covers the P13-E rollup widening (see
+  // `normalizePreP13ERollup`); other widget kinds pass through
+  // unchanged. The validator itself stays strict so forward drift
+  // between compute + renderer within a single version still fails
+  // closed.
+  parsedProps = normalizePreP13ERollup(row.kind, parsedProps);
   if (!validateWidgetProps(row.kind, parsedProps)) return null;
   // `slot` is a stored string; revalidate against the closed set so
   // the client never sees an unknown slot value.

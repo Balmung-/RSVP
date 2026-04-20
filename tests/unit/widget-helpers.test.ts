@@ -565,6 +565,113 @@ test("rowToWidget: serialises dates as ISO strings", () => {
   assert.equal(out?.updatedAt, "2026-04-19T10:05:00.000Z");
 });
 
+test("rowToWidget: pre-P13-E workspace_rollup blob hydrates with zero-filled per-channel counters", () => {
+  // Real-world regression: a session that was created before the
+  // P13-E widening has a persisted `workspace_rollup` row whose
+  // `invitations` only carries `sent_24h`. Without the compat path
+  // in rowToWidget, strict validation rejects the row and the
+  // summary widget silently disappears from the dashboard for
+  // every read-only session open until the operator happens to
+  // mutate something (which triggers a real refresh). Zero-fill
+  // preserves the widget; the next write-path event rewrites the
+  // row with real per-channel counts.
+  const preP13ERollupProps = {
+    campaigns: { draft: 1, active: 2, closed: 0, archived: 0, total: 3 },
+    invitees: { total: 50 },
+    responses: { total: 20, attending: 15, declined: 5, recent_24h: 2 },
+    invitations: { sent_24h: 7 }, // only the aggregate, no per-channel split
+    generated_at: "2026-04-18T12:00:00.000Z",
+  };
+  const out = rowToWidget({
+    id: "w-rollup-old",
+    sessionId: "s-1",
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: JSON.stringify(preP13ERollupProps),
+    order: 0,
+    sourceMessageId: null,
+    createdAt: new Date("2026-04-18T12:00:00Z"),
+    updatedAt: new Date("2026-04-18T12:00:00Z"),
+  });
+  assert.ok(out, "pre-P13-E rollup row must hydrate under the compat path");
+  const p = out!.props as {
+    invitations: {
+      sent_24h: number;
+      sent_email_24h: number;
+      sent_sms_24h: number;
+      sent_whatsapp_24h: number;
+    };
+  };
+  // Aggregate passes through unchanged.
+  assert.equal(p.invitations.sent_24h, 7);
+  // Per-channel fields were missing and zero-filled.
+  assert.equal(p.invitations.sent_email_24h, 0);
+  assert.equal(p.invitations.sent_sms_24h, 0);
+  assert.equal(p.invitations.sent_whatsapp_24h, 0);
+});
+
+test("rowToWidget: post-P13-E workspace_rollup blob round-trips without mutation", () => {
+  // Pin the negative half: when the persisted row already has the
+  // new shape, the compat normalizer is a no-op. Anything else
+  // would mean a subtle drift — e.g. the normalizer accidentally
+  // overwriting real per-channel counts with zeros.
+  const postP13ERollupProps = {
+    campaigns: { draft: 1, active: 2, closed: 0, archived: 0, total: 3 },
+    invitees: { total: 50 },
+    responses: { total: 20, attending: 15, declined: 5, recent_24h: 2 },
+    invitations: {
+      sent_24h: 7,
+      sent_email_24h: 3,
+      sent_sms_24h: 2,
+      sent_whatsapp_24h: 2,
+    },
+    generated_at: "2026-04-19T12:00:00.000Z",
+  };
+  const out = rowToWidget({
+    id: "w-rollup-new",
+    sessionId: "s-1",
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: JSON.stringify(postP13ERollupProps),
+    order: 0,
+    sourceMessageId: null,
+    createdAt: new Date("2026-04-19T12:00:00Z"),
+    updatedAt: new Date("2026-04-19T12:00:00Z"),
+  });
+  assert.ok(out);
+  assert.deepEqual(out!.props, postP13ERollupProps);
+});
+
+test("rowToWidget: genuinely malformed workspace_rollup (missing aggregate) still rejects", () => {
+  // The compat normalizer only fills the three per-channel fields.
+  // A row whose `invitations` is missing the aggregate `sent_24h`
+  // is actually corrupt (the compute helper writes it on every
+  // refresh), not cross-version, so strict validation must still
+  // drop it.
+  const trulyBadRollup = {
+    campaigns: { draft: 0, active: 0, closed: 0, archived: 0, total: 0 },
+    invitees: { total: 0 },
+    responses: { total: 0, attending: 0, declined: 0, recent_24h: 0 },
+    invitations: {}, // no sent_24h — genuinely malformed
+    generated_at: "2026-04-19T12:00:00.000Z",
+  };
+  const out = rowToWidget({
+    id: "w-rollup-bad",
+    sessionId: "s-1",
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: JSON.stringify(trulyBadRollup),
+    order: 0,
+    sourceMessageId: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  assert.equal(out, null);
+});
+
 // ---- createWorkspaceEmitter ----
 
 type SseEvent = { event: string; data: unknown };
