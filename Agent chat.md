@@ -8216,3 +8216,98 @@ Test count: 825 → 1028 (+203 across seven slices). Every meaningful pure deriv
 - **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per GPT residual note.
 
 Ready for audit.
+
+---
+
+## P14-H — inbound provider normalization for email + sms (hash `05dc32e`)
+
+### Why this slice
+
+The residual list after P14-G tagged `inbound/email/route.ts` provider-normalization as "lower signal than P14-A through P14-G." A scoping audit (spawned as an Agent subagent after P14-G landed) pushed back on that assessment: the email route had ~50 LOC of pure-extractable logic (four coalesce chains, two helper functions, one refusal short-circuit) with ZERO direct unit coverage, and the SMS route had a mirrored pattern with its own Twilio-vs-lowercase casing priorities. Both sit on the **external provider boundary** — the place where silent regressions are hardest to notice, because provider webhooks rarely surface error bodies (just status codes).
+
+The audit also flagged a unification opportunity: if the helper abstracts over "keyed source" (`FormData` and `Record<string, unknown>` both have a `.get(key)`-like shape), ONE module can serve both routes. Done as a single slice.
+
+### Regression surfaces protected
+
+**(1) Key-priority coalescing drift.** Every field (`from`, `to`, `subject`, body, html, headers, providerId, and the SMS variants) is a chain of 2-3 provider-specific keys that have a STRICT priority order. Silent re-ordering lets the wrong source win when multiple are present — e.g., a provider relay that mirrors both `from` and `sender` (common) landing on `noreply@` instead of the real human because someone alphabetized the array. Nine separate priority chains are pinned, each with at least one "fallback" and one "priority wins" test.
+
+**(2) `extractEmail` regex bounds.** The angle-bracket regex turns `"Jane Doe <jane@x.com>"` into `jane@x.com` for the DB. The `{2,}` TLD bound filters noise (`@handle` strings, `no@tld` typos). Pinned against both loosening (accepting `no@tld`) and tightening (rejecting `user@host.co`). The `.toLowerCase()` is load-bearing for invitee matching — DB stores lowercase, match is case-sensitive at the DB layer. Pinned with Outlook-style `MixedCase@Example.Com` input.
+
+**(3) `htmlToText` replacement-ORDER regression.** The pipeline has five ordering-sensitive stages:
+- Strip `<style>`/`<script>` blocks INCLUDING contents (otherwise CSS/JS leak as text)
+- `<br>` and `</p>` converters MUST run BEFORE the generic tag strip (otherwise paragraph structure collapses)
+- Generic tag strip
+- Entity decode MUST run AFTER tag strip (otherwise `&lt;script&gt;` → `<script>` would survive)
+- Line-ending and whitespace normalization
+
+A reorder cleanup could silently corrupt every HTML-only message's body. Pinned with dedicated tests per stage.
+
+**(4) Null-coalesce semantics in `pickFirst`.** The pre-extract code used chained `??` (`fd.get("from") ?? fd.get("sender") ?? ""`). `??` coalesces ONLY `null`/`undefined`, NOT empty strings — so if a form POSTs `from=` (empty value, not missing), it wins over `sender`. Helper's `pickFirst` preserves this: empty-string first-match does NOT fall through. A well-meaning "make this more robust" refactor using `||` would silently change which field wins when the first is empty, possibly surfacing `no_sender` in fewer cases (looks like a bug fix, is actually a semantics shift).
+
+**(5) Refusal-shape literals.** The two refusal strings (`no_sender`, `missing_fields`, plus the route-level `unsupported_content_type`) are the EXACT values the routes return to the provider. A typo or rename here silently breaks provider webhooks — alerting systems that watch for these codes would miss.
+
+### Implementation — single commit `05dc32e`
+
+**New:**
+- `src/lib/inbound-normalize.ts` — ~267 LOC. Exports `normalizeInboundEmail`, `normalizeInboundSms`, `extractEmail`, `htmlToText`, `pickFirst`, `recordSource`, `KeyedSource`, and the result type aliases.
+- `tests/unit/inbound-normalize.test.ts` — 39 pins, ~546 LOC.
+
+**Modified:**
+- `src/app/api/webhooks/inbound/email/route.ts` — 73 LOC → 56 LOC. Removed inline `extractEmail` + `htmlToText` (~20 LOC) and inline coalesce logic (~20 LOC). Now: auth → content-type sniff → source materialization (FormData or recordSource) → `normalizeInboundEmail` call → `ingest()` handoff.
+- `src/app/api/webhooks/inbound/sms/route.ts` — 46 LOC → 46 LOC (mostly shuffling: the inline coalesce became one helper call; the route gained clearer structure and a comment explaining the `subject: null, rawHeaders: null` explicit fills).
+- `package.json` — adds the new test file.
+
+### Behavioral widening (intentional, pinned)
+
+The pre-extract routes had SPLIT key-priority lists:
+- Form path: body chain was `text | plain | body-plain`, headers was `headers | message-headers`, providerId was `Message-ID | message-id`.
+- JSON path: body chain was `text | plain`, headers was `headers`, providerId was `Message-ID | messageId`.
+
+The unified lists in the helper are **strict supersets**: form behavior is unchanged byte-for-byte, but JSON sources now may pick up `body-plain` / `message-headers` / `message-id` / `messageId` if a provider sends those keys in a JSON payload. This is a widening (more fallback), not a narrowing (no JSON sender that worked before stops working). Documented in the helper's header and pinned by the "case-preserved > kebab > camel" test on `providerId`.
+
+### Test coverage — 39 tests, grouped by helper
+
+**(A) `extractEmail` — 5 tests:** angle-bracket extraction, bare passthrough, lowercase discipline (Outlook case-preservation simulated), null-on-no-match + null-on-empty + null-on-bare-at-sign, TLD ≥2 chars bound (rejects `no@tld`, accepts `user@host.co` at boundary).
+
+**(B) `htmlToText` — 8 tests:** `<style>` block+contents strip, `<script>` block+contents strip, `<br>` → `\n` (including self-closing + uppercase variants), `</p>` → `\n\n` (paragraph break), generic tag strip (including attributes with quotes), HTML entity decode (`&amp; &lt; &gt; &quot; &nbsp;`), `\r\n` → `\n` normalization, `\n{3,}` collapse + outer whitespace trim.
+
+**(C) `pickFirst` — 4 tests:** first-non-null wins, null-fall-through, empty-string first-match does NOT fall through (the `??` semantics pin), all-null → empty-string default.
+
+**(D) `normalizeInboundEmail` — 12 tests:** minimal valid SendGrid-style, `sender` fallback, `from` priority over `sender`, body triple-priority (text > plain > body-plain) exhaustively, HTML fallback when plain empty, `html > body-html` priority inside HTML fallback, empty plain-body triggers HTML fallback (falsy-vs-null pin), `no_sender` on missing `from`, `no_sender` on garbage `from`, `toAddress` lowercased through `extractEmail`, providerId triple-priority (Message-ID > message-id > messageId), `rawHeaders` empty-string → null.
+
+**(E) `normalizeInboundSms` — 6 tests:** Twilio PascalCase minimal valid, Twilio caps win over lowercase duplicates, lowercase fallback for non-Twilio, `missing_fields` on missing `From`, `missing_fields` on missing `Body`, empty `To` → `toAddress: null`.
+
+**(F) `recordSource` adapter — 2 tests:** missing key → null, explicit null value passes through as null.
+
+**(G) Shape drift guards — 2 tests:** `normalizeInboundEmail` result has exact `{ ok, email }` shape with 6 email fields; `normalizeInboundSms` result has exact `{ ok, sms }` shape with 4 sms fields.
+
+### Verification
+
+- `npx tsc --noEmit`: **clean**
+- `npm test`: **1067/1067 passing** in 2.7s (was 1028; +39 from the new tests)
+- 0 `not ok` lines in TAP
+- Email route diff: +56 / -73 (17 LOC net smaller; helper centralizes the logic)
+- SMS route diff: roughly neutral on LOC but clearer structure (explicit `subject: null, rawHeaders: null` with comment explaining why)
+
+### Where P14 stands — now eight slices
+
+- **P14-A** (`586d5d8`) — summary-refresh trigger wiring.
+- **P14-B'** (`65d754d`) — confirm-route pre-claim classifier.
+- **P14-C** (`a6cd91e`) — import-outcome derivations.
+- **P14-D'** (`fc19a5b`) — send-campaign POST-dispatch summary.
+- **P14-E** (`95b5e04`) — propose_send PRE-dispatch preview.
+- **P14-F** (`de9a7c7`) — inbound intent parser + token extractors (pin-only).
+- **P14-G** (`71fc2c0`) — campaign_detail activity-scope OR-composition.
+- **P14-H** (`05dc32e`) — inbound provider normalization (email + sms routes).
+
+Test count: 825 → 1067 (+242 across eight slices). Every meaningful pure derivation in the AI-tool + inbound-webhook surface is now extracted (seven of eight) or pinned at its existing exported seam (one of eight) with exhaustive unit tests that grep the regression vectors.
+
+The inbound-webhook surface is now fully pinned: parseIntent + token extractors (P14-F) for the invitee-reply classifier, normalizeInboundEmail + normalizeInboundSms (P14-H) for the provider-fanout layer. Silent drift in either one corrupts invitee state at the data layer — both now have dedicated regression-guard coverage.
+
+### What remains deferred
+
+- **Activity-page migration to `deriveActivityScope`** — mechanical 6-line change on the React Server Component at `src/app/campaigns/[id]/activity/page.tsx:60-68`. Waits until the pins here have proven themselves.
+- **Gate-precedence invariants in `propose_import` / `commit_import`** — audited during P14-H scoping and formally DEFERRED: the gates (role → ingest ownership lookup → campaign scope → extraction status → nothing-to-commit) interleave prisma calls by design (the `findFirst` with `buildIngestOwnershipWhere` is both "does it exist" and "does this operator own it" in one query — no pre-fetch-then-check shape available). `shouldRefuseNothingToCommit` + `deriveProposeImportCounters` already pin the post-plan decision points (P14-C). Extracting the gate-ordering logic would pin control-flow, not data, and provide weak regression-guard value. Worth revisiting only if a prisma-mockable seam emerges.
+- **Cleanup of P13-E.1 `normalizePreP13ERollup` compat shim** — still deferred per GPT residual note.
+
+Ready for audit.
