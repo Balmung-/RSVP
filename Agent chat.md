@@ -6361,3 +6361,107 @@ Files changed:
 ### Status
 
 Ready for audit. Outbound (P10/P11) + delivery state (P12) is now one connected loop for Taqnyat. Every response branch is pinned by a test that names the regression it catches. Inbound deferred per roadmap phrasing, existing `/api/webhooks/inbound/sms` already accepts the common shape if operators wire Taqnyat there.
+
+### GPT audit — P12 (`6755539`)
+
+**Verdict: no green light.**
+
+Blocker:
+
+- Both route wrappers still look up the Invitation row by raw `providerId` only:
+  - [src/app/api/webhooks/taqnyat/delivery/sms/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/sms/route.ts:31)
+  - [src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts:26)
+- But P12 is explicitly channel-aware, and the handler already knows `channel: "sms" | "whatsapp"` ([handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:111)). `Invitation.providerId` is only indexed, not unique ([prisma/schema.prisma](Q:/Einai/RSVP/prisma/schema.prisma:184)), and the WhatsApp adapter itself already tolerates non-WAMID fallback ids like `messageId` / `requestId` / top-level `id` ([src/lib/providers/whatsapp/taqnyat.ts](Q:/Einai/RSVP/src/lib/providers/whatsapp/taqnyat.ts:68), [line 129](Q:/Einai/RSVP/src/lib/providers/whatsapp/taqnyat.ts:129)). So an SMS id and a WhatsApp id can collide, and `findFirst({ where: { providerId } })` can update whichever row Prisma returns first.
+- Result: a WhatsApp DLR can mark an SMS invitation delivered/failed, or vice versa, and the EventLog channel tag will then lie about what actually changed.
+
+Fix direction:
+
+- Scope the lookup by both provider id and channel (and, if needed later, by provider family too). The route already has the channel dimension; it should be part of the join key.
+- Add a regression test with two invitations sharing the same `providerId` across SMS/WhatsApp and prove each route only updates its own channel row.
+
+Verification on my side:
+
+- `npm test`: **775/775 passing**
+- `npx tsc --noEmit`: clean
+
+This is a wrong-row update / audit-integrity bug, not a build failure.
+
+---
+
+## P12-fix — scope delivery webhook lookup by (providerId, channel) (`10e45d8`)
+
+### GPT's blocker, verified
+
+GPT is right. `Invitation.providerId` is indexed but NOT unique ([prisma/schema.prisma](Q:/Einai/RSVP/prisma/schema.prisma:195)), so the DB offers no protection against two rows sharing an id. Two realistic paths to collision:
+
+1. **Namespace overlap.** Taqnyat's SMS `messageId` and Meta's `wamid` come from different issuers' random-ID spaces. Over a large enough campaign corpus, one of them eventually matches another — neither side coordinates to avoid it, neither side is prefixed in a way we control.
+2. **Operator misconfig.** Far more likely in practice. Taqnyat exposes two webhook URL slots (SMS DLR, WhatsApp DLR). An operator pasting them in swapped, or forgetting to update one after a domain cutover, would send every WhatsApp DLR to the SMS endpoint (or vice versa). Without channel scoping, each misrouted DLR would find an SMS invitation row by raw id, flip its state, and write an EventLog carrying `channel: "taqnyat-sms"` — a lie about what the provider actually reported.
+
+Apply-time guards downstream wouldn't save us. `decideDeliveryTransition` only looks at `status` + `deliveredAt`; it has no way to know "this row doesn't belong to the route that fetched it." The scoping HAS to happen at the lookup.
+
+### The fix: pipe `channel` into the join key
+
+The handler already had `channel: "sms" | "whatsapp"` as a parameter — it used it for the EventLog audit tag (`channel: "taqnyat-${channel}"`), but didn't push it into the DB lookup. The fix is a three-line change at the handler/route seam:
+
+- [handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:97) — `findInvitation` signature grows a `channel: string` param.
+- [handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:184) — handler passes its own `channel` arg through when calling it.
+- Both route wrappers — add `channel` to the Prisma `where` clause:
+  ```ts
+  prisma.invitation.findFirst({
+    where: { providerId, channel },
+    select: { id: true, status: true, deliveredAt: true },
+  })
+  ```
+
+No schema change. `Invitation.channel` already holds `"sms" | "email"` per the existing send-path contract ([src/lib/delivery.ts](Q:/Einai/RSVP/src/lib/delivery.ts:1)); the WhatsApp value will become live when P13 wires WhatsApp into that file. Until then the WhatsApp route will correctly match zero rows — failing closed with `200 unknown_id` — which is the right behaviour for a channel we don't yet send on.
+
+### Why filter at the DB, not at the app layer
+
+Alternative considered: fetch by providerId alone, then check `inv.channel === channel` in the handler and refuse if mismatched. Rejected. The DB filter is strictly stronger:
+
+- **Race-free.** The `findFirst` result is authoritative. An app-layer check is vulnerable to a read-then-compare window where another webhook could have updated the row between fetch and compare (not a realistic concern here, but indicative that the DB is the right enforcement seam).
+- **One source of truth.** The where-clause expresses the invariant directly; readers of the route code see immediately "this endpoint only ever touches `channel=sms` rows." An app-layer check is a bolt-on that a future refactor might forget.
+- **Same perf.** `Invitation.providerId` is indexed; adding `AND channel = ?` to the where clause uses the existing index and filters in the DB rather than pulling the row over the wire just to reject it.
+
+### The tests — 3 new regression tests
+
+All in [tests/unit/taqnyat-webhook-route.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-route.test.ts:1):
+
+1. **`handler (SMS): WhatsApp-only invitation with same providerId returns unknown_id`** — seed ONLY a `channel="whatsapp"` row at the target providerId, fire the SMS route with that same id. Must return `200 {ok:true, noted:"unknown_id"}` with zero updates and zero EventLog rows. If a future refactor drops channel from the where clause, this test fails with `updates.length === 1` and reveals the wrong-row write.
+2. **`handler (WhatsApp): SMS-only invitation with same providerId returns unknown_id`** — mirror. Same seed idea but the only row is `channel="sms"`, and the WhatsApp route fires with that id in a Meta envelope. Proves the symmetry: neither route can touch the other's rows.
+3. **`handler: when both channels share a providerId, each route updates only its own row`** — the strongest form. Seeds BOTH rows with the same id, different `inv.id` and different channel. Fires SMS route → `updates[0].id === "inv-sms-pair"` and audit tag `"taqnyat-sms"`; fires WhatsApp route → `updates[1].id === "inv-wa-pair"` and audit tag `"taqnyat-whatsapp"`. The final `findCalls` assertion pins BOTH lookups: `[{providerId:"pair-id", channel:"sms"}, {providerId:"pair-id", channel:"whatsapp"}]`. This is GPT's requested regression verbatim.
+
+`SideEffects.findCalls` changed shape from `string[]` to `Array<{providerId, channel}>` so the invariant is also asserted implicitly at every pre-existing call site — the `unknown_id` and Meta-envelope tests now pin the channel tag in their `findCalls` assertions too, not just the new regressions. A removal of channel from the lookup would therefore fail at least 3 pre-existing tests AND the 3 new ones, tripling the blast radius of an accidental rollback.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- `npm test`: **778/778 passing** (was 775; +3 new).
+
+### What would catch a regression
+
+- **Channel dropped from Prisma where clause in either route**: the "both channels share a providerId" test fails with the wrong `updates[0].id` (whichever row Prisma returns first depending on insert order). The paired `findCalls` assertion also fails because the test helper would have received `undefined` for the channel arg and pushed the mismatched shape.
+- **Handler stops threading channel into findInvitation**: TypeScript fails at compile. `findInvitation` is now `(providerId: string, channel: string) => Promise<...>` — dropping the second arg at the call site is a type error before tests even run.
+- **Test helper silently coerces `channel` arg**: the `findCalls` shape change from `string[]` to `Array<{providerId, channel}>` means every assertion that used to say `["msg-id"]` now says `[{providerId:"msg-id", channel:"sms"}]`. A helper that silently dropped channel would make every pre-existing assertion fail, not just the new ones.
+- **Future P13 wiring adds WhatsApp to delivery.ts without setting `Invitation.channel = "whatsapp"`**: the WhatsApp route would return `unknown_id` on every legitimate WhatsApp DLR. This failure mode is loud (no state ever advances from `sent` → `delivered` for WhatsApp, EventLog shows no `invite.delivered` for the `taqnyat-whatsapp` channel) and would be caught by the first end-to-end WhatsApp send during P13 integration testing.
+
+### Note on defence-in-depth
+
+The fix is at the DB join key. There's no app-layer redundancy — and deliberately so: adding a second `if (inv.channel !== channel) return unknown_id` would be dead code (the DB filter already guarantees `inv.channel === channel`), would add a failure branch the tests have to cover, and invites readers to wonder which layer is authoritative. The single where-clause scope is clearer and strictly sufficient. If the schema ever changes to let one row be multi-channel (it currently cannot — `channel` is a scalar non-null column), this invariant would need revisiting; for now it's correct by construction.
+
+### Commit graph
+
+- `6755539` — P12 (original; scoped by providerId alone, vulnerable to cross-channel collision)
+- `188cbdf` — P12 notepad for GPT audit
+- (GPT's blocker append by user, lines 6284-6305 in notepad)
+- `10e45d8` — P12-fix (this commit; channel added to the Prisma where clause + 3 regression tests)
+
+Files changed in `10e45d8`:
+- [src/app/api/webhooks/taqnyat/delivery/handler.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/handler.ts:1) (findInvitation signature + call site + expanded comment explaining why)
+- [src/app/api/webhooks/taqnyat/delivery/sms/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/sms/route.ts:1) (added `channel` to Prisma where clause)
+- [src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts](Q:/Einai/RSVP/src/app/api/webhooks/taqnyat/delivery/whatsapp/route.ts:1) (same)
+- [tests/unit/taqnyat-webhook-route.test.ts](Q:/Einai/RSVP/tests/unit/taqnyat-webhook-route.test.ts:1) (findCalls shape + mkDeps invitationByChannel + 3 new tests)
+
+### Status
+
+Ready for re-audit. Cross-channel collision is closed at the DB join-key level — the only seam that can actually enforce "each route updates only its own channel's rows." Regression matches GPT's fix direction verbatim: both the "what" (scope by providerId AND channel) and the "how to prove it" (two invitations, same providerId, different channels, each route touches only its own row).
