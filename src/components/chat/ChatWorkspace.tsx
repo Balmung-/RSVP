@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
 import { SessionPicker } from "./SessionPicker";
-import { selectResumeSessionId } from "./resumeLast";
+import { decideResumeAction } from "./resumeLast";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 import type { SessionListItem } from "@/app/api/chat/sessions/handler";
@@ -224,42 +224,45 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
 
   // P4-B — resume-last. If the operator landed on /chat with NO
   // `?session=` in the URL, pick the newest session from the list
-  // and hydrate it. Runs at most once (`mountResumedRef`) so a
-  // subsequent fetch (e.g. after creating a new session) doesn't
-  // re-yank the workspace back to the newest row.
+  // and hydrate it. All the gating logic (URL session present,
+  // already-picked session, existing turns, in-progress draft) lives
+  // in the pure `decideResumeAction` — this effect is a thin shell
+  // that re-fires on state changes and latches `mountResumedRef`
+  // once a terminal decision is reached.
   //
-  // Gate: only if sessionId is still null AND turns are empty. If
-  // the operator already started typing or clicked a picker item
-  // before the list arrived, we don't want to blow their work
-  // away by hydrating over it.
+  // A "standdown" decision is as sticky as a "resume" one: once the
+  // operator has invested in any draft / turn / explicit pick, a
+  // later sessions-list arrival MUST NOT retroactively yank the
+  // workspace out from under them.
+  //
+  // `input` is in the dep array because a draft keystroke before
+  // the /api/chat/sessions fetch resolves must flip the decision to
+  // "standdown". Without this, a slow-network operator typing into
+  // a fresh composer would get their draft stranded under an
+  // auto-resumed older session. Known residual: if the operator
+  // types DURING the hydrateSession fetch (sub-second RTT), the
+  // draft can still strand — the pre-fire gate closes the common
+  // case, and the narrower in-flight window is acceptable.
   const mountResumedRef = useRef(false);
   useEffect(() => {
     if (mountResumedRef.current) return;
     if (typeof window === "undefined") return;
-    const hasUrlSession = new URLSearchParams(window.location.search).get(
-      "session",
+    const hasUrlSession = Boolean(
+      new URLSearchParams(window.location.search).get("session"),
     );
-    if (hasUrlSession) {
-      // URL-based hydrate is already in flight from the other
-      // mount effect — don't double-hydrate.
-      mountResumedRef.current = true;
-      return;
-    }
-    if (sessions.length === 0) return; // wait for list, or nothing to resume
-    if (sessionId !== null) {
-      // Operator already picked something (or a race against the
-      // refresh) — stand down.
-      mountResumedRef.current = true;
-      return;
-    }
-    if (turns.length > 0) {
-      mountResumedRef.current = true;
-      return;
-    }
-    const resumeId = selectResumeSessionId(sessions);
+    const decision = decideResumeAction({
+      sessions,
+      currentSessionId: sessionId,
+      turnCount: turns.length,
+      draft: input,
+      hasUrlSession,
+    });
+    if (decision.action === "wait") return; // keep latch unset
     mountResumedRef.current = true;
-    if (resumeId) void hydrateSession(resumeId);
-  }, [sessions, sessionId, turns.length, hydrateSession]);
+    if (decision.action === "resume") {
+      void hydrateSession(decision.sessionId);
+    }
+  }, [sessions, sessionId, turns.length, input, hydrateSession]);
 
   // When a fresh session id appears (from the server's `event:
   // session` frame on the first send of a new workspace), the
