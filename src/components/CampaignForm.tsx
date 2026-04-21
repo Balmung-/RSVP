@@ -157,6 +157,76 @@ export function CampaignForm({
           </p>
         </div>
       </details>
+      {/*
+        P17-D.2 — WhatsApp template config. Separate disclosure from
+        the Email/SMS block above because a WhatsApp template is NOT
+        a freeform body: `templateWhatsAppName` is an exact-match
+        reference to a pre-approved Meta template, and
+        `templateWhatsAppVariables` is a JSON array of positional
+        param expressions (Meta's {{1}} / {{2}} / {{3}} model) — a
+        fundamentally different shape from the inline-token
+        `{{name}}` / `{{venue}}` style the email + SMS templates
+        use. Rendering them together would suggest they're
+        interchangeable; they're not. The D.3 PDF picker will also
+        land inside this disclosure.
+
+        Opens by default when any of the three fields are set on
+        edit, matching the Branding + Templates disclosures above.
+      */}
+      <details
+        className="col-span-2 group"
+        open={
+          !!(
+            campaign?.templateWhatsAppName ||
+            campaign?.templateWhatsAppLanguage ||
+            campaign?.templateWhatsAppVariables
+          )
+        }
+      >
+        <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
+          WhatsApp template — approved Meta template + positional params
+        </summary>
+        <div className="mt-4 grid grid-cols-2 gap-6">
+          <Field label="Template name">
+            <input
+              name="templateWhatsAppName"
+              className="field"
+              maxLength={200}
+              defaultValue={campaign?.templateWhatsAppName ?? ""}
+              placeholder="moather2026_moather2026"
+            />
+          </Field>
+          <Field label="Language">
+            <input
+              name="templateWhatsAppLanguage"
+              className="field"
+              maxLength={10}
+              defaultValue={campaign?.templateWhatsAppLanguage ?? ""}
+              placeholder="ar"
+            />
+          </Field>
+          <Field label="Positional variables (JSON array)" className="col-span-2">
+            <textarea
+              name="templateWhatsAppVariables"
+              rows={2}
+              className="field font-mono text-xs"
+              maxLength={2000}
+              defaultValue={campaign?.templateWhatsAppVariables ?? ""}
+              placeholder={'["{{name}}", "{{venue}}"]'}
+            />
+          </Field>
+          <p className="col-span-2 text-xs text-ink-400">
+            Template name must match a Meta-approved template
+            exactly. Language is a BCP-47 tag like <code>ar</code>,{" "}
+            <code>en_US</code>, or <code>fr_FR</code>. Variables are a
+            JSON array of expressions in the template's positional
+            order — each one is rendered with the standard tokens (
+            <code>{"{{name}}"}</code> <code>{"{{venue}}"}</code>{" "}
+            <code>{"{{eventAt}}"}</code> <code>{"{{rsvpUrl}}"}</code>
+            ). Leave variables empty for a zero-param template.
+          </p>
+        </div>
+      </details>
       <div className="col-span-2 flex items-center justify-end gap-3 pt-2">
         <Link href={cancelHref} className="btn-ghost">Cancel</Link>
         <button className="btn-primary">{submitLabel}</button>
