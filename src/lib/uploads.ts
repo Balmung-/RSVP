@@ -10,8 +10,10 @@ export const IMAGE_MIMES = new Set([
   "image/gif",
 ]);
 
+export const PDF_MIME = "application/pdf";
+
 export const DOC_MIMES = new Set([
-  "application/pdf",
+  PDF_MIME,
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.ms-excel",
@@ -23,6 +25,10 @@ export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_DOC_BYTES = 10 * 1024 * 1024;
 
 export type UploadKind = "image" | "doc";
+
+export function isPdfUploadContentType(contentType: string | null | undefined): boolean {
+  return contentType === PDF_MIME;
+}
 
 export function acceptForKind(kind: UploadKind): string {
   return kind === "image" ? Array.from(IMAGE_MIMES).join(",") : [...IMAGE_MIMES, ...DOC_MIMES].join(",");

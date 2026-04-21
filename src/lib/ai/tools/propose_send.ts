@@ -6,6 +6,7 @@ import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
 import { deriveProposeSendPreview } from "./propose-send-preview";
 import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
+import { isPdfUploadContentType } from "@/lib/uploads";
 
 // Previews what `sendCampaign` WOULD do, without doing it. The
 // model calls this to resolve an audience + template + count
@@ -186,14 +187,16 @@ export const proposeSendTool: ToolDef<Input> = {
     // P17-C.5 — FileUpload lookup for the doc-header preview +
     // blocker. Only runs when `campaignWantsWhatsAppDocument` returns
     // true (campaign has both template fields AND an upload id set).
-    // Selects `filename` only — the widget needs the filename for the
-    // "Will attach PDF: <name>" readiness line; bytes stay on disk
-    // until the actual delivery-edge upload (P17-C.3). A null return
-    // (FileUpload deleted since the campaign was configured) feeds
-    // the `no_whatsapp_document` blocker through `computeBlockers`
-    // below, so the operator sees the problem in ConfirmSend rather
-    // than hitting a wall of `doc_not_found` per-invitation failures.
-    let docUpload: { filename: string } | null = null;
+    // Selects `filename` + `contentType` — the widget needs the
+    // filename for the "Will attach PDF: <name>" readiness line, and
+    // the blocker layer now also rejects non-PDF uploads on the pilot
+    // path. Bytes stay on disk until the actual delivery-edge upload
+    // (P17-C.3). A null return (FileUpload deleted since the campaign
+    // was configured) feeds the `no_whatsapp_document` blocker through
+    // `computeBlockers` below, so the operator sees the problem in
+    // ConfirmSend rather than hitting a wall of `doc_not_found`
+    // per-invitation failures.
+    let docUpload: { filename: string; contentType: string } | null = null;
     let docConfigured = false;
     if (
       campaignWantsWhatsAppDocument({
@@ -207,7 +210,7 @@ export const proposeSendTool: ToolDef<Input> = {
         // The `!` is safe: the predicate above returned true only
         // when `whatsappDocumentUploadId` is non-null non-empty.
         where: { id: campaign.whatsappDocumentUploadId! },
-        select: { filename: true },
+        select: { filename: true, contentType: true },
       });
     }
 
@@ -238,6 +241,10 @@ export const proposeSendTool: ToolDef<Input> = {
       channel,
       onlyUnsent,
       docUploadExists: docConfigured ? docUpload !== null : undefined,
+      docUploadIsPdf:
+        docConfigured && docUpload !== null
+          ? isPdfUploadContentType(docUpload.contentType)
+          : undefined,
     });
 
     // P14-E — the four post-audience-load derivations (per-channel
@@ -299,7 +306,9 @@ export const proposeSendTool: ToolDef<Input> = {
     // so a null label here keeps the readiness line from rendering
     // and the operator sees the blocker instead.
     const whatsAppDocumentLabel =
-      docUpload !== null ? { filename: docUpload.filename } : null;
+      docUpload !== null && isPdfUploadContentType(docUpload.contentType)
+        ? { filename: docUpload.filename }
+        : null;
 
     const props = {
       campaign_id: campaign.id,

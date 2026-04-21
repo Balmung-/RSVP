@@ -4,6 +4,7 @@ import { renderEmail, renderSms, buildVars } from "./preview";
 import { isUnsubscribed, unsubscribeUrl } from "./inbound";
 import { decideWhatsAppMessage } from "./providers/whatsapp/sendPlan";
 import { taqnyatUploadMedia } from "./providers/whatsapp/taqnyat";
+import { isPdfUploadContentType } from "./uploads";
 import type { Campaign, Invitee } from "@prisma/client";
 
 // Orchestrates the outbound. Pure function of (campaign, invitee) → delivery.
@@ -542,6 +543,11 @@ function payloadForDispatch(opts: {
 //                                  route — /api/uploads rejects
 //                                  empty files — but defensive
 //                                  against a DB state bug).
+//   - `doc_not_pdf`              — the row exists but is not a PDF.
+//                                  The pilot's approved template is a
+//                                  document-PDF header, so non-PDF
+//                                  uploads are refused before the BSP
+//                                  upload call.
 //   - otherwise                  — passthrough of the uploadMedia
 //                                  dep's error string (which includes
 //                                  the HTTP status / BSP message
@@ -579,6 +585,9 @@ async function resolveInternalDocLink(
   }
   if (row.contents.byteLength === 0) {
     return { ok: false, error: "doc_empty" };
+  }
+  if (!isPdfUploadContentType(row.contentType)) {
+    return { ok: false, error: "doc_not_pdf" };
   }
   const uploadRes = await deps.uploadMedia({
     bytes: row.contents,

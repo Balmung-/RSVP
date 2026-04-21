@@ -11,6 +11,7 @@ import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
+import { PDF_MIME } from "@/lib/uploads";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +60,11 @@ async function createCampaign(formData: FormData) {
   let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
   if (whatsappDocumentUploadId !== null) {
     const owned = await prisma.fileUpload.findFirst({
-      where: { id: whatsappDocumentUploadId, uploadedBy: me.id },
+      where: {
+        id: whatsappDocumentUploadId,
+        uploadedBy: me.id,
+        contentType: PDF_MIME,
+      },
       select: { id: true },
     });
     if (!owned) whatsappDocumentUploadId = null;

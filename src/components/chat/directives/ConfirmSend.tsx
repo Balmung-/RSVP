@@ -155,7 +155,7 @@ const BLOCKER_LABEL: Record<string, string> = {
   // the loop faster, but for now the actionable guidance is in the
   // copy below.
   no_whatsapp_document:
-    "WhatsApp invitation PDF is missing — the attached file was deleted. Re-upload on the campaign edit page before sending.",
+    "WhatsApp invitation PDF is missing or not a PDF. Re-upload a PDF on the campaign edit page before sending.",
 };
 
 function formatBlocker(raw: string): string {

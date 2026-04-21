@@ -517,6 +517,23 @@ test("no_whatsapp_document: docUploadExists=true → no blocker", () => {
   assert.equal(blockers.includes("no_whatsapp_document"), false);
 });
 
+test("no_whatsapp_document: existing upload but non-PDF → blocker fires", () => {
+  // Pilot contract: the approved WhatsApp header document is a PDF.
+  // A surviving FileUpload row with the wrong MIME should be blocked
+  // before send, not passed through to the BSP upload call.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: true,
+    docUploadIsPdf: false,
+  });
+  assert.ok(blockers.includes("no_whatsapp_document"));
+});
+
 test("no_whatsapp_document: docUploadExists=undefined → no blocker", () => {
   // Opt-out semantic — caller didn't perform the lookup. The helper
   // must not synthesize a blocker on absence of evidence. This is

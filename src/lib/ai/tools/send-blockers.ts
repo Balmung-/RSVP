@@ -238,8 +238,20 @@ export function computeBlockers(args: {
   // misconfigured campaign whose caller forgot to pass the flag
   // doesn't get a false-positive blocker.
   docUploadExists?: boolean;
+  // Pilot PDF discipline. When the campaign is wired for the
+  // WhatsApp document-header path, the referenced FileUpload must
+  // still be a PDF. Undefined is treated as "caller opted out of
+  // MIME validation"; false means the row exists but is not a PDF.
+  docUploadIsPdf?: boolean;
 }): string[] {
-  const { campaign, audience, channel, onlyUnsent, docUploadExists } = args;
+  const {
+    campaign,
+    audience,
+    channel,
+    onlyUnsent,
+    docUploadExists,
+    docUploadIsPdf,
+  } = args;
   const chans = channelSetFor(channel);
   const wantsEmail = chans.has("email");
   const wantsSms = chans.has("sms");
@@ -303,7 +315,7 @@ export function computeBlockers(args: {
   ) {
     blockers.push("template_vars_malformed");
   }
-  // P17-C.5 — doc-header readiness blocker. Gated on ALL of:
+  // P17-C.5 / P17-G — doc-header readiness blocker. Gated on ALL of:
   //
   //   1. channel set includes WhatsApp — on an email-only send the
   //      doc never attaches, so a missing FileUpload is not a
@@ -314,15 +326,15 @@ export function computeBlockers(args: {
   //      configured. Same predicate the planner uses in Rule 1's
   //      doc branch; keeping both on one gate means blocker and
   //      delivery stay consistent.
-  //   3. `docUploadExists === false` (strict — undefined or true
-  //      skips the blocker). Only emit when the caller has
-  //      explicitly confirmed the row is missing.
+  //   3. either:
+  //        - `docUploadExists === false` (row missing), or
+  //        - `docUploadIsPdf === false` (row exists but is not PDF)
+  //      Undefined is treated as caller opt-out, not failure.
   //
-  // Explicit non-goals: the blocker does NOT check content-type or
-  // byte length of the FileUpload. Those are delivery-edge concerns
-  // (C.3's `doc_empty` guard + Taqnyat's own MIME validation). This
-  // is a preflight "does the reference still resolve?" check, not a
-  // deep validation.
+  // Explicit non-goal: the blocker does NOT check byte length of the
+  // FileUpload. That's still a delivery-edge concern (`doc_empty` in
+  // `delivery.ts`). MIME/PDF fit IS preflighted here because the
+  // pilot's approved template is specifically a document-PDF header.
   if (
     wantsWhatsApp &&
     campaignWantsWhatsAppDocument({
@@ -330,7 +342,7 @@ export function computeBlockers(args: {
       templateWhatsAppName: campaign.templateWhatsAppName,
       templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
     }) &&
-    docUploadExists === false
+    (docUploadExists === false || docUploadIsPdf === false)
   ) {
     blockers.push("no_whatsapp_document");
   }

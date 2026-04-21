@@ -686,6 +686,43 @@ test("doc-header: FileUpload with empty bytes → invitation failed doc_empty, n
   );
 });
 
+test("doc-header: FileUpload with non-PDF MIME → invitation failed doc_not_pdf, no upload, no send", async () => {
+  // Pilot contract: the approved template is a PDF document header.
+  // A crafted bind to a DOCX/TXT upload must fail closed before the
+  // BSP upload call, even if the row otherwise exists and has bytes.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: PDF_BYTES,
+      filename: "invitation.docx",
+      contentType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: "nope", filename: "x" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: false, error: "doc_not_pdf" });
+  assert.deepEqual(effects.loadFileUploadCalls, [UPLOAD_ID]);
+  assert.deepEqual(effects.uploadMediaCalls, []);
+  assert.deepEqual(effects.sendCalls, []);
+  assert.ok(
+    effects.updateCalls.some(
+      (u) => u.status === "failed" && u.error === "doc_not_pdf",
+    ),
+    "invitation should be marked failed with error=doc_not_pdf",
+  );
+});
+
 test("doc-header: uploadMedia fails → invitation failed with upload error, no send", async () => {
   // Meta / BSP upload rejection. The intercept passes the error
   // string through verbatim (no rewrap) so the operator sees

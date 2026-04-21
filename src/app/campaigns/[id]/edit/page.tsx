@@ -11,6 +11,7 @@ import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from 
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
 import { resolveOwnedWhatsAppUpload } from "@/lib/campaign-whatsapp-render";
+import { PDF_MIME } from "@/lib/uploads";
 
 export const dynamic = "force-dynamic";
 
@@ -67,7 +68,11 @@ async function updateCampaign(id: string, formData: FormData) {
   let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
   if (whatsappDocumentUploadId !== null) {
     const owned = await prisma.fileUpload.findFirst({
-      where: { id: whatsappDocumentUploadId, uploadedBy: me.id },
+      where: {
+        id: whatsappDocumentUploadId,
+        uploadedBy: me.id,
+        contentType: PDF_MIME,
+      },
       select: { id: true },
     });
     if (!owned) whatsappDocumentUploadId = null;
@@ -153,7 +158,11 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   // lookup without touching the masking seam).
   const ownedUpload = c.whatsappDocumentUploadId
     ? await prisma.fileUpload.findFirst({
-        where: { id: c.whatsappDocumentUploadId, uploadedBy: me.id },
+        where: {
+          id: c.whatsappDocumentUploadId,
+          uploadedBy: me.id,
+          contentType: PDF_MIME,
+        },
         select: { id: true, filename: true },
       })
     : null;

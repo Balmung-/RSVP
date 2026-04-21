@@ -6,6 +6,7 @@ import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
 import { deriveSendCampaignSummary } from "./send-campaign-summary";
 import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
+import { isPdfUploadContentType } from "@/lib/uploads";
 
 // The destructive companion to `propose_send`. Same input shape; the
 // difference is that this tool actually dispatches messages through
@@ -226,13 +227,13 @@ export const sendCampaignTool: ToolDef<Input> = {
     // P17-C.5 — doc-header existence re-check. Mirrors the propose_send
     // handler's FileUpload lookup: when the campaign is wired for the
     // doc-header path (both template fields AND an upload id), we
-    // resolve the FileUpload row and pass the boolean into
-    // `computeBlockers` so a dangling FK surfaces as
-    // `no_whatsapp_document` before we kick off the per-invitation
-    // fan-out. Same select shape — just the minimum the blocker
-    // check needs (`id` via `!= null`). `filename` isn't required here
-    // because this tool doesn't render a preview; it only enforces.
+    // resolve the FileUpload row and pass both existence + PDF-fit
+    // into `computeBlockers` so a dangling FK or wrong MIME surfaces
+    // as `no_whatsapp_document` before we kick off the per-invitation
+    // fan-out. `filename` isn't required here because this tool
+    // doesn't render a preview; it only enforces.
     let docExists: boolean | undefined = undefined;
+    let docIsPdf: boolean | undefined = undefined;
     if (
       campaignWantsWhatsAppDocument({
         whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
@@ -244,11 +245,12 @@ export const sendCampaignTool: ToolDef<Input> = {
         // Safe `!`: the predicate above returned true only when
         // `whatsappDocumentUploadId` is non-null non-empty.
         where: { id: campaign.whatsappDocumentUploadId! },
-        select: { id: true },
+        select: { id: true, contentType: true },
       });
       docExists = row !== null;
+      docIsPdf =
+        row !== null ? isPdfUploadContentType(row.contentType) : undefined;
     }
-
     const blockers = computeBlockers({
       campaign: {
         status: campaign.status,
@@ -263,6 +265,7 @@ export const sendCampaignTool: ToolDef<Input> = {
       channel,
       onlyUnsent,
       docUploadExists: docExists,
+      docUploadIsPdf: docIsPdf,
     });
     const nonStatusBlockers = blockers.filter(
       (b) => !b.startsWith("status_locked:"),
