@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Campaign, Team } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
 import { FileInput } from "./FileInput";
+import { WhatsAppDocumentInput } from "./WhatsAppDocumentInput";
 import { Field } from "./Field";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
@@ -13,12 +14,20 @@ export function CampaignForm({
   submitLabel,
   cancelHref,
   teams,
+  whatsappDocumentFilename,
 }: {
   campaign?: Partial<Campaign> | null;
   action: (fd: FormData) => Promise<void> | void;
   submitLabel: string;
   cancelHref: string;
   teams?: Team[];
+  /**
+   * P17-D.3: resolved filename for `campaign.whatsappDocumentUploadId`,
+   * passed in by the edit page's server-side render so the operator
+   * sees the attached PDF's name instead of the bare cuid. Optional
+   * because the new-campaign page has no existing FK to resolve.
+   */
+  whatsappDocumentFilename?: string | null;
 }) {
   return (
     <form action={action} className="panel max-w-3xl p-10 grid grid-cols-2 gap-6">
@@ -179,7 +188,8 @@ export function CampaignForm({
           !!(
             campaign?.templateWhatsAppName ||
             campaign?.templateWhatsAppLanguage ||
-            campaign?.templateWhatsAppVariables
+            campaign?.templateWhatsAppVariables ||
+            campaign?.whatsappDocumentUploadId
           )
         }
       >
@@ -225,6 +235,14 @@ export function CampaignForm({
             <code>{"{{eventAt}}"}</code> <code>{"{{rsvpUrl}}"}</code>
             ). Leave variables empty for a zero-param template.
           </p>
+          <div className="col-span-2">
+            <WhatsAppDocumentInput
+              name="whatsappDocumentUploadId"
+              defaultValue={campaign?.whatsappDocumentUploadId ?? ""}
+              defaultFilename={whatsappDocumentFilename ?? ""}
+              hint="PDF attached as the template header on send. Leave empty for templates without a document header."
+            />
+          </div>
         </div>
       </details>
       <div className="col-span-2 flex items-center justify-end gap-3 pt-2">

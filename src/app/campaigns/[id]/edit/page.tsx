@@ -114,6 +114,18 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   if (!c) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
+  // P17-D.3: resolve the attached WhatsApp PDF's filename so
+  // CampaignForm can display it next to the picker instead of just
+  // the cuid. Only fires when the campaign actually has an FK set,
+  // so no wasted Prisma hit on the common case.
+  const whatsappDocumentFilename = c.whatsappDocumentUploadId
+    ? (
+        await prisma.fileUpload.findUnique({
+          where: { id: c.whatsappDocumentUploadId },
+          select: { filename: true },
+        })
+      )?.filename ?? null
+    : null;
   // Non-admins see only teams they belong to (plus the current team of
   // the campaign so the picker still reflects its actual assignment
   // and submits don't silently orphan it). Admins see every team.
@@ -150,6 +162,7 @@ export default async function EditCampaign({ params }: { params: { id: string } 
         submitLabel="Save changes"
         cancelHref={`/campaigns/${c.id}`}
         teams={teams}
+        whatsappDocumentFilename={whatsappDocumentFilename}
       />
       <form action={boundDelete} className="mt-8 max-w-3xl">
         <ConfirmButton
