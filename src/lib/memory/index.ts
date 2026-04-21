@@ -27,6 +27,18 @@ export {
   memoryPolicyFromEnv,
   type MemoryPolicy,
 } from "./policy";
+export {
+  MEMORY_KINDS,
+  validateMemoryWrite,
+  type MemoryKind,
+  type MemoryWriteInput,
+} from "./validate";
+export {
+  buildMemoryRecallQuery,
+  rankMemoriesForRecall,
+  type MemoryRankOptions,
+  type MemoryRecallOptions,
+} from "./retrieval";
 
 // Re-export the Prisma row type under a neutral name so call
 // sites elsewhere can type-check against `MemoryRecord` without

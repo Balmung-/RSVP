@@ -113,6 +113,12 @@ test("buildMemoryListQuery: custom policy is honored end-to-end", () => {
     defaultKind: "preference",
     listDefaultLimit: 10,
     listMaxLimit: 25,
+    // P16-C — recall bounds are part of the policy shape now.
+    // `buildMemoryListQuery` ignores them (only the list bounds
+    // matter here), but the type demands them so we set
+    // something sensible for shape-completeness.
+    recallDefaultLimit: 5,
+    recallMaxLimit: 10,
   };
   const qDefault = buildMemoryListQuery("team-abc", { policy: custom });
   assert.equal(qDefault.take, 10, "default limit should use custom.listDefaultLimit");
@@ -129,6 +135,11 @@ test("DEFAULT_MEMORY_POLICY: shape is frozen + values are stable", () => {
   assert.equal(DEFAULT_MEMORY_POLICY.defaultKind, "fact");
   assert.equal(DEFAULT_MEMORY_POLICY.listDefaultLimit, 50);
   assert.equal(DEFAULT_MEMORY_POLICY.listMaxLimit, 200);
+  // P16-C — recall path has its own bounds. Strictly smaller than
+  // the list bounds because recall rows feed the model's prompt
+  // context, which is token-budgeted.
+  assert.equal(DEFAULT_MEMORY_POLICY.recallDefaultLimit, 10);
+  assert.equal(DEFAULT_MEMORY_POLICY.recallMaxLimit, 25);
 });
 
 test("memoryPolicyFromEnv: returns defaults in P16-A (no env reads yet)", () => {
@@ -160,29 +171,48 @@ test("memoryPolicyFromEnv: default parameter is process.env (doesn't throw)", ()
 test("barrel: @/lib/memory exposes pure runtime exports only (P16-A.1 purity pin)", async () => {
   // GPT P16-A audit blocker: the barrel imported `prisma` at the
   // top level and exported `listMemoriesForTeam`, so every pure
-  // consumer of `DEFAULT_MEMORY_POLICY` / `buildMemoryListQuery` /
-  // `memoryPolicyFromEnv` paid a Prisma instantiation cost via the
-  // side-effect import in `@/lib/db`. Fix: the DB edge moved to
-  // `@/lib/memory/server`; the barrel has NO runtime export that
-  // requires prisma.
+  // consumer of the memory helpers paid a Prisma instantiation
+  // cost via the side-effect import in `@/lib/db`. Fix: every DB
+  // edge lives in `@/lib/memory/server`; the barrel has NO
+  // runtime export that requires prisma.
   //
-  // If a future refactor adds a DB-calling wrapper back to the
-  // barrel (and therefore imports prisma), this pin trips. The
-  // wrapper belongs in `./server`; anything else is a regression.
+  // The expected set grows as later slices land pure helpers
+  // (P16-B added `validateMemoryWrite` + `MEMORY_KINDS`; P16-C
+  // added `buildMemoryRecallQuery` + `rankMemoriesForRecall`).
+  // Each of those is pure — no prisma import — so they belong
+  // on the barrel. What must STILL be absent: the DB-calling
+  // wrappers (`listMemoriesForTeam`, `createMemoryForTeam`,
+  // `recallMemoriesForTeam`). Those live in ./server.
   const barrel = await import("../../src/lib/memory");
   const runtimeExports = Object.keys(barrel)
     .filter((k) => k !== "default" && k !== "__esModule")
     .sort();
   assert.deepEqual(runtimeExports, [
     "DEFAULT_MEMORY_POLICY",
+    "MEMORY_KINDS",
     "buildMemoryListQuery",
+    "buildMemoryRecallQuery",
     "memoryPolicyFromEnv",
+    "rankMemoriesForRecall",
+    "validateMemoryWrite",
   ]);
-  // Explicit negative pin — direct regression guard for GPT's
-  // blocker. The DB wrapper must not be on the barrel.
+  // Explicit negative pins — every DB-calling wrapper must be
+  // absent. If a future refactor adds one of these back to the
+  // barrel (and therefore imports prisma), this test trips.
+  const b = barrel as Record<string, unknown>;
   assert.equal(
-    (barrel as Record<string, unknown>).listMemoriesForTeam,
+    b.listMemoriesForTeam,
     undefined,
     "listMemoriesForTeam must live in @/lib/memory/server, not on the barrel",
+  );
+  assert.equal(
+    b.createMemoryForTeam,
+    undefined,
+    "createMemoryForTeam must live in @/lib/memory/server, not on the barrel",
+  );
+  assert.equal(
+    b.recallMemoriesForTeam,
+    undefined,
+    "recallMemoriesForTeam must live in @/lib/memory/server, not on the barrel",
   );
 });

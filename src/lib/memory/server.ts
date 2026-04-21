@@ -2,6 +2,11 @@ import type { Memory as PrismaMemory } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { DEFAULT_MEMORY_POLICY, type MemoryPolicy } from "./policy";
 import { buildMemoryListQuery, type MemoryListOptions } from "./query";
+import {
+  buildMemoryRecallQuery,
+  rankMemoriesForRecall,
+  type MemoryRecallOptions,
+} from "./retrieval";
 import { validateMemoryWrite } from "./validate";
 
 // P16-A.1 / P16-B — server-only DB edges for durable memory.
@@ -80,4 +85,37 @@ export async function createMemoryForTeam(
       createdByUserId: validated.createdByUserId,
     },
   });
+}
+
+// P16-C — the sanctioned recall path.
+//
+// Composes the pure retrieval builder + the pure ranker into a
+// single DB-calling edge. Every future chat-route / tool caller
+// that wants "which memories should feed this prompt?" routes
+// through here so the ranking policy (dedup, stable ordering,
+// recall-specific limit clamp) is non-bypassable.
+//
+// Flow:
+//   1. `buildMemoryRecallQuery` — teamId-gated where, optional
+//      `kind IN (...)` filter, ordered by (updatedAt desc, id
+//      desc), clamped take.
+//   2. `prisma.memory.findMany` — hits the `(teamId, updatedAt)`
+//      index when no kind filter is present, and the
+//      `(teamId, kind)` index when one is. Both indexes exist in
+//      the schema (P16-A added them for this path specifically).
+//   3. `rankMemoriesForRecall` — sorts (idempotent after the DB's
+//      ORDER BY), deduplicates by normalised body, clamps to the
+//      caller's / policy's recall limit.
+//
+// Tenant safety: the only `where` filter is teamId (plus optional
+// kind allow-list); all enforced at the builder. Caller MUST
+// check auth before handing a teamId here.
+export async function recallMemoriesForTeam(
+  teamId: string,
+  opts: MemoryRecallOptions = {},
+): Promise<MemoryRecord[]> {
+  const rows = await prisma.memory.findMany(
+    buildMemoryRecallQuery(teamId, opts),
+  );
+  return rankMemoriesForRecall(rows, { limit: opts.limit, policy: opts.policy });
 }

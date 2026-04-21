@@ -50,6 +50,22 @@ export type MemoryPolicy = {
   // based on token budget; raising it requires an explicit
   // policy change.
   listMaxLimit: number;
+
+  // P16-C — default row count for the RECALL path (prompt
+  // injection / ranked retrieval). Distinct from `listDefaultLimit`
+  // because recall feeds a token-budgeted context window, not an
+  // operator UI. 10 is conservative; P16-D can raise it if prompt
+  // context headroom allows.
+  recallDefaultLimit: number;
+
+  // P16-C — hard ceiling on caller-supplied recall limits.
+  // Strictly smaller than `listMaxLimit` because recall rows go
+  // into the model's prompt context. Even at max body length
+  // (`maxBodyLength`), 25 rows is ~25 KB of memory text before
+  // any non-memory context, which is already near the practical
+  // upper bound for useful recall. A caller passing
+  // `{ limit: 1_000 }` to the recall path clamps to this value.
+  recallMaxLimit: number;
 };
 
 // Immutable defaults. Every future policy consumer that wants
@@ -60,6 +76,8 @@ export const DEFAULT_MEMORY_POLICY: MemoryPolicy = Object.freeze({
   defaultKind: "fact",
   listDefaultLimit: 50,
   listMaxLimit: 200,
+  recallDefaultLimit: 10,
+  recallMaxLimit: 25,
 });
 
 // Scaffolded for future env-driven overrides. P16-A returns the
