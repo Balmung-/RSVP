@@ -16045,3 +16045,68 @@ Residual notes only (not blockers for the pilot tranche):
 - There is still no dedicated render-level test pin for the `safeCampaign` nulling seam. Narrow enough not to block here, but if Claude extracts that seam later it should get a unit pin.
 
 So: P17-D can now be treated as greenlit.
+### 2026-04-21 - GPT note - current dirty tree after greenlit P17-D
+
+I inspected the active uncommitted diff sitting on top of the greenlit P17-D state.
+
+What it is:
+- `src/lib/campaign-whatsapp-render.ts` + `tests/unit/campaign-whatsapp-render.test.ts`
+- tiny edit-page refactor to use that helper
+- `package.json` updated to include the new test file
+
+My read:
+- this is a **cleanup / test-pin extraction**, not the next product tranche
+- it is safe and reasonable
+- it does NOT change the pilot surface or unlock a new capability
+- it should not delay the next real tranche
+
+Fresh checks on the dirty tree:
+- `npm test` -> 1676/1676 pass
+- `NODE_ENV=production npm run build` -> clean
+- `npx tsc --noEmit` hit the same stale `.next/types` issue we have already seen in this shell; build type-check passed
+
+Fastest path if speed matters:
+1. Either commit this D.6 cleanup as a tiny refactor, or drop it.
+2. Do **not** spend more design time on it.
+3. Next real work should be a client-pilot tranche, not more WhatsApp config refactoring.
+
+If GPT is taking over from here, the cleanest handoff is: stop Claude after the current cleanup decision, then let GPT own the next tranche end-to-end.
+### 2026-04-21 - GPT tranche - P17-E (`aaeffdb`)
+
+Verdict: **landed by GPT**.
+
+What shipped in the code commit:
+- `/api/files/[id]` is no longer globally public-by-id.
+- New pure handler at `src/app/api/files/[id]/handler.ts` splits the policy cleanly:
+  - public campaign assets stay public when the file is actually referenced by `Campaign.brandLogoUrl`, `Campaign.brandHeroUrl`, or `CampaignAttachment.url`
+  - everything else is private-by-default
+  - private files are readable only by the uploader or an admin
+- New helper in `src/lib/uploads.ts`: `isUploadPubliclyReferenced(id)`.
+- New unit pins in `tests/unit/files-route.test.ts` cover:
+  - public-without-auth
+  - private owner access
+  - private admin access
+  - anonymous / foreign-user denial
+  - legacy null-owner denial for non-admins
+- The already-green D.6 cleanup was folded into the same code checkpoint so the tree returned to a coherent committed state:
+  - `src/lib/campaign-whatsapp-render.ts`
+  - `tests/unit/campaign-whatsapp-render.test.ts`
+
+Why this matters for the pilot:
+- P17-D closed the campaign edit-page leak path, but `/api/files/[id]` was still a global raw-download hole.
+- This slice keeps true public campaign assets working while making operator uploads (chat files, WhatsApp PDF docs, etc.) private unless intentionally exposed by a public campaign surface.
+
+Verification on my side:
+- `npm test` -> 1692/1692 pass
+- `NODE_ENV=production npm run build` -> clean
+- `npx tsc --noEmit` in this shell still hits the known stale `.next/types` include problem; production build type-check is the authoritative green signal here
+
+Notes / residuals:
+- This is still not a full team-shared file ownership model. Private non-public files are uploader-or-admin only.
+- The edit-page comment block still has the older historical wording about `/api/files/<id>` being public; the code path is fixed, the comment cleanup is not load-bearing.
+
+Recommended next move from this clean base:
+1. Do **not** widen admin/manual-send surfaces yet.
+2. Keep the pilot chat-first.
+3. Next tranche should be a true client-pilot tranche from `/chat`, not more WhatsApp config refactoring.
+   Best target: operator-visible live send/result proof and the minimum hardening needed for a real client test.
