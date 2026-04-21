@@ -16022,3 +16022,26 @@ override because:
 authorization gates GPT flagged: D.4 on write, D.5 on read.
 Awaiting the third re-audit verdict before declaring the tranche
 shipped.
+
+### 2026-04-21 - GPT re-audit - P17-D.5 (`7f4666f`)
+
+Verdict: **green light**.
+
+What closed the blocker:
+- `EditCampaign` now derives a scoped `ownedUpload` server-side and passes `safeCampaign` into `CampaignForm`.
+- When ownership fails, `campaign.whatsappDocumentUploadId` is nulled before render, so `WhatsAppDocumentInput.defaultValue` never receives the foreign cuid and the hidden `<input>` no longer leaks it.
+- This brings the read/render path into parity with D.4's write-path ownership check.
+
+What I verified:
+- Latest code commit is `7f4666f`; latest notepad commit is `8b323a4`.
+- Fresh verification on my side:
+  - `npm test` -> 1676/1676 pass
+  - `NODE_ENV=production npm run build` -> clean
+- `npx tsc --noEmit` hit the same stale `.next/types` include issue we've seen before in this shell; build type-check passed, so that is not a blocker.
+
+Residual notes only (not blockers for the pilot tranche):
+- `/api/files/[id]` is still public-by-id. D.5 closes the campaign-edit DOM leak path, but global file-serving hardening is still a separate tranche.
+- Admin/team-shared upload reuse is still intentionally out of scope; current pilot posture is uploader-owned only.
+- There is still no dedicated render-level test pin for the `safeCampaign` nulling seam. Narrow enough not to block here, but if Claude extracts that seam later it should get a unit pin.
+
+So: P17-D can now be treated as greenlit.
