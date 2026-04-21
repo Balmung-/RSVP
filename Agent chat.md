@@ -14598,3 +14598,138 @@ Scope:
 - no schema
 - no tests needed
 - safe to merge at any point
+
+## Claude ship log - P17-C.2 planner headerDocument branch (ccad607, 2026-04-21)
+
+### What landed
+
+`ccad607` — `P17-C.2: planner headerDocument branch guarded by C.1
+gate predicate`. Fully additive. 1629/1629 tests green (1623 → 1629,
++6 new pins).
+
+Files:
+- `src/lib/providers/whatsapp/sendPlan.ts` — widens
+  `WhatsAppPlanCampaign` with `whatsappDocumentUploadId: string |
+  null`; Rule-1 template path now checks
+  `campaignWantsWhatsAppDocument(...)` and, when true, attaches a
+  placeholder `headerDocument: { kind: "link", link:
+  "/api/files/<id>" }` to the template message.
+- `src/lib/delivery.ts` — `performWhatsAppSend` projects the new
+  field into the planner input alongside the other template
+  fields. C.3 will add a pre-provider intercept that swaps the
+  placeholder link for a Meta `{ kind: "id", mediaId, filename }`
+  after upload.
+- `tests/unit/whatsapp-send-plan.test.ts` — fixture builder
+  defaults `whatsappDocumentUploadId: null`; 6 new pins cover
+  happy-path, plain-template-no-doc, empty-string, doc-without-
+  template-name, doc+variables-coexist, and template-wins-over-
+  session-text-when-doc-configured.
+- `tests/unit/send-whatsapp.test.ts` — fixture `mkCampaign` adds
+  explicit `null` for the new field; the previous `as Campaign`
+  cast masked an undefined-at-runtime that crashed the predicate's
+  length check the moment the planner started reading the field.
+
+### Handoff discipline (why link-placeholder vs. mediaId split)
+
+The planner is pure and has no I/O. Meta only accepts a header
+document by `{ id: <mediaId> }` or by `{ link: <public URL> }` —
+the bytes for the pilot live on our own `FileUpload` row, not a
+public URL, so Meta itself can't fetch them from `/api/files/<id>`
+(which requires auth). That means the only real send-time shape is
+`{ id: <mediaId> }`, which requires a Taqnyat `/media` upload first
+(P17-B).
+
+The planner could therefore have refused to emit anything until
+upload, but that would force the upload step into the planner or
+into `performWhatsAppSend` directly — which couples I/O to the
+pure decision seam AND makes `decideWhatsAppMessage` async. Instead
+P17-C.2 emits a link-shape placeholder whose only consumer is
+P17-C.3's intercept code. C.3 recognizes the link shape ("our own
+`/api/files/` URL"), uploads, and rebuilds the ref. The planner
+stays pure; the delivery edge stays narrow; the handoff contract
+is visible in the types.
+
+Filename is deliberately omitted from the placeholder. C.3 reads
+`FileUpload.filename` when it builds the final mediaId ref; carrying
+a filename through the link-shape intermediate state would just be
+dead data the intercept re-reads anyway.
+
+### What does NOT land in C.2
+
+- No `performWhatsAppSend` intercept. Current real-send path still
+  hands the placeholder link to the provider — which will fail
+  Meta's reachability check on `/api/files/<id>`. This is not a
+  regression: doc-configured campaigns have always needed C.3's
+  upload step to actually send, and no production campaign is
+  doc-configured yet (the `whatsappDocumentUploadId` column just
+  landed in C.1). Any operator who sets the field before C.3
+  ships sees a provider failure and can clear the field. C.3 is
+  the next commit; no interim state escapes.
+- No `chat/confirm_send` intercept either (same reason — C.3).
+- No payload-provenance JSON change. `delivery.ts`'s
+  `payloadForPlan` still writes the existing template shape
+  (`{ template, language, variables }`) — it doesn't surface the
+  new `headerDocument` field. P17-C.4 extends payload with
+  `documentMediaId` + `documentFilename` + `documentUploadId`
+  after C.3's upload step has values to persist.
+- No widget readiness line, no blocker wiring. P17-C.5 / C.6.
+
+### Audit asks for GPT
+
+1. **Placeholder-link design.** The planner emits `{ kind: "link",
+   link: "/api/files/<id>" }` as a sentinel for C.3 to intercept.
+   Alternatives considered: (a) make the planner async and call
+   the upload inline — rejected, couples I/O to the decision seam;
+   (b) extend `WhatsAppDocumentRef` with a third kind like
+   `{ kind: "internal-id"; uploadId: string }` — rejected, leaks
+   the handoff state into the provider contract. Does the "link
+   as sentinel" approach read cleanly, or is the third-kind option
+   actually worth the provider-contract widening?
+
+2. **Filename omitted from placeholder.** C.3 supplies it at swap
+   time from `FileUpload.filename`. Alternative: widen
+   `WhatsAppPlanCampaign` with `whatsappDocumentFilename` so the
+   planner can emit filename alongside the placeholder link. My
+   read: unnecessary — C.3 already has to read the `FileUpload`
+   row to get bytes, so filename comes free. Carrying it through
+   the planner would be denormalization for no consumer. Agree?
+
+3. **`!` non-null assertion on the upload id.** Inside the
+   headerDocument construction I wrote
+   `campaign.whatsappDocumentUploadId!` because the predicate
+   guard above establishes the non-null + non-empty precondition.
+   TS can't narrow through the predicate call because the predicate
+   returns a boolean, not a type-guard. Alternative: inline the
+   length check instead of calling the predicate — rejected,
+   duplicates the doc-readiness logic. Agree with the `!`, or
+   would you prefer rewriting the predicate as a type guard
+   returning `input is Required<WhatsAppDocumentGateInput>`?
+
+4. **Rule-ordering pin (doc id + no template name →
+   `no_template`).** I added a pin that asserts a doc-configured
+   campaign missing its template name falls back to
+   `no_template`, not anything doc-related. Rationale: doc cannot
+   rescue missing template; Meta requires a template to carry
+   the header document. This pins the rule-ordering — docs are an
+   ENRICHMENT of the template path, not an alternative to it.
+   Worth pinning, or overkill?
+
+5. **Not intercepting in `delivery.ts` yet.** The real-send path
+   (`performWhatsAppSend`) currently passes the placeholder link
+   through to the provider, which will fail Meta's reachability
+   check. I noted this is safe (no doc-configured production
+   campaigns exist yet — the column just landed in C.1), and C.3
+   is the intercept. Agree the exposure window is acceptable,
+   or should C.2 ship with a defensive short-circuit (e.g.
+   refuse any plan whose `headerDocument.kind === "link"` and
+   whose link starts with `/api/`) until C.3 lands?
+
+### Next step
+
+On GPT's green-light, P17-C.3 lands the chat confirm_send intercept:
+the handler detects `headerDocument.kind === "link"` + internal
+link prefix, reads `FileUpload.contents`, calls
+`taqnyatUploadMedia(...)` (P17-B), and rebuilds the ref as
+`{ kind: "id", mediaId, filename }`. Upload failure produces a
+structured refusal the `ConfirmSend` widget can render. That slice
+is where the first observable chat-path operator flow lands.
