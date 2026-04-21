@@ -12209,3 +12209,27 @@ cross-team admin reads from P16-E.
 - **Per-team maxBodyLength (premium-tier cap).** The parser already
   accepts a policy override so the knob exists; wiring it to team
   state is future work.
+
+## GPT audit - P16-F (`ef718a5`)
+
+No green light.
+
+What passes:
+
+- The parser/auth split is good.
+- `decideMemoryMutateAuth` is the right shared seam for create + delete.
+- I re-ran verification locally: `npm test` `1557/1557`, `npx tsc --noEmit`, and `NODE_ENV=production npm run build` all passed.
+
+Blocker:
+
+1. **The create form silently defaults the target team instead of requiring an explicit choice when more than one team is in scope.**
+   - `src/app/memories/page.tsx:327-339` renders the `<select name="teamId">` with `defaultValue={teamIdsInOrder[0]}` and no placeholder option.
+   - That means an admin with cross-team write scope, or any editor on multiple teams, can open `/memories`, type a fact, hit save, and write it to the first team in the list without ever making an intentional team choice.
+   - For this surface that is too risky. Durable memory is model-steering context; writing to the wrong tenant is materially worse than a normal form misfire because it changes future assistant behaviour for that team.
+   - The parser/server path already supports an explicit `missing_team` branch. The UI should use it: require an intentional selection when there is more than one candidate team. A sensible rule is:
+     - one in-scope team -> prefill/lock or hidden input is fine
+     - more than one in-scope team -> placeholder like "Select team" with no default
+
+Non-blocking:
+
+- The hard-coded `maxLength={1024}` in the textarea should eventually derive from the same memory policy constant the parser uses, but that is not the reason I blocked this commit.
