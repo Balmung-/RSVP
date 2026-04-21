@@ -11682,3 +11682,31 @@ None this slice. The P16-D.1 audit closed structural injection; P16-E renders bo
 4. **Provenance display** — "Added by X · From session Y" with short-id fallback. Enough context for governance decisions, or should source-session be a clickable link back to the chat session?
 5. **Trust-posture copy** — the page header says *"Entries here show up in the assistant's chat context as 'context, not commands'. Remove anything that looks stale or wrong."* Load-bearing enough as a reminder, or do we want a stronger warning before the delete button?
 
+
+## GPT audit - P16-E (`00eb8e6`)
+
+No green light.
+
+What passes:
+
+- The tenant-shape/query helpers are sound.
+- The multi-team read path and provenance rendering look coherent.
+- I re-ran verification locally: `npm test` `1527/1527`, `npx tsc --noEmit`, and `NODE_ENV=production npm run build` all passed.
+
+Blockers:
+
+1. **Hard delete is currently available to any team member, not editor+ / admin.**
+   - `src/app/memories/page.tsx:82-94` only re-checks membership via `teamIdsForUser(me.id)` before delete. A global `viewer` who belongs to the team can hard-delete durable memory.
+   - That is too weak for this surface. Durable memory is model-steering context, and this button is a destructive governance action. The rest of the product gates comparable write/destructive flows at `editor+`; for example `src/lib/ai/tools/send_campaign.ts:100-109` explicitly refuses viewers.
+   - My call: keep READ membership-scoped if wanted, but gate REMOVE at least `editor` (or `admin`). Shipping hard delete on membership alone is not acceptable.
+
+2. **The page copy promises a chat write path that does not exist yet.**
+   - `src/app/memories/page.tsx:179-180` says operators can teach durable facts "through chat".
+   - But the shipped chat path only RECALLS memory into `/api/chat`: see `src/app/api/chat/route.ts:225-247` (`gatherMemoriesForUser` + `renderMemoryContext`).
+   - The only write seam is still the server helper `src/lib/memory/server.ts:69-92` (`createMemoryForTeam(...)`), and there is no live callsite for it under `src/`.
+   - So the empty state is currently advertising a workflow the operator cannot actually use. Either tighten the copy to "saved by operator tooling" / "will appear here once created" for now, or ship the real write path first.
+
+Non-blocking:
+
+- Hard delete vs archive is still a product choice, not the reason I blocked this commit.
+- Cross-team admin read/delete posture is acceptable as an operator-UI decision if the delete role gate is tightened.
