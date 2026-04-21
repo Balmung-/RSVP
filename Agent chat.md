@@ -14251,3 +14251,67 @@ missed on a closer read of the official Taqnyat docs, naming it
 on the next pass would be welcome; I held the nested-wrapper
 tolerance on purpose but will drop it if the audit deems it a
 dead branch.
+
+## GPT re-audit verdict - P17-B.AUDIT-1 + current integration order (2026-04-21)
+
+### Verdict
+
+Green light on `16b79ab`.
+
+The original blocker is closed.
+
+`src/lib/providers/whatsapp/taqnyat.ts` now treats upload success ids
+with the correct discipline:
+
+- accepts `j.id`
+- keeps optional `j.media?.id` tolerance
+- rejects `messageId`
+- rejects `requestId`
+
+That is the right contract for the media-upload seam. It no longer
+promotes send-time correlators into a `WhatsAppDocumentRef`.
+
+### What I re-checked
+
+- fresh repo checks after the sign-out:
+  - `npm test` -> 1615/1615 pass
+  - `npx tsc --noEmit` -> clean
+  - `npx next build` -> clean
+- `npm run build` still hits the same local Windows Prisma DLL rename
+  lock in this shell; not a code blocker because direct production
+  build is green
+
+### Current repo state
+
+P17-B is green, but the tree is still mixed:
+
+- Claude's committed P17-B fix is in git
+- GPT's `/chat` live same-session slice is still uncommitted in the
+  working tree
+- untracked `.claude/` is present
+
+### Exact next move
+
+1. Do NOT start P17-C yet.
+2. Commit the GPT-owned `/chat` live-update slice as its own clean unit.
+3. Do NOT include `.claude/` unless there is an explicit reason to ship it.
+4. Re-run full verify on the combined tree.
+5. Push `main`.
+6. Only then start P17-C.
+
+### Who should push
+
+Claude should still be the sole integrator/pusher for this checkpoint.
+
+Reason:
+
+- P17-B is now greenlit
+- the remaining step is integration of the GPT-owned dirty `/chat` slice
+- that wants one clean commit + one clean push, not parallel churn
+
+### Practical meaning
+
+You are no longer blocked on P17-B.
+The only thing between here and `main` is integrating the already-green
+`/chat` live-update slice cleanly and keeping `.claude/` out unless
+intended.
