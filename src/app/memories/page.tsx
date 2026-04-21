@@ -21,7 +21,8 @@ import { decideMemoryMutateAuth } from "@/lib/memory/admin-auth";
 import { parseCreateMemoryForm } from "@/lib/memory/form";
 import { setFlash } from "@/lib/flash";
 
-// P16-E / P16-F — operator-facing memory audit/UI with write.
+// P16-E / P16-F / P16-F.1 — operator-facing memory audit/UI with
+// write.
 //
 // Goal: make durable team memory inspectable and governable. The
 // chat-recall path (P16-D) surfaces memories INTO the model
@@ -37,6 +38,11 @@ import { setFlash } from "@/lib/flash";
 //   - P16-F: create form wired to the existing
 //     `createMemoryForTeam` write seam, reusing the same mutate
 //     auth decision.
+//   - P16-F.1: team selector no longer silently defaults to the
+//     first team when 2+ teams are in scope. A placeholder
+//     "Select a team…" forces an explicit tenant choice for admins
+//     and multi-team editors; single-team editors still get the
+//     prefill fast path because there IS no choice to make.
 //
 // Trust-scope decisions:
 //   - Any authenticated user sees the memories of teams they
@@ -313,9 +319,26 @@ export default async function MemoriesPage() {
           // the role via `decideMemoryMutateAuth` regardless.
           // Team selector lists exactly the teamIds the page
           // already resolved for READ scope (non-admin: their
-          // memberships; admin: all non-archived teams). For
-          // single-team operators the `<select>` just shows one
-          // option — simpler than auto-hiding the control.
+          // memberships; admin: all non-archived teams).
+          //
+          // P16-F.1 team-selector default policy:
+          //   - 1 team in scope: prefill that team. There is no
+          //     tenant choice to make, so forcing an extra click
+          //     is friction for the common single-team editor
+          //     case.
+          //   - 2+ teams in scope: render a disabled placeholder
+          //     option as the initial selection. HTML5 `required`
+          //     plus the empty `value=""` blocks client-side
+          //     submission; if a caller bypasses the browser
+          //     (DevTools / scripted POST), the server hits the
+          //     parser's `missing_team` branch and flashes
+          //     "Select a team for this memory."
+          //
+          // This closes the P16-F audit blocker: a silently-
+          // prefilled selector on a cross-team admin or a multi-
+          // team editor was a single-Tab-away save-to-wrong-team
+          // hazard for DURABLE context that changes future
+          // assistant behaviour.
           <form
             action={createAction}
             className="panel p-5 flex flex-col gap-4"
@@ -327,10 +350,24 @@ export default async function MemoriesPage() {
             <Field label="Team">
               <select
                 name="teamId"
-                defaultValue={teamIdsInOrder[0]}
+                defaultValue={
+                  teamIdsInOrder.length === 1 ? teamIdsInOrder[0] : ""
+                }
                 className="field"
                 required
               >
+                {teamIdsInOrder.length > 1 ? (
+                  // Placeholder carries an empty string value so
+                  // HTML5 `required` keeps the form from submitting
+                  // until the operator picks a real team. `disabled`
+                  // prevents the operator from re-selecting the
+                  // placeholder after making a choice (the
+                  // placeholder can still be the DEFAULT selection,
+                  // because `defaultValue=""` matches its value).
+                  <option value="" disabled>
+                    Select a team…
+                  </option>
+                ) : null}
                 {teamIdsInOrder.map((tid) => (
                   <option key={tid} value={tid}>
                     {resolveTeamNameForUi(tid, teamsById)}
