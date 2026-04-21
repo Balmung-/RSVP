@@ -273,14 +273,29 @@ export async function sendWhatsApp(
 // a reviewer can see exactly what was sent); template stores a JSON
 // blob with template identifier + resolved positional variables
 // (since the rendered body lives on Meta's side and can't be
-// reconstructed from our rows). Planner-refusal rows store a
-// minimal error descriptor so the audit trail still has something
-// structured to read.
+// reconstructed from our rows). Document stores a descriptor of the
+// media reference (id or link) plus any caption — same rationale as
+// template: the rendered artifact lives on Meta's side and the
+// audit row can only carry a reviewable identifier. Planner-refusal
+// rows store a minimal error descriptor so the audit trail still
+// has something structured to read.
+//
+// `document` is currently unreachable from `decideWhatsAppMessage`
+// (the planner only emits text/template today — the document path
+// is wired upstream of the planner in the invitation-PDF flow),
+// but the union narrows exhaustively so the audit surface stays
+// honest as soon as the planner starts emitting document plans.
 function payloadForPlan(
   plan: ReturnType<typeof decideWhatsAppMessage>,
 ): string {
   if (!plan.ok) return JSON.stringify({ error: plan.reason });
   if (plan.message.kind === "text") return plan.message.text;
+  if (plan.message.kind === "document") {
+    return JSON.stringify({
+      document: plan.message.document,
+      caption: plan.message.caption ?? null,
+    });
+  }
   return JSON.stringify({
     template: plan.message.templateName,
     language: plan.message.languageCode,

@@ -11,6 +11,7 @@ import {
   getWhatsAppProvider,
 } from "../../src/lib/providers";
 import type {
+  WhatsAppDocumentMessage,
   WhatsAppMessage,
   WhatsAppTemplateMessage,
   WhatsAppTextMessage,
@@ -166,6 +167,311 @@ test("buildRequestBody: template namespace is included only when non-empty", () 
     withoutNs.template.namespace,
     undefined,
     "empty string namespace must not appear in the body",
+  );
+});
+
+// ---- buildRequestBody: document (P17-A) ----
+//
+// Documents are the second media path we wire up: standalone
+// in-session document messages (this section) and template-with-
+// document-header (below). Both share the `WhatsAppDocumentRef`
+// shape, so drift across the two branches is the primary concern.
+
+test("buildRequestBody: standalone document (id) produces Meta document-by-id shape", () => {
+  // Invitation PDF sent in-session via a previously-uploaded
+  // media object. `mediaId` is the id Meta / Taqnyat's /media
+  // endpoint returned after upload (P17-B); referenced here by
+  // value only.
+  const msg: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: {
+      kind: "id",
+      mediaId: "wa_media_42",
+      filename: "invitation.pdf",
+    },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined);
+  assert.deepEqual(out, {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: "966500000000",
+    type: "document",
+    document: {
+      id: "wa_media_42",
+      filename: "invitation.pdf",
+    },
+  });
+});
+
+test("buildRequestBody: standalone document (link) produces Meta document-by-link shape", () => {
+  // Alternative path: Meta fetches the URL directly. Used when
+  // the PDF is already hosted (signed URL in object storage) so
+  // we don't need the /media upload round-trip. `filename`
+  // remains recommended so the recipient's WhatsApp shows a
+  // human-readable name instead of a URL path.
+  const msg: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: {
+      kind: "link",
+      link: "https://cdn.example.com/invites/eid-2026/abc.pdf",
+      filename: "eid-invitation.pdf",
+    },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined);
+  assert.deepEqual(out, {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: "966500000000",
+    type: "document",
+    document: {
+      link: "https://cdn.example.com/invites/eid-2026/abc.pdf",
+      filename: "eid-invitation.pdf",
+    },
+  });
+});
+
+test("buildRequestBody: document without filename omits the field (Meta derives from URL)", () => {
+  // Upstream behaviour pin: when no filename is supplied, the
+  // field MUST be absent. Sending `filename: ""` would land in
+  // Meta's response with a literal empty string in chat UI. The
+  // adapter treats falsy filename as "don't set it at all".
+  const msg: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: { kind: "id", mediaId: "m_1" },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    document: Record<string, unknown>;
+  };
+  assert.equal(out.document.id, "m_1");
+  assert.equal(
+    out.document.filename,
+    undefined,
+    "missing filename must not appear in the body",
+  );
+});
+
+test("buildRequestBody: document with empty-string filename omits the field", () => {
+  // Same pin as above, but protects against an upstream caller
+  // that derived filename from a URL path and got "" back.
+  const msg: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: { kind: "id", mediaId: "m_1", filename: "" },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    document: Record<string, unknown>;
+  };
+  assert.equal(
+    out.document.filename,
+    undefined,
+    "empty-string filename must be treated the same as missing",
+  );
+});
+
+test("buildRequestBody: document caption is included only when non-empty", () => {
+  // Caption is the ONLY field that differs between standalone
+  // document and template-header-document: standalone accepts it,
+  // header does not. This test pins the standalone caption path
+  // end-to-end; the "no caption on header" path is pinned below.
+  const msgWith: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: { kind: "id", mediaId: "m_1" },
+    caption: "Your invitation",
+  };
+  const msgEmpty: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "966500000000",
+    document: { kind: "id", mediaId: "m_1" },
+    caption: "",
+  };
+  const outWith = buildRequestBody("966500000000", msgWith, undefined) as {
+    document: Record<string, unknown>;
+  };
+  const outEmpty = buildRequestBody("966500000000", msgEmpty, undefined) as {
+    document: Record<string, unknown>;
+  };
+  assert.equal(outWith.document.caption, "Your invitation");
+  assert.equal(
+    outEmpty.document.caption,
+    undefined,
+    "empty-string caption must not appear in the body",
+  );
+});
+
+// ---- buildRequestBody: template with document header (P17-A) ----
+//
+// The production use case: the operator-approved Meta template
+// whose HEADER is of DOCUMENT type carries the invitation PDF as
+// a header parameter, with BODY variables filling in recipient-
+// specific text. The shape below is what Meta/Taqnyat expects.
+
+test("buildRequestBody: template with headerDocument (id) emits header component", () => {
+  // Invitation-PDF happy path. `headerDocument.kind === 'id'`
+  // because the operator uploaded the PDF once and now sends it
+  // to N recipients — the /media upload is amortised.
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "moather2026_moather2026",
+    languageCode: "ar",
+    headerDocument: {
+      kind: "id",
+      mediaId: "wa_media_42",
+      filename: "invitation.pdf",
+    },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: {
+      components?: Array<Record<string, unknown>>;
+    };
+  };
+  assert.equal(out.template.components?.length, 1);
+  assert.deepEqual(out.template.components?.[0], {
+    type: "header",
+    parameters: [
+      {
+        type: "document",
+        document: {
+          id: "wa_media_42",
+          filename: "invitation.pdf",
+        },
+      },
+    ],
+  });
+});
+
+test("buildRequestBody: template with headerDocument (link) emits header component", () => {
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "moather2026_moather2026",
+    languageCode: "ar",
+    headerDocument: {
+      kind: "link",
+      link: "https://cdn.example.com/invites/eid-2026/abc.pdf",
+      filename: "eid-invitation.pdf",
+    },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: {
+      components?: Array<Record<string, unknown>>;
+    };
+  };
+  assert.deepEqual(out.template.components?.[0], {
+    type: "header",
+    parameters: [
+      {
+        type: "document",
+        document: {
+          link: "https://cdn.example.com/invites/eid-2026/abc.pdf",
+          filename: "eid-invitation.pdf",
+        },
+      },
+    ],
+  });
+});
+
+test("buildRequestBody: template with headerDocument + variables → header THEN body components (order matters)", () => {
+  // Meta's template renderer expects components in the order
+  // [HEADER, BODY, BUTTONS]. Sending BODY-before-HEADER is
+  // accepted by some BSP proxies but explicitly not guaranteed.
+  // This test pins the order so a refactor that flipped the
+  // array construction doesn't silently break prod renders.
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "moather2026_moather2026",
+    languageCode: "ar",
+    headerDocument: { kind: "id", mediaId: "m_1", filename: "x.pdf" },
+    variables: ["Ahmad", "Friday 8 PM"],
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: {
+      components?: Array<{ type: string }>;
+    };
+  };
+  assert.equal(out.template.components?.length, 2);
+  assert.equal(
+    out.template.components?.[0].type,
+    "header",
+    "HEADER must come first in the components array",
+  );
+  assert.equal(
+    out.template.components?.[1].type,
+    "body",
+    "BODY must come after HEADER",
+  );
+});
+
+test("buildRequestBody: template with headerDocument and NO variables omits the body component", () => {
+  // Header-only template: the approved template has a DOCUMENT
+  // header but no BODY variables (e.g. a fixed-text invitation
+  // footer). The components array must contain the header only;
+  // no empty body component.
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "doc_only",
+    languageCode: "ar",
+    headerDocument: { kind: "id", mediaId: "m_1" },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: {
+      components?: Array<{ type: string }>;
+    };
+  };
+  assert.equal(out.template.components?.length, 1);
+  assert.equal(out.template.components?.[0].type, "header");
+});
+
+test("buildRequestBody: template headerDocument parameter does NOT carry caption", () => {
+  // Meta rejects `caption` inside a header-component document
+  // parameter. The type itself prevents this at compile time
+  // (caption only exists on `WhatsAppDocumentMessage`, not on
+  // `WhatsAppDocumentRef`), but this test pins the runtime
+  // envelope so any future code that tried to shove caption in
+  // via `as any` still fails at the shape boundary.
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "moather2026_moather2026",
+    languageCode: "ar",
+    headerDocument: { kind: "id", mediaId: "m_1", filename: "x.pdf" },
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: {
+      components?: Array<{
+        parameters?: Array<{ document?: Record<string, unknown> }>;
+      }>;
+    };
+  };
+  const param = out.template.components?.[0].parameters?.[0];
+  assert.equal(param?.document?.caption, undefined);
+});
+
+test("buildRequestBody: template WITHOUT headerDocument or variables omits components entirely", () => {
+  // Regression pin: the P11 no-variables case must survive the
+  // P17-A refactor that rewrote `templateBody`. An empty
+  // components array behaves differently from `components` being
+  // absent in some Meta responses — we pick ABSENT to match the
+  // pre-P17 contract the test on line ~115 originally fixed.
+  const msg: WhatsAppTemplateMessage = {
+    kind: "template",
+    to: "966500000000",
+    templateName: "plain",
+    languageCode: "ar",
+  };
+  const out = buildRequestBody("966500000000", msg, undefined) as {
+    template: { components?: unknown };
+  };
+  assert.equal(
+    out.template.components,
+    undefined,
+    "no header and no variables → no components field at all",
   );
 });
 
@@ -385,7 +691,9 @@ test("WhatsAppMessage discriminates by `kind` at the type level", () => {
   // Type-level only: if the discriminant goes missing, this file
   // won't compile. The runtime assertions are trivial but the
   // file-level pin prevents a refactor from flattening the union
-  // into a single catch-all type.
+  // into a single catch-all type. P17-A added the `document` arm,
+  // so all three branches are narrowed here — a reviewer reading
+  // the switch can read the full set of message kinds at a glance.
   const text: WhatsAppTextMessage = { kind: "text", to: "x", text: "y" };
   const template: WhatsAppTemplateMessage = {
     kind: "template",
@@ -393,12 +701,21 @@ test("WhatsAppMessage discriminates by `kind` at the type level", () => {
     templateName: "t",
     languageCode: "ar",
   };
-  const all: WhatsAppMessage[] = [text, template];
+  const document: WhatsAppDocumentMessage = {
+    kind: "document",
+    to: "x",
+    document: { kind: "id", mediaId: "m" },
+  };
+  const all: WhatsAppMessage[] = [text, template, document];
   for (const m of all) {
-    if (m.kind === "text") assert.equal(typeof m.text, "string");
-    else {
+    if (m.kind === "text") {
+      assert.equal(typeof m.text, "string");
+    } else if (m.kind === "template") {
       assert.equal(typeof m.templateName, "string");
       assert.equal(typeof m.languageCode, "string");
+    } else {
+      // m.kind === "document"
+      assert.equal(typeof m.document, "object");
     }
   }
 });
