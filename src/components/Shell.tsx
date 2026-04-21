@@ -140,6 +140,11 @@ function buildAvatarItems({
     // surface itself role-gates individual tools (viewer can
     // list, editor can draft / send).
     { kind: "link", href: "/chat", label: locale === "ar" ? "المحادثة" : "Chat", icon: "message" },
+    // P16-E — the operator memory surface. Sits next to Chat
+    // because the two share a trust context (team-scoped,
+    // any-authenticated-user). Shows durable facts the assistant
+    // has been taught so the team can audit / curate them.
+    { kind: "link", href: "/memories", label: locale === "ar" ? "الذاكرة" : "Memories", icon: "list" },
     { kind: "divider" },
     { kind: "link", href: "/settings", label: locale === "ar" ? "الإعدادات" : "Settings", icon: "settings" },
     { kind: "link", href: "/account/password", label: locale === "ar" ? "تغيير كلمة المرور" : "Change password", icon: "settings" },

@@ -1,5 +1,9 @@
 import type { Memory as PrismaMemory } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import {
+  buildMemoriesWithProvenanceQuery,
+  buildMemoryDeleteWhere,
+} from "./admin-query";
 import { DEFAULT_MEMORY_POLICY, type MemoryPolicy } from "./policy";
 import { buildMemoryListQuery, type MemoryListOptions } from "./query";
 import {
@@ -118,4 +122,111 @@ export async function recallMemoriesForTeam(
     buildMemoryRecallQuery(teamId, opts),
   );
   return rankMemoriesForRecall(rows, { limit: opts.limit, policy: opts.policy });
+}
+
+// P16-E — operator UI read helper (multi-team list with
+// provenance relations).
+//
+// The chat-recall path (P16-C) deliberately returns a narrow
+// shape: body + kind + updatedAt + provenance pointer columns,
+// nothing else. That keeps its prompt-surface small. The
+// operator-UI read path has a different need: show WHO added this
+// memory and WHICH chat session it came from, so a human can
+// decide whether to keep or remove it. That requires joining on
+// `createdByUser` and `sourceSession`, which the P16-C builder
+// doesn't do.
+//
+// Shape choices:
+//   - Input is the caller's ALREADY-TENANT-RESOLVED teamIds (from
+//     `teamIdsForUser` for non-admins; from `listTeams` for
+//     admins). This keeps the tenant-scope decision at the auth
+//     layer — this helper doesn't know whether "all teams" is
+//     safe for a given caller. A caller passing an untrusted
+//     teamId list is the caller's bug.
+//   - Empty input short-circuits to `[]`. Cheap and avoids an
+//     `IN ()` query.
+//   - `createdByUser` / `sourceSession` are `select`-narrowed
+//     rather than full rows. We only need identifying fields for
+//     display; widening here would leak unused columns into the
+//     UI bundle.
+//   - Order is `updatedAt desc` — the most-recently-touched
+//     memories land at the top of the operator's view. The
+//     renderer can re-group by team client-side without losing
+//     this.
+//
+// Cap: caller's responsibility. In this first slice the caller
+// passes the policy list-limit per team implicitly by not asking
+// for more; if the UI ever grows paging we'll push the limit down
+// into this helper rather than growing a second knob.
+export type MemoryWithProvenance = PrismaMemory & {
+  createdByUser: {
+    id: string;
+    email: string;
+    fullName: string | null;
+  } | null;
+  sourceSession: {
+    id: string;
+    title: string | null;
+  } | null;
+};
+
+export async function listMemoriesForTeamsWithProvenance(
+  teamIds: readonly string[],
+): Promise<MemoryWithProvenance[]> {
+  // The pure builder owns empty / non-string / duplicate handling.
+  // A `null` return is the short-circuit signal — no round-trip.
+  const args = buildMemoriesWithProvenanceQuery(teamIds);
+  if (!args) return [];
+  const rows = (await prisma.memory.findMany(
+    args,
+  )) as MemoryWithProvenance[];
+  return rows;
+}
+
+// P16-E — operator UI delete.
+//
+// Tenant-scoped hard delete. Uses `deleteMany` (not `delete`) for
+// two reasons:
+//   1. Tenant gate: a caller that passes the wrong teamId (e.g.
+//      a user trying to delete a memory from a team they don't
+//      belong to) matches ZERO rows and the call returns
+//      `{ deleted: false }` — no 500, no leak of the row's
+//      existence. A `delete({ where: { id, teamId } })` would
+//      throw P2025 "record not found" which conflates "wrong
+//      team" with "genuinely missing" and is noisy to distinguish.
+//   2. Idempotence: a double-submit (e.g. user hits the button
+//      twice) gracefully reports `deleted: false` on the second
+//      click rather than throwing.
+//
+// Hard delete vs archive: this slice ships hard delete. The
+// schema has no `archivedAt` on Memory, and adding one now would
+// ripple into P16-C's recall filter + the existing builders and
+// their pins. If an archive-instead semantic is wanted, it
+// belongs in a follow-up slice that owns the migration + recall
+// filter update.
+//
+// Caller contract: MUST have resolved the teamId to one the
+// current user is authorised to touch BEFORE calling. The
+// `{ id, teamId }` pair is the tenant gate; this helper does not
+// call `getCurrentUser` or look up memberships. That keeps the
+// helper a pure DB edge and makes its unit test trivially
+// prisma-moqueable.
+export async function deleteMemoryForTeam(
+  id: string,
+  teamId: string,
+): Promise<{ deleted: boolean }> {
+  // The pure builder throws on missing id / teamId — we catch
+  // that into a `deleted: false` result so an upstream route
+  // passing bad form data returns a clean no-op rather than a
+  // 500. The builder's throw still pins the invariant at the
+  // shape layer (unit test covers both sides missing); this
+  // wrapper is where the graceful "bad click → no-op" UX lives.
+  let where: { id: string; teamId: string };
+  try {
+    where = buildMemoryDeleteWhere(id, teamId);
+  } catch {
+    return { deleted: false };
+  }
+  const res = await prisma.memory.deleteMany({ where });
+  return { deleted: res.count > 0 };
 }
