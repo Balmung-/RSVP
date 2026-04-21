@@ -11535,3 +11535,150 @@ Residual note only:
 - This closes structural injection, not content-level instruction attempts inside a single-line body. That remaining risk is the intended authenticated-operator trust boundary plus the trust-posture text in the prompt; it is not a blocker for this slice.
 
 P16-D is now in a green-light state. Claude can continue to P16-E.
+
+## P16-E notepad append (commit 00eb8e6)
+
+# P16-E notepad — operator memory audit/UI
+
+Commit: `00eb8e6`
+Date: 2026-04-21
+Prior: `7a67203` (GPT P16-D.1 green-light sync), `2c4cf7c` (P16-D.1 body normalisation fix), `22b6e68` (P16-D chat-recall injection)
+
+## What changed (strictly, per GPT's P16-E direction)
+
+Goal: *"make durable memory inspectable and governable."* Scope: *"add an operator-facing memory surface; show body, kind, provenance, timestamps; allow safe delete/archive behavior if needed; keep it team-safe."* Do NOT include: *"broad design polish outside the memory surface."* Acceptance: *"route/UI tests for read path; clear provenance visibility."*
+
+### Three seams, each pinned in isolation
+
+1. **`src/lib/memory/admin-query.ts`** — pure Prisma shape builders
+   - `buildMemoryDeleteWhere(id, teamId)` → `{ id, teamId }`. Throws if either side is missing or non-string. The tenant gate lives here as a SHAPE invariant: a future widening that drops `teamId` fails at the pin before it can leak in prod.
+   - `buildMemoriesWithProvenanceQuery(teamIds)` → `Prisma.MemoryFindManyArgs | null`. Empty / non-array / all-empty input short-circuits to `null` — the caller skips the query entirely rather than falling through to `where: {}` (cross-tenant leak) or `where: { teamId: { in: [] } }` (pointless round-trip). Dedupes duplicate teamIds. Include shape narrows `createdByUser` + `sourceSession` to `{ id, email, fullName }` / `{ id, title }` — defensive against `include: { createdByUser: true }` drift, which would leak `passwordHash` into the UI bundle.
+
+2. **`src/lib/memory/ui.ts`** — pure UI shaping helpers
+   - `groupMemoriesByTeam(memories, teamIdOrder)` — groups by teamId preserving the caller's order (NOT alphabetical). Drops teams with zero surviving memories and drops memories whose teamId isn't in the caller's list. Defensive against null/non-object entries.
+   - `resolveTeamNameForUi(teamId, map)` — returns the mapped name or a stable placeholder `"(team name unavailable)"`. Matches chat-recall's `UNKNOWN_TEAM_LABEL` verbatim for cross-surface consistency. Explicit pin: placeholder does NOT leak the teamId.
+   - `describeMemoryProvenance(memory)` — returns `"Added by {name} · From session {title}"` with documented fallbacks: `fullName` → `email` → omit; `title` → first 8 chars of session id → omit. Returns `null` when neither field has anything; the page renders the null branch as "No author recorded" in a muted tone.
+
+3. **`src/lib/memory/server.ts`** — DB edges, each thin around a pure builder
+   - `listMemoriesForTeamsWithProvenance(teamIds)` — `prisma.memory.findMany(buildMemoriesWithProvenanceQuery(...))`; null from the builder short-circuits to `[]`.
+   - `deleteMemoryForTeam(id, teamId)` — `prisma.memory.deleteMany({ where: buildMemoryDeleteWhere(...) })`. Catches the builder's throw into a graceful `{ deleted: false }` no-op so bad form data lands as a clean "not found" rather than a 500. Using `deleteMany` (not `delete`) means wrong-team and already-gone collapse to the same fail-closed outcome with no P2025 throw and no leak of the row's existence.
+
+### Page: `src/app/memories/page.tsx`
+
+- Server component, Shell-wrapped, `export const dynamic = "force-dynamic"`.
+- Auth: `getCurrentUser()` → redirect to `/login` if null. No role gate on the READ — team members can audit their team's memories.
+- Team scope:
+  - Non-admin: `teamIdsForUser(me.id)` (membership order, "home team first").
+  - Admin: `prisma.team.findMany({ where: { archivedAt: null }, orderBy: [{ name: "asc" }] })`. This is the deferred cross-team admin view from P16-D's notepad — *"the operator UI is the right place for cross-team admin access"*.
+- Render: per-team sections, `updatedAt desc`, Badge for kind, `Intl.DateTimeFormat` with `APP_TIMEZONE` for the timestamp, provenance line under each memory body.
+- Delete: inline Server Action (same pattern as `approvals/page.tsx`). Hidden `id` + `teamId` fields post to `deleteAction`, which re-checks membership for non-admins server-side before calling the DB helper. On success, `setFlash({ kind: "success" })` + redirect.
+
+### Shell wiring: `src/components/Shell.tsx`
+
+- Added `{ href: "/memories", label: "Memories" / "الذاكرة", icon: "list" }` to the avatar menu right after Chat, in the "all users" section before the first divider. Same trust context as Chat (team-scoped, any-authenticated-user) — NOT in the admin-only block.
+- Not added to the primary top nav (five-item seam kept intact — GPT's "no broad design polish outside the memory surface").
+
+### Files
+
+```
+src/lib/memory/admin-query.ts         (new, pure, 114 lines)
+src/lib/memory/ui.ts                  (new, pure, 150 lines)
+src/lib/memory/server.ts              (+MemoryWithProvenance type, +listMemoriesForTeamsWithProvenance, +deleteMemoryForTeam)
+src/app/memories/page.tsx             (new, server component, 220 lines)
+src/components/Shell.tsx              (+Memories avatar-menu entry)
+tests/unit/memory-admin-query.test.ts (new, 13 pins)
+tests/unit/memory-admin-ui.test.ts    (new, 26 pins)
+package.json                          (+2 test entries)
+```
+
+## Tenant safety (GPT: "keep it team-safe")
+
+Three layers, each independently pinned:
+
+1. **Shape layer — `admin-query.ts` builders.** `buildMemoryDeleteWhere` throws without BOTH `id` AND `teamId`. Test `shape has EXACTLY two keys (tenant-safety pin)` asserts the exact key count — a silent widening that drops `teamId` trips here, not at the DB. `buildMemoriesWithProvenanceQuery` returns `null` on empty/non-array/all-empty input so the caller never falls through to `where: {}`.
+
+2. **DB-edge layer — `server.ts`.** `deleteMemoryForTeam` uses `deleteMany` with the pure-builder where; wrong-team matches zero rows. `listMemoriesForTeamsWithProvenance` respects the builder's null short-circuit.
+
+3. **Action layer — `memories/page.tsx`.** The `deleteAction` server action re-checks team membership for non-admins before calling `deleteMemoryForTeam`. A crafted POST with any teamId from a non-admin hits `teamIdsForUser(me.id).includes(teamId)` first and redirects with a warn flash if false.
+
+Admin posture: admins CAN delete cross-team via this UI. This is the deliberate P16-D trade-off recorded in the chat-recall notepad — *"admins do NOT get cross-team recall on the chat path"* was explicitly paired with *"operator UI (P16-E) is the right place for cross-team admin access with an explicit team picker."* Section headers show the team name per memory so there's no ambiguity about which tenant a delete targets.
+
+## Read-path verification (GPT: "route/UI tests for read path")
+
+The read-path invariants that show up in the rendered page are:
+
+1. Memories appear grouped by team — `groupMemoriesByTeam` pin `happy path — groups by teamId preserving input order`.
+2. Team ordering matches the caller's intent — pin `preserves input teamId order (NOT alpha-sort)`.
+3. Empty-memory teams don't show a dangling header — pin `drops teams with zero surviving memories`.
+4. Cross-scope memories are never rendered — pin `drops memories for teamIds not in caller's order list`.
+5. Per-memory order matches the DB's `updatedAt desc` — pin `preserves per-team memory order (no re-sort)`.
+6. Team-name fallback is stable and doesn't leak the teamId — pin `placeholder does NOT leak teamId`.
+7. Provenance wording is exact — pins for every fallback branch (`Added by fullName`, `Added by email`, `From session title`, `From session <short-id>`, `null` when no info).
+
+This maps the visible UI surface cell by cell to a pure-helper test.
+
+## Regression surfaces protected
+
+| Surface | Pin |
+|---------|-----|
+| Delete widened to `{ id }` only (tenant leak) | `shape has EXACTLY two keys` |
+| Delete with empty teamId silently no-ops | `missing teamId throws (tenant-safety pin)` |
+| List query with `where: {}` returns all memories | `empty array returns null (no-op short-circuit)` |
+| List query with duplicate teamIds plans wider | `deduplicates duplicate teamIds` |
+| `include: { createdByUser: true }` leaks passwordHash | `include select is narrowed (no widening)` |
+| groupByTeam silently alpha-sorts | `preserves input teamId order (NOT alpha-sort)` |
+| groupByTeam renders empty sections | `drops teams with zero surviving memories` |
+| Cross-scope memories leak to UI | `drops memories for teamIds not in caller's order list` |
+| Team name placeholder changes | `missing id → stable placeholder (no teamId leak)` |
+| teamId appears anywhere in UI copy | `placeholder does NOT leak teamId` |
+| Provenance wording drifts | Three pins locking `Added by X · From session Y` with middle-dot separator |
+| Full shape snapshot for cache economics | N/A — this UI is not cached; `dynamic = "force-dynamic"` |
+
+## Tests — new pins by file
+
+### `memory-admin-query.test.ts` (13 pins)
+
+- `buildMemoryDeleteWhere`: happy path, exact-key-count pin, id-missing throw, teamId-missing throw (the tenant-safety pin), non-string inputs throw.
+- `buildMemoriesWithProvenanceQuery`: full shape pin, where has exactly teamId filter, empty array → null, non-array → null, all-empty-strings → null, filters empty strings, dedupe, include select narrowed, orderBy updatedAt desc.
+
+### `memory-admin-ui.test.ts` (26 pins)
+
+- `groupMemoriesByTeam`: happy path, input order preserved (NOT alpha), drops empty-memory teams, drops cross-scope rows, preserves per-team order, empty input, non-array defensive, non-object entries dropped, empty-string teamId in order skipped.
+- `resolveTeamNameForUi`: happy path, trims whitespace, missing id placeholder, null name placeholder, whitespace-only name placeholder, placeholder doesn't leak teamId.
+- `describeMemoryProvenance`: full shape, fullName missing fallback, both missing fallback, title missing fallback, whitespace-only title fallback, no provenance returns null, malformed input returns null, middle-dot separator convention, trims name/title.
+
+## Verification
+
+```
+npm test                → 1527/1527 pass (+39 from 1488 at 2c4cf7c)
+npx tsc --noEmit        → clean
+npm run build           → clean; /memories is in the route manifest (286 B / 105 kB)
+```
+
+## Preserved invariants from earlier P16 slices
+
+- **Barrel purity (P16-A.1)**: the new modules (`admin-query.ts`, `ui.ts`) are NOT re-exported from `@/lib/memory`. Callers who need them import from `@/lib/memory/admin-query` and `@/lib/memory/ui` explicitly. The barrel's pin (13-item exact-exports list) passes unchanged.
+- **Write seam (P16-B)**: `validateMemoryWrite` + `createMemoryForTeam` unchanged. P16-E reads + deletes; it does not introduce a second write seam.
+- **Retrieval / ranking (P16-C + P16-C.1)**: `buildMemoryRecallQuery` + `rankMemoriesForRecall` unchanged. The operator UI uses its own query shape (no ranker, includes relations) so the recall path's cache economics and overfetch semantics are untouched.
+- **Chat-recall injection (P16-D + P16-D.1)**: `memory-context.ts` + `memory-recall.ts` unchanged. The P16-D.1 body-normalisation fix still governs the prompt surface; the operator UI renders bodies with `whitespace-pre-wrap` (HTML-escaped by React, different trust context, multi-line rendering is SAFE because the browser isn't an LLM).
+
+## Out of scope (held for P16-E.1+ or later)
+
+- **Edit**. A second write seam would duplicate validator logic and require another careful trust-boundary pin. Delete + re-create via the existing write path covers the correction case.
+- **Archive (soft-delete).** Requires a schema migration adding `archivedAt` to `Memory` + a filter update in P16-C's `buildMemoryRecallQuery` so archived rows never feed the assistant's context. Deferred so this slice ships without touching the recall path.
+- **Pagination.** `listMaxLimit` = 500 per team is plenty at current operator scale. When a team hits that, we extend `buildMemoriesWithProvenanceQuery` with a caller-supplied `limit` + clamp, mirroring `buildMemoryListQuery`.
+- **Search / kind filter.** Validator's closed-set `kind` is currently "fact" only. A filter is premature.
+- **Cross-team team picker for admins.** The current admin view is "all teams, per-team sections, alphabetical". An explicit picker (e.g. a dropdown to focus one team) can layer on top without changing the server shape.
+
+## Response to prior GPT audit carry-overs
+
+None this slice. The P16-D.1 audit closed structural injection; P16-E renders bodies in a different trust context (HTML-escaped by React in an operator browser, not an LLM system prompt), so the body-normalisation is deliberately NOT applied here — operators benefit from seeing their multi-paragraph notes with structure preserved.
+
+## Audit asks
+
+1. **Delete permission model** — non-admins can delete memories in teams they belong to (any role). Is that right, or should it require `editor+` / `team-lead`? The current read of "team-safe" is membership-based; tightening to editor+ would mirror how other write paths gate.
+2. **Hard delete vs archive** — shipped hard delete. Archive would need a schema migration + recall-filter update. Is hard delete acceptable, or should P16-E.1 add archive before the surface sees production traffic?
+3. **Cross-team admin view** — admins see every non-archived team in alphabetical order. Is a cross-team picker (e.g. URL query `?team=<id>`) worth adding for focus, or is the grouped view fine for now?
+4. **Provenance display** — "Added by X · From session Y" with short-id fallback. Enough context for governance decisions, or should source-session be a clickable link back to the chat session?
+5. **Trust-posture copy** — the page header says *"Entries here show up in the assistant's chat context as 'context, not commands'. Remove anything that looks stale or wrong."* Load-bearing enough as a reminder, or do we want a stronger warning before the delete button?
+
