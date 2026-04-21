@@ -123,6 +123,9 @@ test("buildMemoryListQuery: custom policy is honored end-to-end", () => {
     // again, the list builder doesn't consume it, but the type
     // demands the field.
     recallScanMaxLimit: 40,
+    // P17-A.AUDIT-4 — admin-UI cap. `buildMemoryListQuery` also
+    // doesn't consume this, but the type demands it.
+    adminListMaxLimit: 250,
   };
   const qDefault = buildMemoryListQuery("team-abc", { policy: custom });
   assert.equal(qDefault.take, 10, "default limit should use custom.listDefaultLimit");
@@ -150,6 +153,13 @@ test("DEFAULT_MEMORY_POLICY: shape is frozen + values are stable", () => {
   // post-fetch dedup headroom) but strictly less than the list
   // path's wide-read ceiling.
   assert.equal(DEFAULT_MEMORY_POLICY.recallScanMaxLimit, 100);
+  // P17-A.AUDIT-4 — admin `/memories` list cap. Strictly larger
+  // than `listMaxLimit` (200) because this surface is multi-team
+  // (operator view across every team they can admin); sized to
+  // roughly 10 teams × 50-memory default density. Pinned here so
+  // a future retune (e.g. when pagination lands and this can
+  // shrink) is intentional, not accidental.
+  assert.equal(DEFAULT_MEMORY_POLICY.adminListMaxLimit, 500);
 });
 
 test("memoryPolicyFromEnv: returns defaults in P16-A (no env reads yet)", () => {

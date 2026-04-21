@@ -5,6 +5,7 @@ import {
   buildMemoriesWithProvenanceQuery,
   buildMemoryDeleteWhere,
 } from "../../src/lib/memory/admin-query";
+import { DEFAULT_MEMORY_POLICY } from "../../src/lib/memory/policy";
 
 // P16-E — pure query-shape builders for the operator memory UI.
 //
@@ -93,6 +94,7 @@ test("buildMemoriesWithProvenanceQuery: happy path returns full shape", () => {
   assert.ok(q, "expected query args, not null");
   assert.deepEqual(q.where, { teamId: { in: ["team-a", "team-b"] } });
   assert.deepEqual(q.orderBy, { updatedAt: "desc" });
+  assert.equal(q.take, DEFAULT_MEMORY_POLICY.adminListMaxLimit);
   assert.deepEqual(q.include, {
     createdByUser: {
       select: { id: true, email: true, fullName: true },
@@ -101,6 +103,22 @@ test("buildMemoriesWithProvenanceQuery: happy path returns full shape", () => {
       select: { id: true, title: true },
     },
   });
+});
+
+test("buildMemoriesWithProvenanceQuery: take is derived from DEFAULT_MEMORY_POLICY.adminListMaxLimit (no literal)", () => {
+  // P17-A.AUDIT-4 — the whole point of the cap is that the
+  // policy constant is the single source of truth. If a future
+  // edit hardcodes the cap to `500` the coupling breaks silently
+  // the first time the policy bumps. Reference through the
+  // policy explicitly here.
+  const q = buildMemoriesWithProvenanceQuery(["team-a"]);
+  assert.ok(q);
+  assert.equal(typeof q.take, "number");
+  assert.equal(q.take, DEFAULT_MEMORY_POLICY.adminListMaxLimit);
+  // And the cap is a positive integer. An off-by-one or a
+  // policy drift to zero would render the page blank while
+  // passing the "cap exists" smoke.
+  assert.ok(q.take! > 0, "cap must be positive");
 });
 
 test("buildMemoriesWithProvenanceQuery: where has EXACTLY teamId filter (tenant-pin)", () => {

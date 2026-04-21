@@ -207,6 +207,7 @@ test("gather: forwards opts.limitPerTeam and opts.policy to recallMemoriesForTea
     recallDefaultLimit: 5,
     recallMaxLimit: 10,
     recallScanMaxLimit: 20,
+    adminListMaxLimit: 250,
   };
   await gatherMemoriesForUserWith(
     { id: "user-1" },

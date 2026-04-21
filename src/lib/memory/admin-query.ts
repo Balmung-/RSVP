@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { DEFAULT_MEMORY_POLICY } from "./policy";
 
 // P16-E — pure query-shape builders for the operator memory UI.
 //
@@ -41,12 +42,21 @@ import type { Prisma } from "@prisma/client";
 //      memory in the office; the latter is a pointless round-trip).
 //
 // Non-invariants (deliberately NOT pinned here):
-//   - Per-team limits. The recall policy's `listMaxLimit` is 500
-//     and the DB indexes are tuned for the compound filter, so a
-//     multi-team `IN` query at typical operator scale stays
-//     well under any realistic budget. If pagination lands later,
-//     the caller-supplied limit goes into `MemoryListOptions`-style
-//     opts and gets clamped here.
+//   - Per-team limits / pagination. `buildMemoriesWithProvenanceQuery`
+//     takes no caller-supplied limit today; the overall result set
+//     is clamped to `DEFAULT_MEMORY_POLICY.adminListMaxLimit` (500)
+//     via the `take` field below. When pagination lands, the
+//     page-size argument goes into `MemoryListOptions`-style opts
+//     and gets clamped here against the same policy ceiling.
+//
+// P17-A.AUDIT-4 — cap added (Finding 4 of the 2026-04-21 deep
+// audit). Previously this builder returned `where + orderBy +
+// include` only; `listMemoriesForTeamsWithProvenance` forwarded
+// that straight to `prisma.memory.findMany`, which scanned every
+// memory row across every in-scope team into the RSC response.
+// At tenant scale (multiple teams × growing memory counts) that
+// is a self-DoS vector. The policy-driven `take` bounds the
+// worst case until pagination lands.
 
 // Pure delete-where builder. Throws on either side missing —
 // callers without both parts are a bug, not a valid request.
@@ -92,6 +102,12 @@ export function buildMemoriesWithProvenanceQuery(
   return {
     where: { teamId: { in: uniq } },
     orderBy: { updatedAt: "desc" },
+    // P17-A.AUDIT-4 — policy-driven cap. Sorting by updatedAt desc
+    // first means a truncated result still surfaces the most
+    // recently-touched memories, which is what an operator looking
+    // at the list most likely wants when scanning for what they
+    // just said or saved. Pagination lands in a later slice.
+    take: DEFAULT_MEMORY_POLICY.adminListMaxLimit,
     include: {
       createdByUser: {
         select: { id: true, email: true, fullName: true },

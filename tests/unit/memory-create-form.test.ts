@@ -240,6 +240,7 @@ test("parseCreateMemoryForm: custom policy override applies", () => {
     recallMaxLimit: 50,
     recallScanMaxLimit: 200,
     maxBodyLength: 10,
+    adminListMaxLimit: 500,
   };
   const r = parseCreateMemoryForm({
     rawTeamId: "team-a",

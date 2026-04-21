@@ -85,6 +85,25 @@ export type MemoryPolicy = {
   //   - it stays well below `listMaxLimit` so the "list is the
   //     wide read path" framing is preserved.
   recallScanMaxLimit: number;
+
+  // P17-A.AUDIT-4 — hard cap on the OPERATOR UI list (/memories).
+  // Distinct from `listMaxLimit` because the operator surface is
+  // multi-team, relation-included (createdByUser + sourceSession),
+  // and rendered server-side into HTML. Without this cap the page
+  // would issue an unbounded `findMany` that grows linearly with
+  // tenant size — a self-DoS once memory adoption scales.
+  //
+  // Sizing rationale at 500:
+  //   - `listDefaultLimit` is 50 per team; a 10-team tenant at
+  //     default density fits exactly (10 * 50).
+  //   - at the body cap (`maxBodyLength` = 1024), the worst-case
+  //     payload is ~500 KB text + relation rows; still well within
+  //     a single RSC response budget.
+  //   - larger tenants truncate to the 500 most-recently-updated;
+  //     a future paginator replaces this cap with per-page clamps,
+  //     but shipping with a cap first is strictly better than
+  //     shipping with "unbounded + TODO pagination".
+  adminListMaxLimit: number;
 };
 
 // Immutable defaults. Every future policy consumer that wants
@@ -98,6 +117,7 @@ export const DEFAULT_MEMORY_POLICY: MemoryPolicy = Object.freeze({
   recallDefaultLimit: 10,
   recallMaxLimit: 25,
   recallScanMaxLimit: 100,
+  adminListMaxLimit: 500,
 });
 
 // Scaffolded for future env-driven overrides. P16-A returns the
