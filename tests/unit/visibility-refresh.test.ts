@@ -2,8 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  LIVE_SNAPSHOT_POLL_MS,
   REFRESH_COOLDOWN_MS,
+  shouldRefreshOnPoll,
   shouldRefreshOnVisibility,
+  type PollRefreshInput,
   type VisibilityRefreshInput,
 } from "../../src/components/chat/visibilityRefresh";
 
@@ -31,6 +34,18 @@ function baseInput(
     lastRefreshMs: 0,
     refreshInFlight: false,
     nowMs: 10_000,
+    ...overrides,
+  };
+}
+
+function basePollInput(
+  overrides: Partial<PollRefreshInput> = {},
+): PollRefreshInput {
+  return {
+    visibilityState: "visible",
+    sessionId: "sess-1",
+    phase: "idle",
+    refreshInFlight: false,
     ...overrides,
   };
 }
@@ -262,4 +277,40 @@ test("shouldRefreshOnVisibility: first visible → true, second visible while in
     refreshInFlight: false,
   });
   assert.equal(shouldRefreshOnVisibility(thirdAttemptAfterSettle), false);
+});
+
+test("LIVE_SNAPSHOT_POLL_MS pinned at 10000ms", () => {
+  assert.equal(LIVE_SNAPSHOT_POLL_MS, 10_000);
+});
+
+test("shouldRefreshOnPoll: visible + session + idle + not in flight → true", () => {
+  assert.equal(shouldRefreshOnPoll(basePollInput()), true);
+});
+
+test("shouldRefreshOnPoll: hidden tab → false", () => {
+  assert.equal(
+    shouldRefreshOnPoll(basePollInput({ visibilityState: "hidden" })),
+    false,
+  );
+});
+
+test("shouldRefreshOnPoll: null session → false", () => {
+  assert.equal(
+    shouldRefreshOnPoll(basePollInput({ sessionId: null })),
+    false,
+  );
+});
+
+test("shouldRefreshOnPoll: streaming phase → false", () => {
+  assert.equal(
+    shouldRefreshOnPoll(basePollInput({ phase: "streaming" })),
+    false,
+  );
+});
+
+test("shouldRefreshOnPoll: in-flight fetch → false", () => {
+  assert.equal(
+    shouldRefreshOnPoll(basePollInput({ refreshInFlight: true })),
+    false,
+  );
 });

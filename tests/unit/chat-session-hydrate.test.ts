@@ -179,6 +179,7 @@ function makeDeps(overrides: {
 } = {}) {
   const findSessionCalls: Array<{ userId: string; sessionId: string }> = [];
   const findMessagesCalls: string[] = [];
+  const buildSummaryCalls: number[] = [];
   const { prismaLike } = makeStubPrisma(overrides.widgets ?? []);
 
   const user = overrides.user === undefined ? USER : overrides.user;
@@ -197,9 +198,13 @@ function makeDeps(overrides: {
       return messages;
     },
     prismaLike,
+    buildSummaryWidget: async () => {
+      buildSummaryCalls.push(1);
+      return null;
+    },
   };
 
-  return { deps, findSessionCalls, findMessagesCalls };
+  return { deps, findSessionCalls, findMessagesCalls, buildSummaryCalls };
 }
 
 function assertOk(r: HydrateResult): HydrateResultOk {
@@ -237,7 +242,7 @@ test("401 when no user session — no DB calls", async () => {
   // Unauthenticated probe must short-circuit before findSession or
   // findMessages — a leaky "does this session id exist?" probe would
   // let an attacker enumerate session ids across tenants.
-  const { deps, findSessionCalls, findMessagesCalls } = makeDeps({
+  const { deps, findSessionCalls, findMessagesCalls, buildSummaryCalls } = makeDeps({
     user: null,
   });
   const r = await hydrateSessionHandler("s-1", deps);
@@ -248,13 +253,14 @@ test("401 when no user session — no DB calls", async () => {
   assert.equal(r.body.error, "unauthorized");
   assert.equal(findSessionCalls.length, 0);
   assert.equal(findMessagesCalls.length, 0);
+  assert.equal(buildSummaryCalls.length, 0);
 });
 
 test("404 when session id is empty string — no DB calls", async () => {
   // Next routes with a dynamic `[id]` should never hand us an empty
   // string, but a hand-crafted request could still land here. Match
   // the not-found response for the ownership-probe defence.
-  const { deps, findSessionCalls, findMessagesCalls } = makeDeps();
+  const { deps, findSessionCalls, findMessagesCalls, buildSummaryCalls } = makeDeps();
   const r = await hydrateSessionHandler("", deps);
   assert.equal(r.kind, "error");
   if (r.kind !== "error") throw new Error("unreachable");
@@ -264,13 +270,14 @@ test("404 when session id is empty string — no DB calls", async () => {
   // touches the DB either.
   assert.equal(findSessionCalls.length, 0);
   assert.equal(findMessagesCalls.length, 0);
+  assert.equal(buildSummaryCalls.length, 0);
 });
 
 test("404 when findSession returns null — no transcript / widget read", async () => {
   // The ownership check collapses "doesn't exist", "archived", and
   // "belongs to another user" into one 404 so an attacker can't
   // probe ids. findMessages MUST NOT run after the 404.
-  const { deps, findSessionCalls, findMessagesCalls } = makeDeps({
+  const { deps, findSessionCalls, findMessagesCalls, buildSummaryCalls } = makeDeps({
     session: null,
   });
   const r = await hydrateSessionHandler("s-foreign", deps);
@@ -284,12 +291,13 @@ test("404 when findSession returns null — no transcript / widget read", async 
   assert.equal(findSessionCalls[0].sessionId, "s-foreign");
   // findMessages did NOT run — the ownership check gated it.
   assert.equal(findMessagesCalls.length, 0);
+  assert.equal(buildSummaryCalls.length, 0);
 });
 
 // ---- happy path: empty session ----
 
 test("200 for a fresh session returns empty turns and empty widgets", async () => {
-  const { deps } = makeDeps();
+  const { deps, buildSummaryCalls } = makeDeps();
   const r = await hydrateSessionHandler("s-1", deps);
   const ok = assertOk(r);
   assert.equal(ok.body.session.id, "s-1");
@@ -298,6 +306,7 @@ test("200 for a fresh session returns empty turns and empty widgets", async () =
   assert.deepEqual(ok.body.turns, []);
   assert.deepEqual(ok.body.widgets, []);
   assert.equal(ok.body.skipped, 0);
+  assert.equal(buildSummaryCalls.length, 1);
 });
 
 // ---- happy path: populated session ----
@@ -399,6 +408,57 @@ test("200 surfaces persisted widgets via listWidgets", async () => {
   assert.equal(ok.body.widgets[0].slot, "primary");
   assert.deepEqual(ok.body.widgets[0].props, { items: [] });
   assert.equal(ok.body.skipped, 0);
+});
+
+test("200 overlays a freshly built summary widget onto the hydrated widget list", async () => {
+  const staleSummary = widgetRow({
+    sessionId: "s-1",
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: JSON.stringify({
+      campaigns: { draft: 0, active: 0, closed: 0, archived: 0, total: 0 },
+      invitees: { total: 0 },
+      responses: { total: 0, attending: 0, declined: 0, recent_24h: 0 },
+      invitations: {
+        sent_24h: 0,
+        sent_email_24h: 0,
+        sent_sms_24h: 0,
+        sent_whatsapp_24h: 0,
+      },
+      generated_at: "2026-04-01T00:00:00.000Z",
+    }),
+  });
+  const { deps } = makeDeps({ widgets: [staleSummary] });
+  deps.buildSummaryWidget = async () => ({
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: {
+      campaigns: { draft: 1, active: 2, closed: 3, archived: 4, total: 10 },
+      invitees: { total: 20 },
+      responses: { total: 5, attending: 3, declined: 2, recent_24h: 1 },
+      invitations: {
+        sent_24h: 7,
+        sent_email_24h: 3,
+        sent_sms_24h: 2,
+        sent_whatsapp_24h: 2,
+      },
+      generated_at: "2026-04-19T10:00:00.000Z",
+    },
+    order: 0,
+    sourceMessageId: null,
+    createdAt: "2026-04-19T10:00:00.000Z",
+    updatedAt: "2026-04-19T10:00:00.000Z",
+  });
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.widgets.length, 1);
+  assert.equal(ok.body.widgets[0].widgetKey, "workspace.summary");
+  assert.equal(
+    (ok.body.widgets[0].props as { campaigns: { total: number } }).campaigns.total,
+    10,
+  );
 });
 
 test("200 counts drifted widget rows in `skipped`, drops them from `widgets`", async () => {

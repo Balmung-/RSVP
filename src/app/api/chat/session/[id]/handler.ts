@@ -78,6 +78,8 @@ export type HydrateDeps = {
   // rather than a second SELECT, so drift-skip and prop revalidation
   // stay in one place.
   prismaLike: PrismaLike;
+  // Optional read-only builder for server-owned snapshot widgets.
+  buildSummaryWidget?: () => Promise<Widget | null>;
 };
 
 export async function hydrateSessionHandler(
@@ -113,9 +115,10 @@ export async function hydrateSessionHandler(
   // Fetch the transcript rows and widgets in parallel. Both queries
   // are tenant-scoped by the prior ownership check so neither can
   // leak across users.
-  const [rawRows, widgetResult] = await Promise.all([
+  const [rawRows, widgetResult, summaryWidget] = await Promise.all([
     deps.findMessages(session.id),
     listWidgets({ prismaLike: deps.prismaLike }, session.id),
+    deps.buildSummaryWidget ? deps.buildSummaryWidget() : Promise.resolve(null),
   ]);
 
   // Trim to HYDRATION_ROW_CAP by keeping the MOST-RECENT rows. The
@@ -136,6 +139,10 @@ export async function hydrateSessionHandler(
   }));
 
   const turns = rebuildUiTurns(transcriptRows);
+  const widgets =
+    summaryWidget === null
+      ? widgetResult.widgets
+      : upsertSummaryWidget(widgetResult.widgets, summaryWidget);
 
   return {
     kind: "ok",
@@ -146,8 +153,19 @@ export async function hydrateSessionHandler(
         updatedAt: session.updatedAt.toISOString(),
       },
       turns,
-      widgets: widgetResult.widgets,
+      widgets,
       skipped: widgetResult.skipped,
     },
   };
+}
+
+function upsertSummaryWidget(
+  widgets: Widget[],
+  summary: Widget,
+): Widget[] {
+  const idx = widgets.findIndex((w) => w.widgetKey === summary.widgetKey);
+  if (idx === -1) return [summary, ...widgets];
+  const next = [...widgets];
+  next[idx] = summary;
+  return next;
 }

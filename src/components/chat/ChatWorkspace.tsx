@@ -5,7 +5,11 @@ import { ChatRail } from "./ChatRail";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
 import { SessionPicker } from "./SessionPicker";
 import { decideResumeAction } from "./resumeLast";
-import { shouldRefreshOnVisibility } from "./visibilityRefresh";
+import {
+  LIVE_SNAPSHOT_POLL_MS,
+  shouldRefreshOnPoll,
+  shouldRefreshOnVisibility,
+} from "./visibilityRefresh";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 import { appendConfirmedOutcome } from "./confirmedOutcome";
@@ -373,6 +377,28 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     };
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);
+  }, [refreshSnapshot]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const timer = window.setInterval(() => {
+      // Low-frequency live sync for the currently-visible session.
+      // This complements (not replaces) the visibilitychange refresh:
+      // if a delivery webhook lands while the operator keeps /chat
+      // focused, the next poll picks up the fresh snapshot without
+      // asking them to tab away or reload.
+      const eligible = shouldRefreshOnPoll({
+        visibilityState: document.visibilityState,
+        sessionId: sessionIdRef.current,
+        phase: phaseRef.current,
+        refreshInFlight: refreshInFlightRef.current,
+      });
+      if (!eligible) return;
+      const id = sessionIdRef.current;
+      if (!id) return;
+      void refreshSnapshot(id);
+    }, LIVE_SNAPSHOT_POLL_MS);
+    return () => window.clearInterval(timer);
   }, [refreshSnapshot]);
 
   // Chat-local live bridge for confirm/import POSTs. Those routes

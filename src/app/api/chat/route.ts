@@ -13,7 +13,10 @@ import { listTools, dispatch } from "@/lib/ai/tools";
 import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 import { validateDirective } from "@/lib/ai/directive-validate";
 import { createWorkspaceEmitter } from "@/lib/ai/widgets";
-import { tryRefreshSummaryForChatTool } from "@/lib/ai/workspace-summary";
+import {
+  tryRefreshSummaryForChatTool,
+  tryRefreshSummaryForSnapshot,
+} from "@/lib/ai/workspace-summary";
 import { gateRuntimeForChatRoute } from "./runtime-gate";
 import { handleToolSuccess } from "./handle-tool-success";
 import { deriveSessionTitle } from "@/lib/ai/session-title";
@@ -347,7 +350,25 @@ export async function POST(req: Request) {
           sessionId!,
           send,
         );
+        const snapshotSummary = await tryRefreshSummaryForSnapshot(
+          { prismaLike: prisma as never },
+          { campaignScope: ctx.campaignScope },
+        );
+        if (snapshotSummary.kind === "invalid") {
+          console.warn(
+            `[chat] workspace rollup produced invalid props; dropped`,
+            { sessionId },
+          );
+        } else if (snapshotSummary.kind === "error") {
+          console.warn(
+            `[chat] workspace rollup refresh failed`,
+            snapshotSummary.error,
+          );
+        }
         await workspace.snapshot();
+        if (snapshotSummary.kind === "produced") {
+          send("widget_upsert", snapshotSummary.widget);
+        }
 
         for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter += 1) {
           // One round-trip to the AI runtime. We stream the response

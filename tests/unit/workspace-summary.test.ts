@@ -12,6 +12,7 @@ import {
   refreshWorkspaceSummary,
   tryRefreshSummaryForChatTool,
   tryRefreshSummaryForConfirm,
+  tryRefreshSummaryForSnapshot,
   type WorkspaceSummaryPrismaLike,
 } from "../../src/lib/ai/workspace-summary";
 import { WORKSPACE_SUMMARY_WIDGET_KEY } from "../../src/lib/ai/widgetKeys";
@@ -872,6 +873,69 @@ test("tryRefreshSummaryForConfirm: returns { kind: 'invalid' } when upsertWidget
   );
   assert.equal(outcome.kind, "invalid");
   assert.equal(stub.state.rows.length, 0);
+});
+
+test("tryRefreshSummaryForSnapshot: always attempts refresh and produces widget on success", async () => {
+  const stub = makeRollupStub({
+    campaignCount: 6,
+    sent24h: 4,
+    sentEmail24h: 2,
+    sentSms24h: 1,
+    sentWhatsApp24h: 1,
+  });
+  const outcome = await tryRefreshSummaryForSnapshot(
+    { prismaLike: stub.prismaLike },
+    { campaignScope: {} },
+  );
+  assert.equal(outcome.kind, "produced");
+  if (outcome.kind === "produced") {
+    assert.equal(outcome.widget.widgetKey, WORKSPACE_SUMMARY_WIDGET_KEY);
+    assert.equal(outcome.widget.kind, "workspace_rollup");
+    assert.equal(outcome.widget.slot, "summary");
+  }
+  assert.equal(stub.state.rows.length, 0);
+  assert.ok(stub.state.calls.length > 0);
+});
+
+test("tryRefreshSummaryForSnapshot: returns { kind: 'invalid' } when the computed widget fails validation", async () => {
+  const stub = makeRollupStub();
+  const throwingPrismaLike: WorkspaceSummaryPrismaLike = {
+    ...stub.prismaLike,
+    invitation: {
+      ...stub.prismaLike.invitation,
+      async count() {
+        return Number.POSITIVE_INFINITY;
+      },
+    },
+  };
+  const outcome = await tryRefreshSummaryForSnapshot(
+    { prismaLike: throwingPrismaLike },
+    { campaignScope: {} },
+  );
+  assert.equal(outcome.kind, "invalid");
+  assert.equal(stub.state.rows.length, 0);
+});
+
+test("tryRefreshSummaryForSnapshot: captures thrown errors as { kind: 'error' } without rethrowing", async () => {
+  const boom = new Error("snapshot refresh failed");
+  const { prismaLike } = makeRollupStub();
+  const throwingPrismaLike: WorkspaceSummaryPrismaLike = {
+    ...prismaLike,
+    campaign: {
+      ...prismaLike.campaign,
+      async count() {
+        throw boom;
+      },
+    },
+  };
+  const outcome = await tryRefreshSummaryForSnapshot(
+    { prismaLike: throwingPrismaLike },
+    { campaignScope: {} },
+  );
+  assert.equal(outcome.kind, "error");
+  if (outcome.kind === "error") {
+    assert.equal(outcome.error, boom);
+  }
 });
 
 test("CHAT_TOOLS_REFRESHING_SUMMARY is the one-and-only gate list — drift catches here", () => {

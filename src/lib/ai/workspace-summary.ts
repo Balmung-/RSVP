@@ -5,6 +5,7 @@ import {
   type PrismaLike as WidgetsPrismaLike,
   type Widget,
 } from "./widgets";
+import { validateWidget } from "./widget-validate";
 
 // W7 — server-owned workspace rollup helper.
 //
@@ -406,6 +407,54 @@ export async function tryRefreshSummaryForConfirm(
     const rollup = await refreshWorkspaceSummary(deps, args);
     if (rollup === null) return { kind: "invalid" };
     return { kind: "produced", widget: rollup };
+  } catch (error) {
+    return { kind: "error", error };
+  }
+}
+
+// Called from snapshot-producing surfaces (`/api/chat` before the
+// opening `workspace_snapshot`, and GET `/api/chat/session/[id]`
+// before the hydrated widget list is returned). Unlike the chat-tool
+// and confirm helpers, this is intentionally READ-ONLY: it computes a
+// fresh summary widget payload for the response/stream without writing
+// back to ChatWidget on every poll or hydrate.
+export async function tryRefreshSummaryForSnapshot(
+  deps: { prismaLike: WorkspaceSummaryPrismaLike },
+  args: {
+    campaignScope: Prisma.CampaignWhereInput;
+    now?: Date;
+  },
+): Promise<SummaryRefreshOutcome> {
+  try {
+    const now = args.now ?? new Date();
+    const props = await computeWorkspaceRollup(
+      deps.prismaLike,
+      args.campaignScope,
+      now,
+    );
+    const validated = validateWidget({
+      widgetKey: WORKSPACE_SUMMARY_WIDGET_KEY,
+      kind: "workspace_rollup",
+      slot: "summary",
+      props,
+      order: 0,
+      sourceMessageId: null,
+    });
+    if (validated === null) return { kind: "invalid" };
+    const stamp = now.toISOString();
+    return {
+      kind: "produced",
+      widget: {
+        widgetKey: validated.widgetKey,
+        kind: validated.kind,
+        slot: validated.slot,
+        props: validated.props,
+        order: validated.order ?? 0,
+        sourceMessageId: validated.sourceMessageId ?? null,
+        createdAt: stamp,
+        updatedAt: stamp,
+      },
+    };
   } catch (error) {
     return { kind: "error", error };
   }

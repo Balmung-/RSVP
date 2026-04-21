@@ -76,6 +76,7 @@ export type VisibilityRefreshInput = {
 };
 
 export const REFRESH_COOLDOWN_MS = 2000;
+export const LIVE_SNAPSHOT_POLL_MS = 10000;
 
 export function shouldRefreshOnVisibility(
   input: VisibilityRefreshInput,
@@ -103,5 +104,22 @@ export function shouldRefreshOnVisibility(
   // focus event because of a prior clock hiccup.
   if (elapsed >= 0 && elapsed < REFRESH_COOLDOWN_MS) return false;
 
+  return true;
+}
+
+export type PollRefreshInput = {
+  visibilityState: string;
+  sessionId: string | null;
+  phase: Phase;
+  refreshInFlight: boolean;
+};
+
+export function shouldRefreshOnPoll(
+  input: PollRefreshInput,
+): boolean {
+  if (input.visibilityState !== "visible") return false;
+  if (!input.sessionId) return false;
+  if (input.phase !== "idle") return false;
+  if (input.refreshInFlight) return false;
   return true;
 }

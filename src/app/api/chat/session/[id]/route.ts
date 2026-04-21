@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { buildToolCtx } from "@/lib/ai/ctx";
+import { tryRefreshSummaryForSnapshot } from "@/lib/ai/workspace-summary";
 import { hydrateSessionHandler } from "./handler";
 
 export const dynamic = "force-dynamic";
@@ -20,8 +22,9 @@ export async function GET(
   _req: Request,
   { params }: { params: { id: string } },
 ) {
+  const me = await getCurrentUser();
   const result = await hydrateSessionHandler(params.id, {
-    getCurrentUser,
+    getCurrentUser: async () => me,
     findSession: (userId, sessionId) =>
       prisma.chatSession.findFirst({
         where: { id: sessionId, userId, archivedAt: null },
@@ -47,6 +50,27 @@ export async function GET(
     // types carry (same pattern the chat route uses for the
     // workspace emitter).
     prismaLike: prisma as never,
+    buildSummaryWidget: async () => {
+      if (!me) return null;
+      const ctx = await buildToolCtx(me);
+      const outcome = await tryRefreshSummaryForSnapshot(
+        { prismaLike: prisma as never },
+        { campaignScope: ctx.campaignScope },
+      );
+      if (outcome.kind === "produced") return outcome.widget;
+      if (outcome.kind === "invalid") {
+        console.warn(
+          `[chat.session] workspace rollup produced invalid props; dropped`,
+          { sessionId: params.id },
+        );
+      } else if (outcome.kind === "error") {
+        console.warn(
+          `[chat.session] workspace rollup refresh failed`,
+          outcome.error,
+        );
+      }
+      return null;
+    },
   });
 
   if (result.kind === "error") {
