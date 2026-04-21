@@ -10190,3 +10190,136 @@ The health probe confirms end-to-end: `/api/health` surfaces `ai.configured: tru
 - **Log visibility in standalone output.** `next build` with `output: "standalone"` emits `.next/standalone/server.js`, which is what a real Docker deploy runs. The standalone run in the fail-fast proof didn't emit our log to stdout (possibly .env.local not inherited in that boot, since we used `next start` for the actual proofs). Both `next start` proofs above did show the log. If stdout capture ever fails in a real deploy, the exit code alone is still enough signal — that's the load-bearing piece.
 
 Ready for audit.
+
+## Claude notepad - P16-A (`e6a90cd`)
+
+### Why this slice
+
+First move of the P16 tranche per GPT's direction at [Agent chat.md](Agent%20chat.md):
+
+> P16-A is schema + pure helpers only. No tools, no chat integration, no prompt injection, no UI, no observability mixed in. Lock provenance into the schema now: teamId + nullable sourceSessionId + sourceMessageId + createdByUserId.
+
+The goal is to lock down the **data contract** before anything else touches it. Future memory slices (write policy, retrieval/ranking, `/api/chat` recall injection, operator UI) all build on the Memory table's shape; doing the schema last would force every later slice to reshape rows. P16-A prevents that.
+
+### Regression surfaces protected
+
+1. **Tenant leakage.** Memory rows are per-team. The ONLY read seam (`buildMemoryListQuery`) filters by `teamId` and nothing else. Pinned by a test that asserts `Object.keys(where) === ["teamId"]` — a future accidental widening (e.g. adding `OR: [...]` to resolve a filter bug) trips this test before it ships.
+
+2. **Silent empty-where.** A future caller without a `teamId` would, in a naive implementation, produce `where: {}` → `findMany` returns every memory in every tenant. The builder throws loudly on missing teamId instead. Pinned both for `""` and `undefined`.
+
+3. **Unbounded list.** Prisma's `take: undefined` = "no limit". If a caller passes `limit: NaN` (bug), the clamp collapses it to 1 — not `undefined`. Pinned for NaN, 0, negatives, Infinity (→ max), huge numbers (→ max), fractions (→ floor), and defaults.
+
+4. **Provenance reshuffle later.** The three provenance pointers (`sourceSessionId`, `sourceMessageId`, `createdByUserId`) are all in the schema NOW, nullable, with SetNull FK semantics. Adding them later would be a migration on live rows; adding them now is a single additive migration with no data reshape.
+
+5. **Policy-object mutation.** `DEFAULT_MEMORY_POLICY` is `Object.freeze`'d. A future slice that shares the policy object across call sites can't accidentally mutate one caller's view of the defaults. Pinned by `assert.equal(Object.isFrozen(DEFAULT_MEMORY_POLICY), true)`.
+
+### Implementation
+
+**Schema ([prisma/schema.prisma](prisma/schema.prisma))**
+
+```prisma
+model Memory {
+  id              String       @id @default(cuid())
+  teamId          String
+  team            Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  kind            String       @default("fact")
+  body            String
+  sourceSessionId String?
+  sourceSession   ChatSession? @relation(fields: [sourceSessionId], references: [id], onDelete: SetNull)
+  sourceMessageId String?
+  sourceMessage   ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+  createdByUserId String?
+  createdByUser   User?        @relation("MemoryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  @@index([teamId, updatedAt])
+  @@index([teamId, kind])
+}
+```
+
+Design choices:
+
+- **`teamId` is `Cascade`.** A memory has no meaning outside its tenant; deleting a team wipes them.
+- **Provenance pointers are `SetNull`.** Matches `ChatWidget.sourceMessageId`: a deleted session/message/user shouldn't cascade through the knowledge base. The memory survives with a dangling back-pointer.
+- **`kind` is a string, not a Prisma enum.** Open-set expansion (future "preference", "entity", "reminder") is a validator change, not a migration. Same pattern as `ChatWidget.kind`.
+- **Named relation `"MemoryCreatedBy"` on User.** Prisma doesn't strictly require it today (only one pointer), but mirrors the `OAuthConnectedBy` pattern so a future second user-pointer on Memory (e.g. an `assignedToUserId`) can coexist without renaming the existing relation.
+- **Second index `(teamId, kind)`.** P16-C's retrieval slice will want to pull "all preferences for team X" without scanning all memories. Indexed now so the later slice isn't a migration.
+- **Back-relations everywhere.** Team, ChatSession, ChatMessage, User all got their Memory[] back-rel so `include: { memories: true }` works from any of them.
+
+**Policy ([src/lib/memory/policy.ts](src/lib/memory/policy.ts))**
+
+```ts
+export type MemoryPolicy = {
+  maxBodyLength: number;    // 1024 — P16-B's validator enforces
+  defaultKind: string;       // "fact" — P16-B's validator pins the set
+  listDefaultLimit: number;  // 50   — prompt-budget-friendly
+  listMaxLimit: number;      // 200  — DoS guard
+};
+
+export const DEFAULT_MEMORY_POLICY: MemoryPolicy = Object.freeze({ ... });
+
+export function memoryPolicyFromEnv(_env = process.env): MemoryPolicy {
+  return DEFAULT_MEMORY_POLICY;
+}
+```
+
+The `memoryPolicyFromEnv` signature takes an env map (not hard-coded `process.env`) so future tests can inject overrides without mutating the real environment. P16-A returns defaults verbatim; the scaffold is in place.
+
+**Query builder ([src/lib/memory/query.ts](src/lib/memory/query.ts))**
+
+```ts
+export function buildMemoryListQuery(
+  teamId: string,
+  opts: MemoryListOptions = {},
+): Prisma.MemoryFindManyArgs {
+  if (!teamId) throw new Error("buildMemoryListQuery: teamId is required");
+  const policy = opts.policy ?? DEFAULT_MEMORY_POLICY;
+  const take = clamp(opts.limit ?? policy.listDefaultLimit, 1, policy.listMaxLimit);
+  return { where: { teamId }, orderBy: { updatedAt: "desc" }, take };
+}
+```
+
+The clamp's semantics:
+- NaN → min (bug at call site; conservative)
+- -Infinity → min
+- Infinity → max ("unbounded" clamped to policy cap)
+- fractional → `Math.floor` (Prisma requires integer `take`)
+
+**Barrel ([src/lib/memory/index.ts](src/lib/memory/index.ts))**
+
+Public entry point for `@/lib/memory` imports. Re-exports the pure helpers + adds `listMemoriesForTeam(teamId, opts)` — a three-line wrapper over `prisma.memory.findMany(buildMemoryListQuery(...))`. Kept minimal so it can't silently diverge from the tested builder.
+
+### Test coverage breakdown (12 new pins in tests/unit/memory-helpers.test.ts)
+
+- `happy path — teamId filter + desc order + default limit`
+- `where clause has EXACTLY teamId (tenant-safety pin)` ← pins `Object.keys`
+- `missing teamId throws (no silent empty-where)` ← covers `""` and `undefined`
+- `caller-supplied limit is honored when within bounds`
+- `limit is clamped to policy.listMaxLimit (upper bound)`
+- `limit is clamped to 1 (lower bound)` ← covers 0 and negative
+- `NaN / Infinity collapse to min/max (not undefined)`
+- `fractional limits floor to integers (no Prisma TypeError)`
+- `custom policy is honored end-to-end`
+- `DEFAULT_MEMORY_POLICY: shape is frozen + values are stable`
+- `memoryPolicyFromEnv: returns defaults in P16-A (no env reads yet)`
+- `memoryPolicyFromEnv: default parameter is process.env (doesn't throw)`
+
+### Verification
+
+- `npm test`: **1382/1382** (+12 from P15-D.1's 1370)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+- `npx prisma generate`: clean — client regenerated, `prisma.memory.*` + `Prisma.MemoryFindManyArgs` typechecked by tsc above
+- `npx prisma format`: schema round-trips through format cleanly (column alignment normalized in Campaign; no structural change)
+
+### What this deliberately does NOT cover (scope-capped per GPT)
+
+- **No write seam / validator** — P16-B. The Memory table will not be written to by any code path in this slice. The `maxBodyLength` and `defaultKind` policy knobs exist so P16-B can consume them without a schema change.
+- **No retrieval/ranking** — P16-C. The `(teamId, kind)` index exists for P16-C's use; no ranking logic lives here.
+- **No `/api/chat` injection** — P16-D. The chat context builder is untouched.
+- **No operator UI** — P16-E. No route, no component, no form.
+- **No backfill of chat sessions into memories** — out of scope for the tranche entirely per GPT's guidance ("do not bundle observability work into this slice"; implied equivalent for migration).
+- **No env reads in policy** — deliberate scaffold. `memoryPolicyFromEnv` returns defaults verbatim; P16-B/C will add specific overrides.
+
+Ready for audit.
+
