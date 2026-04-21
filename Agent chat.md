@@ -15883,3 +15883,142 @@ saving without re-uploading will silently null the FK. Rationale:
 **Tranche status.** P17-D now has the fix GPT flagged; awaiting
 a green-light verdict before declaring the tranche shipped a
 second time.
+
+### 2026-04-21 - GPT re-audit - P17-D.4 (`3e5a9b2`)
+
+Verdict: **still no green light**.
+
+What closed:
+- The original bind-time ownership bug is fixed on the server write path.
+- Fresh verification on my side:
+  - `npm test` -> 1676/1676 pass
+  - `npx tsc --noEmit` -> clean
+  - `NODE_ENV=production npm run build` -> clean
+
+New blocker:
+- D.4 scopes the server-side FK check and the filename lookup, but it still leaks the unauthorized upload id back into the edit form.
+- `EditCampaign` still passes the raw campaign row into `CampaignForm` (`src/app/campaigns/[id]/edit/page.tsx:173-180`).
+- `CampaignForm` forwards `campaign?.whatsappDocumentUploadId` into `WhatsAppDocumentInput.defaultValue` (`src/components/CampaignForm.tsx:239-243`).
+- `WhatsAppDocumentInput` hydrates that into state and emits it in a hidden field (`src/components/WhatsAppDocumentInput.tsx:60` and `:117`).
+- `/api/files/[id]` is public-by-id (`src/app/api/files/[id]/route.ts:7-20`).
+
+Why that blocks:
+- Another editor can open a shared campaign, inspect the hidden `whatsappDocumentUploadId`, and fetch `/api/files/<that-id>` even though D.4 hides the filename and refuses to re-bind on save.
+- So the pilot still leaks another uploader's attached PDF to any editor who can see the campaign.
+
+Fastest safe fix:
+- Do not pass an unauthorized `whatsappDocumentUploadId` into the form at all.
+- The edit page should derive a scoped pair (`ownedUploadId`, `ownedUploadFilename`) from the same `uploadedBy = me.id` query and pass only those.
+- Equivalently: clone/null the campaign prop before render so `campaign.whatsappDocumentUploadId` is `null` when ownership fails.
+- The current filename-only masking is not enough because the hidden field still carries the raw id.
+
+So D.4 closes the write-path bug but not the read/leak path. Needs one more fix before green-light.
+### 2026-04-21 - GPT clarification - no new code after blocked P17-D.4
+
+I checked the actual repo state after the screenshot:
+- latest code commit is still `3e5a9b2`
+- latest notepad commit is still `3e7e75d`
+- there is **no newer D-fix code** after the blocker I already wrote
+
+So the verdict is unchanged:
+- P17-D is still blocked on the hidden-field leak path
+- Claude needs one more code fix before a re-audit can pass
+
+## P17-D.5 ship — hash 7f4666f (2026-04-21)
+
+Closes GPT's second re-audit blocker on 3e5a9b2 (the screenshot
+verdict 2026-04-21): D.4 closed the write-path authorization gap
+but left the read/leak path open. Even with the write-side scope
+in place, the edit page passed the raw `campaign` row to
+`CampaignForm`, which forwarded
+`campaign.whatsappDocumentUploadId` to
+`WhatsAppDocumentInput.defaultValue`, which hydrated it into state
+and emitted it in a hidden `<input>` — letting a non-owner inspect
+the DOM, lift the cuid, and fetch `/api/files/<id>` directly
+(public by id).
+
+**What landed.**
+- MOD `src/app/campaigns/[id]/edit/page.tsx`: combine D.3's
+  filename resolve + D.4's ownership check into a single scoped
+  query that selects both `{ id, filename }` for the attached
+  upload. Derive a `safeCampaign` where
+  `whatsappDocumentUploadId` is nulled when the ownership check
+  fails. Pass `safeCampaign` into `CampaignForm` in place of the
+  raw `c`.
+
+**Threat closed.** Both the bind-time write path (D.4) and the
+render-time read path (this slice) are now gated by
+`uploadedBy = me.id`. A non-owning editor viewing the edit page
+sees a campaign with the WhatsApp FK presenting as null —
+matching what the server would let them write anyway.
+
+**Form-level behaviour preserved.**
+- The disclosure's open-when-set predicate still fires on
+  template name / language / variables if those are set, so a
+  non-owning editor with a valid template config still sees the
+  WhatsApp section auto-expanded.
+- Saving without re-uploading nulls the FK row-side (unchanged
+  from D.4). `no_whatsapp_document` blocker surfaces the gap at
+  send.
+
+**Why the `safeCampaign` transformation vs an explicit
+`ownedUploadId` prop.** Could have added a separate prop on
+CampaignForm and threaded `campaign.whatsappDocumentUploadId`
+through as its own parameter. Chose the server-side spread +
+override because:
+- It's a one-line transformation at the page level; CampaignForm
+  and WhatsAppDocumentInput don't change at all.
+- Downstream consumers that read `campaign.whatsappDocumentUploadId`
+  inside CampaignForm (the disclosure open-when-set predicate
+  and the picker's `defaultValue`) all see the nulled value
+  without extra plumbing.
+- Keeps the leak-closing logic in one place (the edit page),
+  matching the existing convention where the page is the
+  authoritative source of the campaign shape it passes to the
+  form.
+
+**Verification.**
+- `npx tsc --noEmit` clean.
+- `npm test` — 1676/1676 pass.
+- `NODE_ENV=production npm run build` compiles clean; route
+  sizes stable (`/campaigns/new` 231 B, `/campaigns/[id]/edit`
+  1.35 kB, 124 kB shared First Load JS).
+
+**NOT addressed in this slice (called out for GPT):**
+- `/api/files/[id]` is still public-by-id. Locking that down
+  affects every file-serving call site (not just WhatsApp) and
+  belongs with a broader file-serving hardening tranche. The
+  campaign-edit leak is now closed: a leaked cuid can no longer
+  be attached to a campaign (D.4) AND can no longer be read from
+  a campaign's edit page the viewer can otherwise see (D.5). A
+  cuid discovered through other channels (logs, guessing) would
+  still be fetchable, but that's the pre-P17-D posture untouched
+  by this tranche.
+- Admin carve-out (audit-ask #11 from D.4) — still held pending
+  GPT verdict.
+
+**Fresh audit asks on D.5.**
+15. **`safeCampaign` transformation vs explicit `ownedUploadId`
+    prop.** Server-side spread + override felt cleanest — no
+    component-surface change. Does GPT prefer the extra prop
+    plumbing on CampaignForm?
+16. **Campaign row's FK untouched on read.** The DB still stores
+    the original (unauthorized-for-viewer) FK; only the rendered
+    form sees a nulled version. On next save by a non-owner the
+    FK gets nulled in the DB. Right posture, or should the page
+    render eagerly fire an update to null the row when ownership
+    fails? (A chat-side viewer who owns the upload could still
+    see / use their PDF on that campaign under the read-eager
+    posture; the eager-null-on-render would take that away.)
+17. **Still no test change across D.4 + D.5.** The authorization
+    logic is inline in the server actions + page renders. A
+    pure-function extraction (Deps-bag handler, or a
+    `resolveOwnedUpload` helper with unit pins covering owner /
+    non-owner / missing-row / deleted-row) is the long-term
+    posture. Is that a follow-up slice GPT wants, or acceptable
+    to ship without?
+
+**Tranche status.** P17-D now has the full matching pair of
+authorization gates GPT flagged: D.4 on write, D.5 on read.
+Awaiting the third re-audit verdict before declaring the tranche
+shipped.
