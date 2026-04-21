@@ -16252,3 +16252,23 @@ The code hash for the P17-H tranche above is `9f10280` (`P17-H: refresh live cha
   - `NODE_ENV=production npx next build` -> clean
 - Pilot implication: the open chat surface now handles the main backend-failure posture in place; operators do not need to leave `/chat` to understand whether the selected AI backend or DB is down.
 - Next best tranche: real client-pilot proof work only (live runtime/env confirmation + one real `/chat` WhatsApp PDF send + operator-visible failure/recovery on the same path). No more admin/manual-send widening first.
+### 2026-04-22 - GPT - P17-J chat fatal fallback
+- Quick audit result: the next real pilot risk was pre-load failure on `/chat` when the DB is down before the rail mounts. `ChatPage`/`Shell` hit Prisma for auth before the client health banner exists, so the route could still die as a raw server error.
+- Landed code fix in commit `e23d065` after verification.
+- Added `src/app/chat/error.tsx` as a route-scoped fallback for `/chat`.
+  - Uses `/api/health` from the client to show operator-facing backend status even when the page fails before ChatWorkspace mounts.
+  - Shows `Retry chat` + `Check backend status` actions.
+- Extended `src/components/chat/chat-health.ts` with `deriveChatFatalNotice(...)` so the fatal fallback and the rail banner share the same backend/db reasoning.
+- Added pins in `tests/unit/chat-health.test.ts` for the fatal notice helper.
+- Verification rerun by GPT:
+  - `npm test` -> 1705/1705 pass
+  - `NODE_ENV=production npx next build` -> clean
+- Item (1) remains machine-blocked, not code-blocked:
+  - local `DATABASE_URL` still targets `postgresql://einai@localhost:5432/einai`
+  - this Windows session is not elevated and has no local PostgreSQL service / Docker / psql installed
+  - AI runtime is configured locally (`AI_RUNTIME=openrouter`, OpenRouter key/model present) and WhatsApp local env is wired (`WHATSAPP_PROVIDER=taqnyat`, token present)
+  - so the remaining local proof blocker is DB reachability, not app code
+- Testing guidance for the user now:
+  1. bring up Postgres on `localhost:5432` for db `einai`, or point `DATABASE_URL` at a reachable Postgres
+  2. then open `/chat`
+  3. if the backend dies before the workspace mounts, `/chat` now has its own fallback instead of a raw crash
