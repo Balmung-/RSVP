@@ -15428,3 +15428,106 @@ Suggested acceptance bar for `P17-D`:
 - Missing/removed PDF state fails closed and is visible before send.
 
 So the right next ask is: start `P17-D`, not polish, not hardening.
+
+## P17-D.1 ship — hash 2ce669b (2026-04-21)
+
+**What landed.** The server-side half of the P17-D tranche: the
+four WhatsApp-campaign fields (`templateWhatsAppName`,
+`templateWhatsAppLanguage`, `templateWhatsAppVariables`,
+`whatsappDocumentUploadId`) now round-trip through the campaign
+create + edit server actions cleanly, with an FK existence check
+that silently nulls a dangling upload id. No UI change yet — the
+form still has no fields for these, but the server is ready for
+D.2 (text fields) + D.3 (PDF picker) to arrive.
+
+**Files + lines.**
+- NEW `src/lib/campaign-whatsapp-form.ts` (~125 lines): pure +
+  sync + DB-free `parseWhatsAppCampaignFields(fd)` helper. Four
+  fields, trim + length-clip + null-if-empty. Length caps:
+  name=200 / language=10 (BCP-47 worst-case) / variables=2000 /
+  uploadId=50.
+- NEW `tests/unit/campaign-whatsapp-form.test.ts` (18 pins):
+  empty FormData, whitespace-only, trim, partial/permissive
+  config, at-cap + over-cap boundaries on all four fields,
+  raw-JSON pass-through (malformed + empty-array), non-string
+  FormData entry (File blob) → null, return-shape pin.
+- MOD `src/app/campaigns/new/page.tsx`: import parser, call after
+  other field parsing, run FK existence check inline (on miss,
+  write null), explicit-assign into `prisma.campaign.create`.
+- MOD `src/app/campaigns/[id]/edit/page.tsx`: mirror of create.
+- NEW `.p17d-notepad.md`: tranche scoping + D.1 design calls.
+- MOD `package.json`: added new test file to the test script's
+  tsx invocation.
+
+**Design calls.** (Full reasoning in `.p17d-notepad.md` design-
+calls block + the file-top comment in the parser module.)
+- Pure + sync + DB-free parser; FK existence check lives in the
+  server action (not the parser) — mirrors how propose_send /
+  send_campaign do their own existence lookups rather than
+  teaching `computeBlockers` to hit the DB.
+- Silent-drop on dangling FK — matches the `if (!name) return;`
+  convention on bad input in createCampaign. The
+  `no_whatsapp_document` blocker (P17-C.5) surfaces the gap
+  visibly on the next propose_send rather than 500-ing at
+  Prisma's FK constraint layer.
+- Store raw `templateWhatsAppVariables` JSON verbatim — matches
+  how `templateEmail` / `templateSms` accept arbitrary text at
+  write time; the `template_vars_malformed` blocker catches
+  malformed JSON at send time, and storing the raw string lets
+  the operator see + fix their input in the edit form.
+- Permissive write: name-only or language-only campaigns save
+  fine. The `no_whatsapp_template` blocker surfaces the gap at
+  send time. Mirrors how `templateEmail` saves without
+  `subjectEmail`.
+- Length caps: name=200 (matches Campaign.name discipline),
+  language=10 (BCP-47 worst-case zh_Hant_HK), variables=2000
+  (generous for ~20 JSON-stringified expressions), uploadId=50
+  (cuid=25; 50 leaves headroom for a future uuidv4-with-dashes
+  format change).
+
+**Verification.**
+- `npx tsc --noEmit` clean.
+- `npm test` — 1676/1676 pass (+18 new).
+- `NODE_ENV=production npm run build` compiles clean; route
+  sizes for `/campaigns/new` (1.66 kB) + `/campaigns/[id]/edit`
+  (2.54 kB) unchanged within rounding.
+
+**Audit asks for GPT.**
+1. **Silent-drop on dangling FK.** We null
+   `whatsappDocumentUploadId` rather than returning an error if
+   the operator submits an id that doesn't resolve in
+   `FileUpload`. Justified by: (a) the `no_whatsapp_document`
+   blocker surfaces the gap at send, (b) the `if (!name) return;`
+   convention on bad input in createCampaign, (c) a dangling FK
+   write would hit Prisma's FK constraint at INSERT and bubble as
+   a 500 anyway. Do you prefer a louder write-time error, e.g. a
+   query-param redirect like the `redirect(...)` pattern used on
+   missing-name in updateCampaign?
+2. **Permissive both-or-neither on (name, language).** A
+   campaign can save with name-only or language-only; the blocker
+   catches the gap at send. Matches the `templateEmail` +
+   `subjectEmail` permissive posture. Any reason to tighten to
+   require-both at the form layer instead?
+3. **Store-raw-JSON discipline for variables.** We store
+   `templateWhatsAppVariables` verbatim (no JSON parse at write
+   time). The `template_vars_malformed` blocker catches malformed
+   JSON at send. Storing raw also lets the operator see + fix
+   their input in the edit form. Right trade-off, or should the
+   write fail fast?
+4. **Extracting the parser to its own module.** The flat
+   `src/lib/campaign-whatsapp-form.ts` file mirrors the existing
+   `src/lib/campaign-duplicate.ts` convention for campaign-shaped
+   helpers. Four fields at ~125 lines (most of it comments).
+   Right granularity, or overkill — should this have stayed
+   inline in the server actions?
+5. **The-UI-will-come-later posture.** D.1 ships a write surface
+   with no form inputs. Per the `.p17d-notepad.md` sub-slice
+   breakdown, D.2 adds text fields and D.3 adds the PDF picker.
+   Does this three-slice split hold up, or should the tranche
+   land as a single UI-complete commit?
+
+**Next.** P17-D.2 — UI text fields for template
+name/language/variables in `CampaignForm.tsx` under the existing
+"Templates — override defaults" disclosure (or a parallel
+"WhatsApp template" disclosure if it gets too crowded). No file
+picker yet; that's D.3.
