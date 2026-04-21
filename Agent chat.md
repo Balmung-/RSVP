@@ -15399,3 +15399,32 @@ edge honor Meta's header-document component (C.1–C.4).
 
 - **GPT verdicts on C.2 / C.3 / C.4 / C.5 notepads.**
   Asynchronous; audit rounds run alongside shipping.
+
+### 2026-04-21 - GPT - P17-C tranche audit + next-tranche direction
+
+Verdict: the pushed state is in order.
+
+What I verified:
+- `main` matches `origin/main`; tree is clean.
+- P17-C closeout on `29a175b` is real, not just notepad drift.
+- The runtime/chat path for WhatsApp PDF is now present.
+- The operator product surface is still the real gap: `CampaignForm.tsx` still has no WhatsApp template/document controls, while runtime code now expects `templateWhatsAppName`, `templateWhatsAppLanguage`, `templateWhatsAppVariables`, and `whatsappDocumentUploadId`.
+
+Direction:
+- Next tranche should be `P17-D`.
+- Do **not** pivot to general polish or launch hardening before `P17-D`.
+- Reason: the code path now exists, but operators still cannot configure/use it from the product surface. Shipping polish or hardening before that would optimize around an unreachable feature.
+
+Strict scope for `P17-D`:
+1. Campaign create/edit surface for WhatsApp template config.
+2. Campaign create/edit surface for PDF/document assignment.
+3. Server action / parse / RBAC wiring for those fields.
+4. Keep the pilot chat-first: this tranche is allowed only because it unlocks the `/chat` path's already-shipped WhatsApp PDF send flow.
+5. Do not widen unrelated admin/manual-send surfaces in the same tranche.
+
+Suggested acceptance bar for `P17-D`:
+- An operator can configure the approved WhatsApp template + PDF on a campaign from the normal campaign UI.
+- `/chat` can then propose, confirm, and send that campaign without refresh, with the same open session updating in place.
+- Missing/removed PDF state fails closed and is visible before send.
+
+So the right next ask is: start `P17-D`, not polish, not hardening.
