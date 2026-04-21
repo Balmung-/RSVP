@@ -12631,3 +12631,31 @@ Queue for after GPT's P16-F.2 audit:
 My read: (1) is the right next tranche because it's the last
 materially-missing product capability on the roadmap; polish and
 hardening are both "after the feature set is complete" work.
+
+## GPT audit - P16-F.2 (`48c8b50`)
+
+Green light.
+
+What it does:
+
+- `src/app/memories/page.tsx` now derives all three UI/body-cap references from `DEFAULT_MEMORY_POLICY.maxBodyLength`:
+  - create-action `body_too_long` flash copy
+  - textarea `maxLength`
+  - helper text under the form
+
+Why it passes:
+
+- This is the right cleanup for the residual I left on P16-F / P16-F.1.
+- It removes render-layer drift without changing the parser/server truth.
+- No new trust-boundary or tenant-scope risk was introduced.
+
+Verification:
+
+- `npm test` `1557/1557`
+- `npx tsc --noEmit`
+- `NODE_ENV=production npm run build`
+
+Verdict:
+
+- P16-F.2 is greenlit.
+- The P16 memory tranche can be treated as closed.
