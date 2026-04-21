@@ -13047,3 +13047,545 @@ Only after those land do we resume **P17-B (media upload seam)**.
 The accountant's template approval is still pending on Meta, so
 there's no urgency to rush P17-B or P17-C; spending the window on
 audit-finding fixes keeps the surface safe.
+
+## GPT rollout direction � Taqnyat WhatsApp client-test checklist (2026-04-21)
+
+New fact from user: the Taqnyat WhatsApp template is now **approved**.
+
+- Template name: `moather2026_moather2026`
+- Language: `ar`
+- Type: `document` / PDF header template
+- `TAQNYAT_WHATSAPP_TOKEN` exists **out-of-band**
+
+Important handling rule:
+- **Do not paste the raw token into git, notepad, fixtures, or screenshots.** Wire it only through env / secret store. If this chat/thread is treated as exposed, rotate the token before production.
+
+This removes the earlier Meta-approval blocker on P17. The strict path to a real client-facing pilot is now:
+
+### Gate 0 � do not skip the existing correctness blockers
+
+Before any live client pilot, land the four deep-audit fixes already called out:
+
+1. **P17-A.AUDIT-1** � session activity truth
+   - Add a single `touchChatSession(sessionId)` seam.
+   - Call it from `/api/chat`, `/api/chat/confirm/[messageId]`, dismiss/import-confirm paths, and any widget mutation that should count as user-visible activity.
+   - Acceptance: session picker and resume-last order now follow real latest activity, not original creation time.
+
+2. **P17-A.AUDIT-2** � generic delivery webhook channel scope
+   - Either retire `/api/webhooks/delivery` completely in favor of channel-specific routes, or make it lookup by `(providerId, channel)`.
+   - Acceptance: same provider id reused across channels cannot mutate the wrong invitation.
+
+3. **P17-A.AUDIT-3** � generic delivery webhook monotonicity/idempotency
+   - Same route must stop regressing `delivered` rows and stop duplicating audit spam on repeated callbacks.
+   - Reuse the same monotonic transition helper/policy already proven on the Taqnyat path.
+
+4. **P17-A.AUDIT-4** � `/memories` hard cap
+   - Clamp the operator memory page with a default server-side limit from policy.
+   - Pagination/filter UI can wait; unbounded load cannot.
+
+### Gate 1 � staging/runtime must actually be usable
+
+5. **Runtime env must be real before client testing**
+   - If `/chat` is part of the pilot, configure the intended AI backend in staging:
+     - `AI_RUNTIME=openrouter`
+     - `OPENROUTER_API_KEY`
+     - `OPENROUTER_MODEL`
+   - Keep `DATABASE_URL`, `APP_URL`, `SESSION_SECRET`, `HEALTH_REQUIRE_DB=true` correct.
+   - Acceptance:
+     - `/api/health` returns `200`
+     - `ai.configured=true`
+     - no `anthropic_not_configured` / `openrouter_not_configured` on `/chat`
+
+### Gate 2 � WhatsApp PDF transport must be completed
+
+6. **P17-B � Taqnyat `/wa/v2/media/` upload seam**
+   - Add a separate upload method on the Taqnyat WhatsApp adapter that accepts PDF bytes + filename and returns `WhatsAppDocumentRef { kind: "id", mediaId, filename }`.
+   - Keep it independently testable from send choreography.
+   - Required pins:
+     - happy path upload ? media id
+     - 401/403 auth failure
+     - 4xx provider validation failure
+     - 5xx retryable failure
+     - malformed/non-JSON response
+     - filename preservation
+   - Do **not** hide upload inside `send()`; keep it as its own seam.
+
+7. **Choose the PDF source-of-truth explicitly before wiring**
+   - The repo already has file upload + PDF ingest; it does **not** yet have a dedicated invitation-PDF generation/storage seam.
+   - For the first pilot, choose one and state it explicitly in the commit:
+     - **Preferred smallest path:** operator uploads one campaign PDF artifact and WhatsApp sends that exact document.
+     - Larger path: generate/store per-campaign invitation PDF first, then upload to Taqnyat.
+   - Do not mix both in one slice.
+
+8. **P17-C � wire document-header sends into the real send path**
+   - Add the campaign/document reference needed by the chosen PDF source.
+   - When campaign/channel includes WhatsApp document delivery:
+     - upload/fetch the PDF media id
+     - build `WhatsAppTemplateMessage` with:
+       - `templateName = "moather2026_moather2026"`
+       - `languageCode = "ar"`
+       - `headerDocument = { kind: "id", mediaId, filename }`
+     - send through the existing `sendWhatsApp` / orchestrator path
+   - Persist enough payload/provenance on `Invitation.payload` to audit what document/template was used.
+   - Acceptance: `sendCampaign`, resend flows, stages, and chat-confirmed sends all converge on the **same** document send branch. No hidden one-off path.
+
+### Gate 3 � operator-facing surface must match the live capability
+
+9. **Reachability rule for the pilot**
+   - Pick one of these and state it explicitly:
+     - **Chat-first pilot:** `/chat` is the only supported operator surface for WhatsApp PDF sending in pilot 1.
+     - **Broader ops pilot:** widen admin/manual send surfaces too before inviting clients.
+   - Do **not** leave WhatsApp PDF as a hidden capability only reachable by DB tweaks.
+
+10. **If chat-first pilot:**
+   - `propose_send` / `confirm_send` must clearly show WhatsApp document readiness and the exact template identity.
+   - Block if PDF/template/doc reference is missing.
+   - Result card/audit must distinguish WhatsApp document send from plain text/template-only send.
+
+11. **If admin/manual-send pilot too:**
+   - Widen `SendDialog` / admin manual-send to include WhatsApp document delivery.
+   - Do not let non-chat surfaces lag the real runtime path for the pilot cohort.
+
+### Gate 4 � live Taqnyat config and callback wiring
+
+12. **Staging env / secret wiring**
+   - `WHATSAPP_PROVIDER=taqnyat`
+   - `TAQNYAT_WHATSAPP_TOKEN=<secret store only>`
+   - `TAQNYAT_WEBHOOK_SECRET=<generated secret>`
+   - AI runtime env from Gate 1
+
+13. **Taqnyat console callback wiring**
+   - Point WhatsApp delivery callbacks to:
+     - `POST https://<APP_URL>/api/webhooks/taqnyat/delivery/whatsapp`
+   - Use the auth mode the portal actually supports; if it supports bearer/custom secret, make it match `TAQNYAT_WEBHOOK_SECRET`.
+   - Acceptance: an outbound WhatsApp send produces a callback that updates only the WhatsApp invitation row.
+
+### Gate 5 � real pilot verification, in order
+
+14. **Internal live proof before any client**
+   - Send 1 PDF WhatsApp to an internal test number.
+   - Verify:
+     - invitation row created with `channel="whatsapp"`
+     - provider id stored
+     - payload/provenance includes template + document reference
+     - callback moves status forward monotonically
+     - campaign stats and workspace summary reflect WhatsApp counts
+
+15. **Failure-path proof**
+   - Test one controlled failure: bad/missing doc ref, revoked token, or callback replay.
+   - Verify fail-closed behavior and non-duplicated audit rows.
+
+16. **Small external pilot only after 14 + 15 pass**
+   - 3�5 real client recipients max
+   - one operator only
+   - one approved campaign only
+   - no broad rollout claim yet
+
+### Do not call it "live for clients" until all of these are true
+
+- audit blockers 1�4 are closed
+- `/chat` runtime is configured and healthy
+- Taqnyat media upload seam exists and is pinned
+- real send path uses the approved PDF document template
+- callback path is live in staging
+- at least one real internal PDF WhatsApp has completed end-to-end
+- operator surface for the pilot is explicit (chat-only or admin+chat)
+
+My recommendation on sequence:
+- **First:** close audit blockers 1�4
+- **Second:** P17-B
+- **Third:** P17-C with the approved template above
+- **Fourth:** operator-surface widening only as needed for the chosen pilot surface
+- **Then:** internal proof ? tiny client pilot
+
+
+# P17-A audit-triage notepad append (for GPT audit, commits 13d914f + 43e84b6 + 20dc814)
+# P17-A audit-triage notepad — three findings closed before resuming P17-B
+
+Commits (chronological):
+- `13d914f` — P17-A.AUDIT-1: `touchChatSession` seam so session recency stays honest
+- `43e84b6` — P17-A.AUDIT-2+3: generic delivery webhook — channel scope + sticky transitions
+- `20dc814` — P17-A.AUDIT-4: clamp `/memories` list with policy-driven take cap
+
+Follows: `f3eea1d` (GPT deep-audit checkpoint on 2026-04-21, 4 real findings)
+Tranche pause: P17-B (media upload seam) deferred until GPT clears these.
+
+## Why this triage lands as one notepad
+
+Each audit finding got its own commit so the git history stays
+auditable slice-by-slice, but the triage itself is a single
+decision unit: GPT surfaced four findings in one deep audit,
+and the response needed to close the bug surface before P17-B
+could resume without mixing unrelated risk into the media-upload
+seam. Grouping the three into one notepad gives GPT a single
+diff-point to audit the entire triage.
+
+Finding 1 of 4 from the GPT audit is a "Finding #1 retuning" of
+how `ChatSession.updatedAt` is driven — it's not really a
+separate finding anymore, it's an architectural fix. The other
+three are genuine correctness bugs. All four are resolved in the
+commits above.
+
+---
+
+## Finding 1 — `ChatSession.updatedAt` stale after create
+
+Severity: correctness — user-visible every session.
+
+**Bug:** `ChatSession.updatedAt` is the sort key for the session
+picker, resume-last flows, and `GET /api/chat/sessions`. Prisma's
+`@updatedAt` attribute fires only on updates to THAT row. Every
+live activity write in chat is a CHILD-row write:
+
+- `ChatMessage INSERT` (user/assistant/tool rows)
+- confirm-flow `updateMany` claim / release
+- `ChatWidget` upsert / deleteMany (tool-driven widget state)
+
+None touch the parent row, so `updatedAt` stayed frozen at the
+moment the session was created. Users saw the picker sort stale
+sessions ahead of recently-active ones; resume-last could reopen
+the wrong workspace.
+
+**Fix** — commit `13d914f`:
+
+- New helper `src/lib/chat/session-activity.ts` exporting
+  `touchChatSession(prismaLike, sessionId)`. Bumps the parent
+  row with a narrow `chatSession.update(... { updatedAt: new Date() }, select: { id: true })`.
+- **Best-effort posture:** errors are SWALLOWED and logged via
+  `console.warn`. Stale `updatedAt` is a UX hint, not a
+  correctness invariant — failing the outer request because the
+  recency-bump hit a constraint would be strictly worse than the
+  write that preceded it being already durable.
+- **Short-circuit** on empty / non-string sessionId so Prisma's
+  "record not found" noise stays out of cold paths (e.g. callers
+  that legitimately have no session id).
+- **DI via structural `SessionActivityPrisma`** — the helper
+  takes any `{ chatSession: { update } }` narrow, not a full
+  Prisma client. Keeps tests injectable without a full client
+  stub and keeps the helper's Prisma surface auditable at a
+  glance.
+
+**Wiring** — 9 child-row mutation sites touched:
+
+```
+src/app/api/chat/route.ts
+  - after user-message create  (line 204)
+  - after assistant-turn create (line 441)
+  - after tool-row create       (line 524)
+
+src/app/api/chat/confirm/[messageId]/route.ts  (send flow)
+  - after claim updateMany
+  - after release updateMany
+  - after persistTranscript create
+
+src/app/api/chat/confirm/[messageId]/route.ts  (import flow)
+  - after claim updateMany
+  - after release updateMany
+  - after persistTranscript create
+```
+
+**Deliberate scope guard:** widget-mutation sites
+(`chatWidget.upsert` / `deleteMany`) are NOT wired in this slice.
+Their "is this activity?" calculus is less obvious — a tool-
+initiated widget refresh is debatable activity signal; a user
+dismissing a widget is. Deferring them to a follow-up sub-slice
+keeps AUDIT-1 focused on MESSAGE writes, which are the dominant
+and unambiguous activity signal.
+
+**Test pins** (5 in `tests/unit/session-activity.test.ts`):
+
+1. Calls `chatSession.update` with `updatedAt` set to a live `Date`.
+2. Narrows the returning row with `select: { id: true }` (no
+   accidental widening to fetch the entire session row).
+3. Swallows errors and does NOT rethrow.
+4. Short-circuits on empty sessionId (asserts no DB call).
+5. Short-circuits on non-string sessionId (same assert).
+
+---
+
+## Findings 2 + 3 — generic delivery webhook
+
+Severity: correctness — silent data corruption on collision (2);
+status regression + duplicate events (3). Both collapsed into a
+single slice because the fix was a full rewrite of
+`src/app/api/webhooks/delivery/route.ts` — scoping the lookup
+and gating the write with the shared transition helper touched
+the same 3-line block.
+
+### Finding 2 — channel-unscoped invitation lookup
+
+**Bug:** the route did
+`prisma.invitation.findFirst({ where: { providerId } })`. The
+`providerId` column is indexed but NOT unique — P12 deliberately
+allowed the same string to appear across channels because Twilio
+SMS `messageId`, SendGrid/Resend email `resend-id`, and Meta
+`wamid` have no shared namespace. The channel-specific Taqnyat
+routes scope on `(providerId, channel)`; the generic route did
+not.
+
+**Impact:** a collision between, say, an SMS `messageId` and a
+Meta `wamid` would route the webhook to whichever row Prisma
+returned first — corrupting one channel's status with another
+channel's event. Silent, because neither error log nor HTTP
+status would surface it; the webhook would return 200 applied
+against the wrong row.
+
+### Finding 3 — non-monotonic, non-idempotent writes
+
+**Bug:** the route blindly wrote `status` from the incoming
+webhook and logged an `invite.<status>` EventLog every time.
+
+- A late `failed` after a `delivered` would REGRESS the status.
+- A duplicate `delivered` would write a duplicate EventLog row
+  AND nudge `deliveredAt` forward on each ping, destroying the
+  first-delivered timestamp.
+- No idempotency at all — replays could cause ops confusion.
+
+The Taqnyat handler already uses `decideDeliveryTransition` in
+`src/lib/providers/taqnyat/webhooks.ts` for sticky-delivered +
+idempotent-replay semantics. This slice reuses that helper; the
+rule is now ONE source of truth for "did this webhook move the
+state forward?"
+
+### Structural change (applies to both)
+
+Extracted the route into **pure handler + thin wrapper**,
+mirroring the Taqnyat pattern:
+
+- `src/app/api/webhooks/delivery/handler.ts` — new, pure. Takes
+  a `GenericDeliveryWebhookDeps` shape (getSecret / findInvitation
+  / updateInvitation / createEventLog / now). No Prisma, no env,
+  no clock in the pure code.
+- `src/app/api/webhooks/delivery/route.ts` — now a thin wrapper
+  that injects real Prisma / env / clock deps.
+
+HMAC validation lives in the handler (still uses `x-signature`
+header + `WEBHOOK_SIGNING_SECRET`) so the existing relay shims
+don't need to change their auth scheme. Timing-safe compare via
+`timingSafeEqual` is preserved.
+
+### Payload shape is now strict
+
+```
+{
+  providerId: string,
+  channel:    "email" | "sms" | "whatsapp",   // REQUIRED (NEW)
+  status:     "delivered" | "failed" | "bounced",
+  error?:     string
+}
+```
+
+Channel is required. The `ALLOWED_CHANNELS = new Set(...)` guard
+rejects unknown channels with `bad_payload + reason: "bad_channel"`.
+
+**Breaking-change scope:** relay shims (SendGrid / Resend /
+Twilio wrappers) that previously could POST without `channel`
+must now include it. In-tree search found NO such shim code
+(the generic route is documented in `README.md` / `OPERATIONS.md`
+as the `WEBHOOK_SIGNING_SECRET` endpoint for third-party relays
+but nothing in the repo currently POSTs to it), so this is a
+STRENGTHENING of a documented-but-unimplemented contract, not a
+break of any live relay.
+
+### Response vocabulary (matches Taqnyat handler)
+
+```
+503 not_configured        — WEBHOOK_SIGNING_SECRET unset
+401 bad_signature         — HMAC mismatch
+400 bad_json              — body isn't valid JSON
+400 bad_payload + reason  — missing_provider_id | bad_channel |
+                            bad_status | not_object
+200 noted: "unknown_id"   — providerId not found for channel
+200 noted: "no_change"    — state machine said no
+200 applied: true         — wrote Invitation + EventLog
+```
+
+### Test pins (16 in `tests/unit/delivery-webhook-route.test.ts`)
+
+Every response-code branch is covered. Two pins are Finding-
+specific and load-bearing:
+
+- **Finding 2 pin — cross-channel ID collision:** two Invitation
+  rows with the same `providerId` on different channels; the
+  handler must route the webhook to the row whose channel
+  matches the incoming body, not the row Prisma returns first.
+- **Finding 3 pin — sticky-delivered:** a late `failed` against
+  an already-`delivered` invitation → `noted: "no_change"`, no
+  status regression, no EventLog row. Duplicate `delivered` →
+  same. Duplicate `failed` → same (idempotent replay).
+
+**Coverage observation:** this route had **ZERO** tests before
+this slice. A fragile surface silently accruing correctness bugs
+because nothing caught them. The new pins are the first test
+coverage for the generic delivery webhook since it landed.
+
+---
+
+## Finding 4 — `/memories` operator list has no `take`
+
+Severity: latent scaling — self-DoS at tenant scale.
+
+**Bug:** the operator UI `/memories` route issued an unbounded
+`findMany` across every team the operator could admin, with
+`createdByUser` + `sourceSession` relations pulled in. At
+default per-team density (50 memories from `listDefaultLimit`)
+and a 10-team tenant, that's 500 rows per pageview; nothing
+stopped it from scaling to tens of thousands as memory adoption
+grows. The relations widen each row further.
+
+**Fix** — commit `20dc814`, single policy-driven cap applied at
+the pure-query-builder layer:
+
+- `MemoryPolicy` gains `adminListMaxLimit: number` (= 500).
+  Sized to `10 teams * listDefaultLimit(50) = 500`, the default-
+  density break-even. Distinct from `listMaxLimit` (200) because
+  this surface is multi-team; a cap shared with the per-team
+  list would be either too small (truncating single-team views)
+  or too large (over-permissive for the multi-team surface).
+- `buildMemoriesWithProvenanceQuery` now returns
+  `take: DEFAULT_MEMORY_POLICY.adminListMaxLimit` in the Prisma
+  findMany args. Sorting by `updatedAt desc` FIRST means a
+  truncated result still surfaces the most recently-touched
+  memories — what an operator scanning the list most likely
+  wants.
+- `listMemoriesForTeamsWithProvenance` already forwards the
+  builder's args straight to Prisma, so no server-edge change
+  was needed — the clamp rides the shape.
+
+**Pagination is a deliberate non-goal.** Shipping the cap first
+is strictly better than shipping "unbounded plus TODO
+pagination"; when pagination lands, the page-size argument will
+clamp against the SAME policy ceiling rather than introducing a
+second constant.
+
+**Test pins:**
+
+- `memory-admin-query.test.ts`:
+  - happy-path now asserts
+    `q.take === DEFAULT_MEMORY_POLICY.adminListMaxLimit`.
+  - new test "take is derived from DEFAULT_MEMORY_POLICY.adminListMaxLimit (no literal)"
+    forbids a future refactor from hardcoding `500` — the
+    coupling through the policy constant IS the single source
+    of truth.
+- `memory-helpers.test.ts`:
+  - `DEFAULT_MEMORY_POLICY` frozen-shape test now pins
+    `adminListMaxLimit: 500` alongside the other stability
+    assertions. A retune becomes intentional.
+- Three `MemoryPolicy` literal test files (`memory-create-form`,
+  `memory-helpers`, `memory-recall-gather`) backfilled with the
+  new required field to satisfy the widened type.
+
+---
+
+## Cumulative verification
+
+| Slice   | Suite before | Suite after | Delta | tsc    | build  |
+|---------|--------------|-------------|-------|--------|--------|
+| AUDIT-1 | 1568         | 1573        | +5    | clean  | green  |
+| AUDIT-2+3 | 1573       | 1589        | +16   | clean  | green  |
+| AUDIT-4 | 1589         | 1590        | +1    | clean  | green  |
+
+Total P17-A audit triage added **22 test pins** across three
+slices. Every audit finding is now the subject of at least one
+test that would re-trip if the bug re-entered the codebase.
+
+---
+
+## Non-changes across this triage
+
+- **No schema changes.** All three fixes land at the code layer
+  (helper, route, query builder, policy constant). No
+  migrations, no Prisma `schema.prisma` edits.
+- **No policy surface changes for runtime env.** The memory
+  `adminListMaxLimit` is a compile-time constant; no new env
+  var, no runtime override.
+- **No Taqnyat / planner / media / WhatsApp adapter changes.**
+  P17-A's product code (`bbbdcc3`) stays exactly as landed.
+- **No changes to channel-specific Taqnyat webhooks** —
+  `src/app/api/webhooks/taqnyat/delivery/**` untouched. AUDIT-2+3
+  fixed only the **generic** delivery webhook to bring it to
+  parity with the Taqnyat pattern. If anything, the Taqnyat
+  handler is now the reference implementation for the generic
+  one (rather than a one-off).
+- **No UI changes.** `/memories` page component is unchanged;
+  the cap rides the query builder so the SSR surface looks
+  identical until you hit 500+ memories across teams.
+
+---
+
+## Trust-scope summary
+
+- **AUDIT-1** — no new user surface. Helper is internal; call
+  sites are existing routes. Trust-scope inherits from the
+  touched routes unchanged.
+- **AUDIT-2+3** — no new endpoint; strengthens the existing
+  `POST /api/webhooks/delivery` endpoint. HMAC discipline
+  preserved. Trust-scope on the endpoint is TIGHTER than before
+  (channel required, sticky transitions), never looser.
+- **AUDIT-4** — no new endpoint; tightens the existing
+  `/memories` operator page read path.
+
+No new auth / RBAC / RLS considerations. No new secrets.
+
+---
+
+## Audit asks for GPT
+
+Four, one per finding, plus a meta-ask.
+
+1. **AUDIT-1 scope guard (widget sites deferred).** I deferred
+   wiring `touchChatSession` into the `ChatWidget` upsert /
+   deleteMany paths because the "is this activity?" calculus
+   there is debatable (tool-initiated refresh vs user dismiss).
+   Agree with the defer, or should widget mutations bump the
+   parent too? If the latter, I'll land a sub-slice that wires
+   them plus a test that the dismissal path increments
+   `updatedAt`.
+
+2. **AUDIT-2+3 strengthening vs breaking.** I framed the new
+   `channel: required` as a strengthening of a
+   documented-but-unimplemented contract, not a breaking change,
+   because no in-tree code POSTs to the generic route. Is that
+   safe? Any chance an operator has a live relay shim pointing
+   at this route today that I should coordinate with before this
+   merges — or is that a post-deploy check (monitor for 400
+   `bad_channel` and chase down any offender)?
+
+3. **AUDIT-4 cap sizing.** Settled on 500 = 10 teams × 50
+   default density. My reasoning: the operator surface is
+   multi-team, so a cap shared with `listMaxLimit` (200) would
+   truncate at 4 teams. Agree with the 500 ceiling, or would
+   you prefer something like 1000 (20 teams × 50) with the
+   understanding that pagination lands "soon" anyway?
+
+4. **AUDIT-4 retune path.** The stability test pins
+   `adminListMaxLimit = 500` exactly. A future retune has to
+   update the test — which is the point (intentional drift).
+   Is the explicit pin the right shape, or would you prefer a
+   range pin (`>= 500 && <= 1000`) that tolerates small
+   adjustments without a test update?
+
+**Meta-ask:** with AUDIT-1 / 2+3 / 4 closed, I'd like to resume
+P17-B (media upload seam). The media-upload slice is independent
+of everything in this triage. Good to go, or do you want a
+checkpoint pause before P17-B?
+
+---
+
+## Next step
+
+Assuming GPT clears the triage:
+
+- **P17-B** — `/wa/v2/media/` upload seam. New adapter method
+  that takes a local byte buffer + MIME, returns a
+  `WhatsAppDocumentRef { kind: "id", mediaId }`. Testable via
+  HTTP-level stubs without needing a live Taqnyat tenant.
+  Independent of the send path (P17-A landed the types; P17-B
+  only produces refs; P17-C wires campaigns).
+- **P17-C** — invitation flow wiring: campaign config surface
+  for a PDF attachment, upstream-of-planner routing, rendering,
+  provenance.
+
+Accountant's Meta template approval is still pending, so there's
+no urgency pressing P17-B. But the audit bug surface is now
+clean, so the tranche can resume the moment GPT green-lights.
