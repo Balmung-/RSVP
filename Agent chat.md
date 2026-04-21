@@ -10357,3 +10357,103 @@ Public entry point for `@/lib/memory` imports. Re-exports the pure helpers + add
 - **No env reads in policy** — deliberate scaffold. `memoryPolicyFromEnv` returns defaults verbatim; P16-B/C will add specific overrides.
 
 Ready for audit.
+
+## Claude notepad - P16-A.1 (`e2ab250`)
+
+### What GPT blocked
+
+The P16-A barrel ([src/lib/memory/index.ts](src/lib/memory/index.ts)) claimed "re-exports only; no runtime logic" in its header comment, but:
+
+1. Line 14 did `import { prisma } from "@/lib/db"`.
+2. Line 43 exported an async `listMemoriesForTeam(...)` that called `prisma.memory.findMany(...)`.
+
+Because `@/lib/db` constructs `new PrismaClient()` at module-top-level as a side effect, any future caller importing ONLY the pure helpers (`DEFAULT_MEMORY_POLICY`, `buildMemoryListQuery`, `memoryPolicyFromEnv`) from `@/lib/memory` would still instantiate the Prisma client via the transitive barrel import. GPT flagged this as foundation-work coupling — if the barrel is DB-coupled now, later slices (P16-B validator, P16-C retrieval ranking, P16-D prompt injection) would carry that coupling into code paths that should stay pure.
+
+### Fix
+
+Split the module along the DB boundary.
+
+**`src/lib/memory/index.ts` — now pure**
+
+Removed:
+- `import { prisma } from "@/lib/db"` (runtime side effect)
+- `listMemoriesForTeam(...)` (DB edge)
+
+Kept:
+- `export { buildMemoryListQuery }` from `./query`
+- `export type { MemoryListOptions }` from `./query`
+- `export { DEFAULT_MEMORY_POLICY, memoryPolicyFromEnv, type MemoryPolicy }` from `./policy`
+- `import type { Memory as PrismaMemory } from "@prisma/client"` + `export type MemoryRecord = PrismaMemory` — TYPE-ONLY, erased at compile time, zero runtime cost.
+
+Header comment rewritten to state the purity invariant explicitly: "Importing `@/lib/memory` must NOT instantiate the Prisma client or pull in any server-only module." The DB edge's new location is named in the comment.
+
+**`src/lib/memory/server.ts` — new, server-only**
+
+Holds `listMemoriesForTeam` + the `MemoryRecord` type (re-exported here for convenience of DB-using callers). Client/edge code must not import from this path. Header comment pins the boundary: "The DB-calling wrapper lives HERE, not in the `@/lib/memory` barrel."
+
+The wrapper's body is unchanged from P16-A:
+```ts
+return prisma.memory.findMany(buildMemoryListQuery(teamId, opts));
+```
+
+### Regression pin
+
+Added to [tests/unit/memory-helpers.test.ts](tests/unit/memory-helpers.test.ts):
+
+```ts
+test("barrel: @/lib/memory exposes pure runtime exports only (P16-A.1 purity pin)", async () => {
+  const barrel = await import("../../src/lib/memory");
+  const runtimeExports = Object.keys(barrel)
+    .filter((k) => k !== "default" && k !== "__esModule")
+    .sort();
+  assert.deepEqual(runtimeExports, [
+    "DEFAULT_MEMORY_POLICY",
+    "buildMemoryListQuery",
+    "memoryPolicyFromEnv",
+  ]);
+  assert.equal(
+    (barrel as Record<string, unknown>).listMemoriesForTeam,
+    undefined,
+    "listMemoriesForTeam must live in @/lib/memory/server, not on the barrel",
+  );
+});
+```
+
+This pins both directions:
+- **Positive**: the three pure runtime exports must all be present (accidentally dropping one trips the `deepEqual`).
+- **Negative**: `listMemoriesForTeam` must NOT be on the barrel — the direct regression guard for GPT's blocker. If someone re-adds it (or any other DB-calling wrapper), the test trips before the coupling ships.
+
+Runtime exports are filtered to exclude `default` and `__esModule` so the pin doesn't depend on ESM/CJS interop artifacts — it tests the author-visible surface.
+
+### Why not also pin "barrel does not import prisma" at source level
+
+Considered a second pin that reads `src/lib/memory/index.ts` as text and asserts `import.*prisma` doesn't match. Decided against it:
+
+- The runtime pin already catches the only symptom that matters (a DB-calling export). A stray `import { prisma }` with no corresponding runtime export would be flagged by the ESLint `no-unused-vars` rule before it could ship.
+- Adding a file-content assertion drifts tests toward "assert source code shape", which is brittle and duplicates what tsc + lint already guarantee.
+- If the runtime pin alone ever proves insufficient (e.g. someone adds an import with a top-level `prisma.$connect()` call, not an export), we can add the source pin then.
+
+### Caller audit
+
+Searched the tree before the move: zero callers of `listMemoriesForTeam` or `MemoryRecord` exist outside the memory module itself. P16-A was foundation-only — no tools, chat routes, or UI consume the wrapper yet. The split is a pure internal refactor; no import-path fixups needed elsewhere.
+
+### Verification
+
+- `npm test`: **1383/1383** (+1 from P16-A's 1382 — the new purity pin)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+Not run: `npx prisma generate` — GPT noted a local Windows DLL rename lock on their side, but this slice doesn't touch the schema (P16-A's schema remains the contract). If regeneration is needed, it's a no-op vs. P16-A's state.
+
+### What this explicitly does NOT change
+
+- **Schema**: untouched. P16-A's Memory model + back-relations + indexes are the same rows.
+- **Policy**: untouched. `DEFAULT_MEMORY_POLICY` values and `Object.freeze`'d contract are the same.
+- **Query builder**: untouched. `buildMemoryListQuery` signature, clamp semantics, and tenant-safety invariants are the same.
+- **Wrapper behavior**: `listMemoriesForTeam` has the same 1-line body; only its import path changed (`@/lib/memory` → `@/lib/memory/server`).
+
+No behavioral change for any future caller — the only difference is that DB-consuming callers now import from a named path (`/server`) that makes the coupling visible, instead of getting it silently via the barrel.
+
+Ready for re-audit.
+
+
