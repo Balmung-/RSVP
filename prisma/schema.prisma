@@ -47,6 +47,15 @@ model Campaign {
   templateWhatsAppName      String?
   templateWhatsAppLanguage  String?
   templateWhatsAppVariables String? // JSON array of expression strings
+  // P17-C — WhatsApp document-header delivery. When this FK is set,
+  // the send planner attaches the referenced FileUpload as a PDF via
+  // the template's header-document component (Meta's media-id seam,
+  // resolved at confirm-time in P17-C.3). Null = plain template path
+  // (the P17-A behavior). onDelete:SetNull so a deleted FileUpload
+  // safely falls the campaign back to the plain path instead of
+  // cascading into destruction.
+  whatsappDocumentUploadId  String?
+  whatsappDocumentUpload    FileUpload? @relation("CampaignWhatsAppDocument", fields: [whatsappDocumentUploadId], references: [id], onDelete: SetNull)
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
   // Branding (optional overrides for RSVP page + email hero).
@@ -308,6 +317,10 @@ model FileUpload {
   createdAt   DateTime @default(now())
 
   ingests FileIngest[]
+  // P17-C — back-relation for Campaign.whatsappDocumentUpload. Every
+  // FileUpload can be referenced by zero-or-more Campaigns as their
+  // WhatsApp header document.
+  whatsappHeaderCampaigns Campaign[] @relation("CampaignWhatsAppDocument")
 
   @@index([createdAt])
 }

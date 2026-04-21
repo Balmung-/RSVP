@@ -151,6 +151,57 @@ export function decideWhatsAppMessage(
   return { ok: false, reason: "no_template" };
 }
 
+// P17-C.1 — WhatsApp document-header readiness gate.
+//
+// Pure predicate: does the campaign have everything it needs to use
+// Meta's template header-document component? Three conditions, all
+// required:
+//
+//   1. A FileUpload id to attach (the PDF bytes live here).
+//   2. A template name — Meta only accepts a header document on a
+//      template message, not a free-form text message. A doc ref
+//      without a template would be a config error.
+//   3. A template language code — Meta keys templates on the
+//      (name, language) pair. Mirrors the planner's rule-1 discipline
+//      a few lines above.
+//
+// Empty-string fields count as "missing" (a length-0 value in any
+// of these columns is still unusable). Callers get a clean boolean
+// without having to repeat the three-field check at each site.
+//
+// Narrow input shape — callers (the planner, confirm-time checkers,
+// future widget readiness lines) can pass a minimal projection and
+// don't have to construct a full `WhatsAppPlanCampaign`.
+export type WhatsAppDocumentGateInput = {
+  whatsappDocumentUploadId: string | null;
+  templateWhatsAppName: string | null;
+  templateWhatsAppLanguage: string | null;
+};
+
+export function campaignWantsWhatsAppDocument(
+  input: WhatsAppDocumentGateInput,
+): boolean {
+  if (
+    input.whatsappDocumentUploadId === null ||
+    input.whatsappDocumentUploadId.length === 0
+  ) {
+    return false;
+  }
+  if (
+    input.templateWhatsAppName === null ||
+    input.templateWhatsAppName.length === 0
+  ) {
+    return false;
+  }
+  if (
+    input.templateWhatsAppLanguage === null ||
+    input.templateWhatsAppLanguage.length === 0
+  ) {
+    return false;
+  }
+  return true;
+}
+
 // Local JSON-array validator. Returns a tagged result so the caller
 // can distinguish "parse failed" from "empty array" — both legitimate
 // states with different treatments (empty array is a valid zero-var
