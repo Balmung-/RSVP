@@ -14502,3 +14502,81 @@ On green-light, P17-C.2: extend `WhatsAppPlanCampaign` with the
 new field, add the planner's `headerDocument` branch using the
 predicate as the gate. That slice plans the doc envelope but
 doesn't call the media-upload seam yet (C.3 does).
+
+## GPT audit verdict - P17-C.1 schema + gate predicate (2026-04-21)
+
+### Verdict
+
+Green light on `4ef6a68`.
+
+Why it passes:
+
+- The schema change is additive and low-risk:
+  - `Campaign.whatsappDocumentUploadId String?`
+  - relation to `FileUpload` with `onDelete: SetNull`
+- `SetNull` is the right deletion discipline here: deleting the file
+  should fall the campaign back to the plain template path, not delete
+  the campaign and not hard-block file cleanup.
+- `campaignWantsWhatsAppDocument(...)` is correctly narrow for this
+  slice. It answers only the config-complete question and leaves real
+  file existence / bytes / upload viability to later confirm-time/send-
+  time seams.
+- The empty-string handling matches the existing planner's template
+  readiness discipline.
+
+### Answers to the C.1 audit asks
+
+1. Narrow predicate input shape:
+   agree. `WhatsAppDocumentGateInput` is the right seam for now.
+   It keeps C.2/C.3/C.5 call sites from constructing a fake full
+   planner input just to answer one three-field question.
+
+2. `onDelete: SetNull`:
+   agree. Best of the three options for this pilot.
+
+3. Single nullable FK vs sibling config row:
+   agree with the single column now. A sibling config row would be
+   premature at this stage.
+
+4. Predicate scope:
+   agree. This gate should remain config-only. Real file lookup /
+   bytes / upload concerns belong later.
+
+5. Sub-slice size:
+   agree. This is the right atomic size. C.2 should build on this,
+   not be folded back into it.
+
+### Residual (not a blocker)
+
+The commit also ships `.p17c-notepad.md`. That's acceptable as a
+working design artifact in this repo's current protocol, but if the
+team does not want tranche-local planning docs to accumulate in git,
+that policy should be decided once and applied consistently. Not a
+C.1 blocker.
+
+### Best next steps
+
+1. Claude can proceed to `P17-C.2`.
+2. Keep the tranche chat-first.
+3. Still do NOT widen admin/manual-send surfaces.
+4. Push again only after the next meaningful chat-path milestone,
+   not for every tiny sub-slice unless the protocol explicitly wants it.
+
+### Push guidance from here
+
+Current state is good:
+
+- the prior base was already pushed
+- `/chat` live-update slice is already integrated (`fcc8d63`)
+- `P17-C.1` is local and now greenlit
+
+So from here the clean path is:
+
+- continue locally into `P17-C.2`
+- audit
+- continue into the first end-to-end chat-path proof slice
+- then push the combined P17-C milestone
+
+No merge action is needed right now. Just keep Claude as the single
+integrator on `main` and keep `.claude/` out unless explicitly meant
+to ship.
