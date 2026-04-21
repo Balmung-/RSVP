@@ -57,6 +57,13 @@ type SideEffects = {
     providerId?: string;
     sentAt?: Date;
     error?: string;
+    // P17-C.4 — post-swap provenance update. Doc-header happy paths
+    // produce TWO `updateInvitation` calls: one carrying just
+    // `payload` (after the mediaId is known) and one carrying the
+    // terminal status/providerId/sentAt after the provider send.
+    // Tests filter `updateCalls` on `u.payload !== undefined` to
+    // isolate provenance updates from status updates.
+    payload?: string;
   }>;
   eventLogs: Array<{
     kind: string;
@@ -749,4 +756,202 @@ test("doc-header: dep not supplied → invitation failed doc_upload_deps_missing
   assert.deepEqual(effects.loadFileUploadCalls, []);
   assert.deepEqual(effects.uploadMediaCalls, []);
   assert.deepEqual(effects.sendCalls, []);
+});
+
+// ---- P17-C.4: post-swap payload provenance ----------------------
+//
+// After a successful C.3 swap, the invitation's `payload` column is
+// overwritten with the create-time template descriptor PLUS three
+// provenance fields: `documentMediaId`, `documentFilename`,
+// `documentUploadId`. That lets an operator auditing a sent row
+// answer "which media did we attempt?" without consulting a separate
+// table — the answer travels with the invitation.
+//
+// Pins below establish:
+//   1. Happy path — provenance fields written with correct values.
+//   2. Plain template (no swap) — NO provenance update; payload
+//      stays at its `payloadForPlan` create-time shape.
+//   3. Ref without filename — `documentFilename` serialized as
+//      explicit null (not dropped silently).
+//   4. Swap failure — NO provenance update; status update carries
+//      only the structured error.
+
+test("doc-header payload: post-swap update carries documentMediaId, filename, uploadId", async () => {
+  // Full-chain provenance: the payload update fires BEFORE the send,
+  // carrying the template descriptor (name, language, interpolated
+  // variables) plus the three doc-provenance fields. The terminal
+  // status update (status=sent + providerId + sentAt) is a separate
+  // call with no payload field — each update has exactly one job.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: PDF_BYTES,
+      filename: "invitation.pdf",
+      contentType: "application/pdf",
+    },
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: MEDIA_ID, filename: "invitation.pdf" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      templateWhatsAppVariables: JSON.stringify(["{{name}}", "{{venue}}"]),
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: true, invitationId: INV_ID });
+
+  // Exactly one provenance update — partition the update list and
+  // pin both partitions independently.
+  const payloadUpdates = effects.updateCalls.filter(
+    (u) => u.payload !== undefined,
+  );
+  const statusUpdates = effects.updateCalls.filter(
+    (u) => u.payload === undefined,
+  );
+  assert.equal(payloadUpdates.length, 1);
+  assert.equal(statusUpdates.length, 1);
+
+  // Provenance payload shape: template fields + doc fields all present
+  // and sourced from the swap result (MEDIA_ID) + parsed upload link
+  // (UPLOAD_ID), not from the campaign column directly.
+  const payload = JSON.parse(payloadUpdates[0].payload!);
+  assert.equal(payload.template, "moather2026_moather2026");
+  assert.equal(payload.language, "ar");
+  assert.deepEqual(payload.variables, ["Ahmed Faisal", "Four Seasons"]);
+  assert.equal(payload.documentMediaId, MEDIA_ID);
+  assert.equal(payload.documentFilename, "invitation.pdf");
+  assert.equal(payload.documentUploadId, UPLOAD_ID);
+
+  // Provenance update touches ONLY payload — no status/providerId/sentAt
+  // bleed-through. The separation matters for audit: a reader can tell
+  // the invitation was "enriched with provenance, then sent" rather
+  // than "sent all at once," which helps diagnose mid-flight failures.
+  assert.equal(payloadUpdates[0].status, undefined);
+  assert.equal(payloadUpdates[0].providerId, undefined);
+  assert.equal(payloadUpdates[0].sentAt, undefined);
+  assert.equal(payloadUpdates[0].error, undefined);
+
+  // Terminal status update is the usual shape.
+  assert.equal(statusUpdates[0].status, "sent");
+  assert.equal(statusUpdates[0].providerId, PROVIDER_ID);
+  assert.equal(statusUpdates[0].sentAt, NOW);
+});
+
+test("doc-header payload: plain template (no swap) writes no provenance update", async () => {
+  // Negative pin: without `whatsappDocumentUploadId`, the planner
+  // emits no headerDocument, the intercept doesn't fire, and the
+  // only updateInvitation call is the terminal status=sent one.
+  // The invitation's payload column stays at its create-time
+  // `payloadForPlan` shape (no doc fields).
+  const { deps, effects } = mkDeps();
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "rsvp_invitation_v1",
+      templateWhatsAppLanguage: "en_US",
+      templateWhatsAppVariables: JSON.stringify(["{{name}}"]),
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: true, invitationId: INV_ID });
+
+  const payloadUpdates = effects.updateCalls.filter(
+    (u) => u.payload !== undefined,
+  );
+  assert.equal(payloadUpdates.length, 0);
+
+  // Create-time payload still carries the template JSON without
+  // doc fields — confirms `payloadForPlan` is the sole writer on
+  // the no-swap path.
+  assert.equal(effects.createCalls.length, 1);
+  const created = JSON.parse(effects.createCalls[0].payload);
+  assert.equal(created.template, "rsvp_invitation_v1");
+  assert.equal(created.documentMediaId, undefined);
+  assert.equal(created.documentFilename, undefined);
+  assert.equal(created.documentUploadId, undefined);
+});
+
+test("doc-header payload: ref without filename → documentFilename serialized as null", async () => {
+  // Defensive pin: `WhatsAppDocumentRef.filename` is optional. If
+  // the BSP returns a ref without one, the audit row should still
+  // have a structured shape — an explicit `null` rather than the
+  // key being silently dropped by JSON.stringify. Keeps the payload
+  // schema stable for downstream consumers.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: PDF_BYTES,
+      filename: "invitation.pdf",
+      contentType: "application/pdf",
+    },
+    uploadMedia: {
+      ok: true,
+      // filename deliberately omitted to simulate a BSP that didn't
+      // echo one back.
+      ref: { kind: "id", mediaId: MEDIA_ID },
+    },
+  });
+  await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  const payloadUpdates = effects.updateCalls.filter(
+    (u) => u.payload !== undefined,
+  );
+  assert.equal(payloadUpdates.length, 1);
+  const payload = JSON.parse(payloadUpdates[0].payload!);
+  // Key is present and explicitly null — not missing.
+  assert.equal("documentFilename" in payload, true);
+  assert.equal(payload.documentFilename, null);
+  // Other provenance fields still present.
+  assert.equal(payload.documentMediaId, MEDIA_ID);
+  assert.equal(payload.documentUploadId, UPLOAD_ID);
+});
+
+test("doc-header payload: swap failure (doc_not_found) writes no provenance update", async () => {
+  // When the swap chain fails, the invitation is marked failed with
+  // the structured error. The payload column is NOT overwritten —
+  // it keeps its create-time template descriptor (no doc fields).
+  // Audit readers use the PRESENCE of `documentMediaId` in payload
+  // as the signal that the send attempted a specific media; an
+  // absent field means "we never got far enough to know the id."
+  const { deps, effects } = mkDeps({
+    fileUpload: null,
+    // uploadMedia provided so the deps-missing branch doesn't fire
+    // first — we want the DB-miss branch specifically.
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: "unreachable", filename: "x" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: false, error: "doc_not_found" });
+
+  // Zero provenance updates — the swap never produced a mediaId, so
+  // there's nothing to record.
+  const payloadUpdates = effects.updateCalls.filter(
+    (u) => u.payload !== undefined,
+  );
+  assert.equal(payloadUpdates.length, 0);
+  // The only update is the terminal failed-status one.
+  assert.equal(effects.updateCalls.length, 1);
+  assert.equal(effects.updateCalls[0].status, "failed");
+  assert.equal(effects.updateCalls[0].error, "doc_not_found");
 });

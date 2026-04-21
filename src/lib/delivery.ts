@@ -157,6 +157,14 @@ export interface WhatsAppSendDeps {
       providerId?: string;
       sentAt?: Date;
       error?: string;
+      // P17-C.4 — post-swap payload provenance. Optional because most
+      // updates still touch only status/providerId/sentAt/error; only
+      // the doc-header happy path writes a second update to overwrite
+      // the create-time template descriptor with the same JSON plus
+      // `documentMediaId`, `documentFilename`, and `documentUploadId`
+      // once those are known. Audit readers look at this field to
+      // answer "which media did this send actually attempt?".
+      payload?: string;
     },
   ) => Promise<void>;
   createEventLog: (data: {
@@ -297,6 +305,29 @@ export async function performWhatsAppSend(
       });
       return { ok: false, error: swap.error };
     }
+    // P17-C.4 — provenance capture. The swap produced the mediaId we
+    // need for audit; write it to the invitation's payload BEFORE the
+    // send so a subsequent provider failure still leaves a row that
+    // says "we attempted send with media X from upload Y." The swap's
+    // `uploadId` is threaded out of `resolveInternalDocLink` rather
+    // than re-parsed here so the link-shape matcher lives in exactly
+    // one place. Guarded on `ref.kind === "id"` because the type of
+    // `WhatsAppDocumentRef` permits a link-kind return (no current
+    // `uploadMedia` impl produces one, but the type forces the check);
+    // a link-ref would have no mediaId to record, so provenance stays
+    // at the create-time descriptor for that (future) path.
+    if (swap.ref.kind === "id") {
+      await deps.updateInvitation(inv.id, {
+        payload: payloadForDispatch({
+          templateName: messageToSend.templateName,
+          languageCode: messageToSend.languageCode,
+          variables: messageToSend.variables,
+          mediaId: swap.ref.mediaId,
+          filename: swap.ref.filename ?? null,
+          uploadId: swap.uploadId,
+        }),
+      });
+    }
     messageToSend = { ...messageToSend, headerDocument: swap.ref };
   }
 
@@ -424,6 +455,52 @@ function payloadForPlan(
   });
 }
 
+// P17-C.4 — post-swap invitation payload. Invoked only after a
+// successful C.3 placeholder→mediaId swap. Extends the template
+// payload shape produced by `payloadForPlan` with three provenance
+// fields the operator needs for audit:
+//
+//   - documentMediaId  : the Meta media id that went out on the wire.
+//                        Lets an operator look up the delivered media
+//                        on Meta's side via /v<n>/<mediaId>.
+//   - documentFilename : the filename Meta echoed back for the upload
+//                        (what recipients see in the chat list). Null
+//                        if the BSP didn't carry one through.
+//   - documentUploadId : the FileUpload row id the bytes came from.
+//                        Lets "replay this send" later resolve the
+//                        exact source even if the campaign's current
+//                        upload has been rotated since.
+//
+// Two writes per doc send (create-time descriptor, post-swap
+// provenance) is deliberate: a single deferred create would lose the
+// "queued" audit state when the swap fails, and stashing the post-swap
+// fields on the success-path status update would lose them on provider
+// failure — the operator deserves to see "we attempted media X but the
+// provider rejected" rather than a bare error with no media trail.
+//
+// The narrow-input parameter shape (rather than accepting a whole
+// `WhatsAppMessage`) means the single caller in `performWhatsAppSend`
+// does its own type narrowing at the call site and this helper never
+// has to branch on message kind — every field it reads is required
+// and typed up front.
+function payloadForDispatch(opts: {
+  templateName: string;
+  languageCode: string;
+  variables: string[] | undefined;
+  mediaId: string;
+  filename: string | null;
+  uploadId: string;
+}): string {
+  return JSON.stringify({
+    template: opts.templateName,
+    language: opts.languageCode,
+    variables: opts.variables ?? [],
+    documentMediaId: opts.mediaId,
+    documentFilename: opts.filename,
+    documentUploadId: opts.uploadId,
+  });
+}
+
 // P17-C.3 — placeholder-link → Meta-mediaId swap.
 //
 // The planner emits `headerDocument: { kind: "link", link:
@@ -475,7 +552,18 @@ async function resolveInternalDocLink(
   link: string,
   deps: WhatsAppSendDeps,
 ): Promise<
-  | { ok: true; ref: import("./providers/types").WhatsAppDocumentRef }
+  | {
+      ok: true;
+      ref: import("./providers/types").WhatsAppDocumentRef;
+      // P17-C.4 — thread the parsed FileUpload id back to the caller
+      // so it can be recorded in the invitation's payload provenance
+      // without re-parsing the link. Keeping the parse + the threading
+      // inside this function (rather than having the caller re-call
+      // `parseInternalFileLink`) means the "what upload did we use?"
+      // answer lives next to the "did we successfully upload it?"
+      // answer, which is the coherent unit for downstream audit.
+      uploadId: string;
+    }
   | { ok: false; error: string }
 > {
   const uploadId = parseInternalFileLink(link);
@@ -492,11 +580,13 @@ async function resolveInternalDocLink(
   if (row.contents.byteLength === 0) {
     return { ok: false, error: "doc_empty" };
   }
-  return await deps.uploadMedia({
+  const uploadRes = await deps.uploadMedia({
     bytes: row.contents,
     filename: row.filename,
     mimeType: row.contentType,
   });
+  if (!uploadRes.ok) return uploadRes;
+  return { ok: true, ref: uploadRes.ref, uploadId };
 }
 
 // Extracts the FileUpload id from the planner's placeholder-link
