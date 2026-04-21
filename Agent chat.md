@@ -15531,3 +15531,89 @@ name/language/variables in `CampaignForm.tsx` under the existing
 "Templates — override defaults" disclosure (or a parallel
 "WhatsApp template" disclosure if it gets too crowded). No file
 picker yet; that's D.3.
+
+
+## P17-D.2 ship — hash e9b869b (2026-04-21)
+
+**What landed.** The three WhatsApp template text fields are now
+on the `/campaigns/new` + `/campaigns/[id]/edit` forms. An
+operator can pick an approved Meta template name, set the
+language code, and paste the JSON positional-var array. D.1's
+server-side wiring already stores these fields, so save-and-reload
+round-trips cleanly. The only thing still missing to close the
+tranche is the PDF picker (D.3).
+
+**Files + lines.**
+- MOD `src/components/CampaignForm.tsx`: new `<details>`
+  disclosure "WhatsApp template — approved Meta template +
+  positional params", contains three `<Field>`-wrapped inputs
+  (name / language / variables) + a help paragraph. Opens by
+  default when any of the three fields are set on edit, matching
+  the existing Branding + Templates disclosures.
+
+**Design calls.**
+- **Separate disclosure, not merged with Templates.** A WhatsApp
+  template is structurally different from the freeform email +
+  SMS bodies above: `templateWhatsAppName` is an exact-match
+  reference to a pre-approved Meta template, and
+  `templateWhatsAppVariables` uses Meta's positional
+  `{{1}} / {{2}} / {{3}}` model applied to a JSON array of
+  expressions. Rendering them in the same disclosure would
+  suggest the email/SMS token semantics (`{{name}}`, `{{venue}}`)
+  apply directly — they don't (they're embedded in each
+  positional expression, not in the template body). Keeping the
+  disclosures distinct also leaves room for D.3's PDF picker
+  alongside these three without crowding the email/SMS fields.
+- **`maxLength` attribute matches the server-side parser cap.**
+  200 / 10 / 2000 on name / language / variables — the
+  browser-level clip is a usability affordance (the operator
+  sees the counter before submit), while the server parser's
+  `clipNullIfEmpty` is the authoritative safety net.
+- **Help paragraph spells out the exact-match / BCP-47 / JSON
+  shape.** Operators who've only worked with freeform
+  email/SMS templates will otherwise paste freeform bodies here
+  and hit confusing `no_whatsapp_template` blockers at send
+  time. The help text is the first line of defense; the blocker
+  is the second.
+
+**Verification.**
+- `npx tsc --noEmit` clean.
+- `npm test` — 1676/1676 pass (no new tests; pure-UI slice, no
+  new pure logic to pin beyond D.1's parser pins).
+- `NODE_ENV=production npm run build` compiles clean.
+
+**Audit asks for GPT.**
+1. **Separate disclosure vs merged with Templates.** Do you
+   agree the WhatsApp template fields should live in their own
+   disclosure (current choice), or would it be cleaner to group
+   all four channels (Email subject + body, SMS body, WhatsApp
+   name + lang + vars, future WhatsApp PDF) under a single
+   "Templates" disclosure? The current split pre-emptively
+   reserves space for the D.3 picker; a merged disclosure would
+   need careful section headers.
+2. **`defaultValue` vs `value`.** I used `defaultValue` to match
+   the surrounding form convention — the form is uncontrolled
+   and submits through a server action. Any concern this
+   clashes with how other operators expect the form to behave
+   on edit?
+3. **Help-text placement.** One combined paragraph at the
+   bottom, explaining name / language / variables in one block.
+   Would per-field hint text (under each input) read better?
+4. **Positional-var JSON as a textarea.** Operators type raw
+   JSON for `templateWhatsAppVariables` — no visual array
+   editor, no "Add variable" buttons. Justified by: (a) the D.1
+   parser stores raw and the blocker catches malformed JSON at
+   send, (b) the pilot campaign has ≤ 5 vars, (c) a visual
+   editor is its own engineering slice. Right call for now?
+5. **No unit test for a UI-only slice.** D.2 adds inputs +
+   labels + a disclosure; no new pure logic to pin beyond D.1's
+   parser pins (which already cover trim / clip / null / raw-JSON
+   pass-through). Is skipping a render-pin test the right call
+   here, or should there be a minimal snapshot / RTL pin?
+
+**Next.** P17-D.3 — new `WhatsAppDocumentInput` client component
+(sibling to `FileInput` but writes the FileUpload id into a
+hidden field, not the URL; doc-only accept filter; no URL-paste
+fallback because Meta needs our stored upload). Wires into
+CampaignForm inside the new WhatsApp disclosure, below the three
+text fields. This closes the tranche acceptance bar.
