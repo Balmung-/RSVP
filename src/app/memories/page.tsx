@@ -15,6 +15,7 @@ import {
   groupMemoriesByTeam,
   resolveTeamNameForUi,
 } from "@/lib/memory/ui";
+import { decideMemoryDeleteAuth } from "@/lib/memory/admin-auth";
 import { setFlash } from "@/lib/flash";
 
 // P16-E — operator-facing memory audit/UI.
@@ -36,15 +37,26 @@ import { setFlash } from "@/lib/flash";
 //     UI is the right place for cross-team admin access with an
 //     explicit team picker." Section headers show which team
 //     each memory belongs to so there's no ambiguity.
-//   - Delete is tenant-scoped. Non-admins can only delete from
-//     their teams; the action server-side re-checks membership
-//     before calling the DB helper. Admins can delete from any
-//     team — the cross-team view is the operator UI's role.
+//   - Delete is EDITOR-gated AND tenant-scoped (P16-E.1). Viewers
+//     cannot delete even memories on their own team — durable
+//     memory is model-steering context, and destructively
+//     governing it is an editor-or-higher action. Mirrors the
+//     role gate on `src/lib/ai/tools/send_campaign.ts` and other
+//     destructive/write flows. Editors can delete from teams they
+//     belong to; admins can delete cross-team — the cross-team
+//     view is the operator UI's role. The decision is pinned as
+//     a pure helper in `@/lib/memory/admin-auth` so the gate can
+//     be unit-tested without the Server Action harness.
 //
-// Not in this slice (will land as P16-E.1+ if wanted):
-//   - Edit. Delete + re-create via the chat write seam covers
-//     the correction case; a second write seam for edit would
-//     bloat this slice and duplicate validator logic.
+// Not in this slice (will land as a follow-up if wanted):
+//   - Memory WRITE path. Today there's no user-driven way to
+//     create a memory from the chat transcript; the `createMemoryForTeam`
+//     seam in `src/lib/memory/server.ts` exists but has no live
+//     callsite. Until that ships, this page is read+delete only,
+//     and the empty-state copy reflects that honestly.
+//   - Edit. When a write path lands, the correction flow is
+//     "delete + re-save"; a second write seam for in-place edit
+//     would duplicate validator logic.
 //   - Archive (soft-delete). Requires a schema migration + a
 //     filter update in the P16-C recall builder; deferred so
 //     this slice ships without touching recall behavior.
@@ -79,18 +91,33 @@ async function deleteAction(formData: FormData): Promise<void> {
     redirect("/memories");
   }
 
-  // Tenant gate. Non-admins must be a current member of the
-  // team; admins are allowed cross-team by design (see the page
-  // header comment). This check is done BEFORE hitting the DB
-  // helper so an unauthorised attempt doesn't even race the
-  // tenant-scoped `deleteMany` filter.
+  // Role + tenant gate (P16-E.1). The pure helper combines both
+  // axes: viewers are rejected outright, admins are allowed
+  // cross-team, editors must be members of the target team. We
+  // always resolve `memberTeamIds` (even for admins — the helper
+  // ignores it on the admin branch) so the decision input is
+  // complete; the list is already cached per-request by the
+  // `teamIdsForUser` wrapper.
+  const isEditor = hasRole(me, "editor");
   const isAdmin = hasRole(me, "admin");
-  if (!isAdmin) {
-    const myTeamIds = await teamIdsForUser(me.id);
-    if (!myTeamIds.includes(teamId)) {
-      setFlash({ kind: "warn", text: "Not authorised for that team." });
-      redirect("/memories");
-    }
+  const memberTeamIds = await teamIdsForUser(me.id);
+  const decision = decideMemoryDeleteAuth({
+    isEditor,
+    isAdmin,
+    teamId,
+    memberTeamIds,
+  });
+  if (!decision.ok) {
+    // Distinct flash copy per reason — operators with no editor
+    // role see a different message than editors who wandered
+    // into the wrong team. Matches the product's broader
+    // "refused with reason" pattern.
+    const text =
+      decision.reason === "not_editor"
+        ? "Editor role required to remove durable memory."
+        : "Not authorised for that team.";
+    setFlash({ kind: "warn", text });
+    redirect("/memories");
   }
 
   const res = await deleteMemoryForTeam(id, teamId);
@@ -113,6 +140,14 @@ export default async function MemoriesPage() {
   if (!me) redirect("/login");
 
   const isAdmin = hasRole(me, "admin");
+  // `isEditor` is true for editor AND admin; it drives whether
+  // the per-row Remove button renders. Viewers still get full
+  // read access — they just don't see the destructive affordance.
+  // The Server Action above independently re-checks via
+  // `decideMemoryDeleteAuth`, so a crafted POST from a viewer is
+  // refused with a "not_editor" flash regardless of this client-
+  // facing gate.
+  const isEditor = hasRole(me, "editor");
 
   // Resolve the scope: which teamIds can this user see?
   //   - non-admin: their memberships (any role).
@@ -170,14 +205,16 @@ export default async function MemoriesPage() {
         <p className="text-body text-ink-600">
           Durable facts, preferences, and rules the assistant has been taught
           for each team. Entries here show up in the assistant&rsquo;s chat
-          context as &ldquo;context, not commands&rdquo;. Remove anything that
-          looks stale or wrong.
+          context as &ldquo;context, not commands&rdquo;.
+          {isEditor
+            ? " Remove anything that looks stale or wrong."
+            : " An editor can remove entries that look stale or wrong."}
         </p>
 
         {groups.length === 0 ? (
           <EmptyState icon="list" title="No memories yet">
-            Operators can teach durable facts, preferences, and rules through
-            chat. They show up here once saved.
+            Durable facts, preferences, and rules saved for each team will
+            appear here once they&rsquo;re created.
           </EmptyState>
         ) : (
           groups.map((g) => {
@@ -209,18 +246,20 @@ export default async function MemoriesPage() {
                               )}
                             </div>
                           </div>
-                          <form action={deleteAction} className="shrink-0">
-                            <input type="hidden" name="id" value={m.id} />
-                            <input
-                              type="hidden"
-                              name="teamId"
-                              value={m.teamId}
-                            />
-                            <button className="btn btn-soft text-mini">
-                              <Icon name="trash" size={12} />
-                              Remove
-                            </button>
-                          </form>
+                          {isEditor ? (
+                            <form action={deleteAction} className="shrink-0">
+                              <input type="hidden" name="id" value={m.id} />
+                              <input
+                                type="hidden"
+                                name="teamId"
+                                value={m.teamId}
+                              />
+                              <button className="btn btn-soft text-mini">
+                                <Icon name="trash" size={12} />
+                                Remove
+                              </button>
+                            </form>
+                          ) : null}
                         </div>
                       </li>
                     );
