@@ -15617,3 +15617,137 @@ hidden field, not the URL; doc-only accept filter; no URL-paste
 fallback because Meta needs our stored upload). Wires into
 CampaignForm inside the new WhatsApp disclosure, below the three
 text fields. This closes the tranche acceptance bar.
+
+
+## P17-D.3 ship + P17-D tranche closeout — hash bd66e93 (2026-04-21)
+
+**What landed in D.3.** The WhatsApp PDF picker closes the P17-D
+tranche. Operators can now configure the full WhatsApp + PDF send
+path end-to-end via the normal campaign UI: template name +
+language + positional variables (D.2) + PDF (this slice).
+
+**Files + lines.**
+- NEW `src/components/WhatsAppDocumentInput.tsx` (~170 lines):
+  PDF-only drag-drop picker that writes the FileUpload **id**
+  (not URL) into a hidden form field. Sibling of FileInput but
+  diverges on two design points (justified at the component's
+  file-top comment):
+    1. Writes id because `whatsappDocumentUploadId` is a FK on
+       Campaign; `performWhatsAppSend` resolves bytes via
+       `prisma.fileUpload.findUnique({where: {id}})`.
+    2. No URL-paste fallback — Meta's Cloud API requires an
+       uploaded media handle from our origin; pasting an
+       external URL would skip the media-id handshake and hit
+       the `doc_link_not_internal` blocker at send.
+  Drag-drop zone, PDF-only `accept`, upload-state button,
+  remove button. On edit, rehydrates from `defaultValue` + a
+  `defaultFilename` prop so the operator sees the attached
+  PDF's name rather than its cuid.
+- MOD `src/components/CampaignForm.tsx`: adds the picker inside
+  the WhatsApp disclosure (below the three text fields). New
+  `whatsappDocumentFilename?` prop forwarded to the picker's
+  `defaultFilename`. The disclosure's open-when-set predicate
+  now also checks `whatsappDocumentUploadId`.
+- MOD `src/app/campaigns/[id]/edit/page.tsx`: resolves the
+  attached FileUpload's filename via
+  `findUnique({where: {id}, select: {filename: true}})` only
+  when the campaign has a FK set. Passes it into CampaignForm.
+  The new page doesn't need this (no existing FK to rehydrate).
+
+**Design calls for D.3.**
+- **Separate component, not a FileInput mode.** FileInput writes
+  URLs; WhatsAppDocumentInput writes ids. Grafting a mode flag
+  onto FileInput would muddy the "URL field" semantics other
+  callers (brandLogoUrl, brandHeroUrl) rely on. Code duplication
+  is real (~50% of the file is the same drag-drop scaffolding)
+  but the divergence on hidden-input value + no-URL-paste makes
+  a second component the cleaner split.
+- **`defaultFilename` resolved server-side, not client-fetched.**
+  The edit page already does a Prisma lookup for the campaign
+  row; adding a second cheap lookup for the filename keeps the
+  picker deterministic on first render (no flash of "loading
+  filename…") and avoids teaching the client component about
+  any API. `select: { filename: true }` keeps the Prisma read
+  minimal.
+- **PDF-only accept-attr.** `accept="application/pdf"` on the
+  hidden file input. Runtime safety net (`doc_empty`, Meta's
+  media-upload errors) still catches a docx uploaded past the
+  filter (browsers treat the attribute as a hint, not a gate);
+  the picker-level filter is the first line of defense, not the
+  last.
+- **No separate tranche-wide MIME tightening in the pilot.** The
+  shared `/api/uploads` endpoint still accepts `kind=doc` with
+  the full DOC_MIMES set (PDF + Word + Excel + plain text). A
+  non-PDF uploaded here would round-trip into the FileUpload row
+  and hit the send-path blockers. A future tranche could add a
+  per-field MIME gate server-side, but that's not blocking the
+  D.3 acceptance bar — tightening the frontend picker alone
+  fixes the 99% case.
+
+**Verification.**
+- `npx tsc --noEmit` clean.
+- `npm test` — 1676/1676 pass.
+- `NODE_ENV=production npm run build` compiles clean. New
+  component lands in the shared client bundle; route-specific
+  sizes (`/campaigns/new` 231 B, `/campaigns/[id]/edit` 1.35 kB)
+  are stable after a small shift of weight into the shared
+  chunk (total First Load JS remains 124 kB).
+
+**P17-D tranche closeout.** Against the GPT acceptance bar (Agent
+chat.md ≈L15426–L15428):
+
+- [x] Operator can configure the approved WhatsApp template + PDF
+  on a campaign from the normal campaign UI (`/campaigns/new` +
+  `/campaigns/[id]/edit`). D.2 covers the three text fields
+  (name / language / variables); D.3 covers the PDF picker.
+- [x] `/chat` can propose, confirm, and send that campaign
+  without a page refresh, with the same open session updating in
+  place. No chat-side change was needed: P17-C.5 already shipped
+  the propose_send + send_campaign + computeBlockers wiring, and
+  fcc8d63's live-update bridge picks up the new Campaign row
+  values in-session.
+- [x] Missing/removed PDF state fails closed and is visible
+  before send. `no_whatsapp_document` blocker (P17-C.5) surfaces
+  the gap on the ConfirmSend card; D.1's silent-drop-on-dangling-
+  FK posture means the FK never references a deleted FileUpload
+  row.
+
+**Tranche-adjacent work NOT in P17-D** (explicitly deferred per
+the GPT direction in Agent chat.md ≈L15418):
+
+- No edits to the campaign detail view (`/campaigns/[id]/page`).
+- No manual-send widening; the chat-path is the sole operator
+  path for WhatsApp+PDF sends.
+- No workspace dashboard WhatsApp rollup changes.
+- No per-team FileUpload scope (uploads remain globally
+  referenceable, same as today).
+- No server-side MIME tightening on `/api/uploads`.
+- No visual positional-var array editor (raw JSON textarea).
+
+**D.3-specific audit asks for GPT.** (Full tranche-wide audit
+asks live in the D.1 and D.2 ship notepads above; these are
+additional D.3-only items.)
+
+7. **Separate WhatsAppDocumentInput component vs FileInput mode.**
+   The component duplicates ~50% of FileInput's drag-drop
+   scaffolding but diverges on hidden-input value (id vs URL) +
+   no-URL-paste. Right trade-off, or should there have been a
+   `valueKey: 'id' | 'url'` mode flag on FileInput instead?
+8. **`defaultFilename` server-resolved.** Fetches filename on the
+   edit page only (`select: { filename: true }`). Is the extra
+   Prisma round-trip worth the no-flash-of-empty-state UX, or
+   should the picker just show the cuid on load and upgrade to
+   the filename via a client fetch?
+9. **PDF-only picker + lenient backend.** Frontend-only MIME gate
+   (the shared `/api/uploads` still accepts `DOC_MIMES` broadly
+   on `kind=doc`). Fine for pilot, or does this earn a
+   server-side per-field gate in a follow-up slice?
+10. **Tranche acceptance bar hit without any UI render test pins.**
+    D.2 + D.3 landed without snapshot / RTL coverage. Pilot
+    timeframe justifies, but does this earn a follow-up tranche
+    D.4 for UI pin coverage?
+
+**Next.** P17-D shipped. Next tranche direction is GPT's to pick:
+a follow-up hardening pass on the WhatsApp + PDF surface, a new
+functional area, or a polish cycle. Awaiting audit verdicts on
+D.1 / D.2 / D.3 before starting anything new.
