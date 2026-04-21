@@ -14389,3 +14389,116 @@ Per the re-audit's remaining steps:
 
 Executing step 5 now. P17-C design scouting (per the questions in
 `.p17b-notepad.md` line ~238) starts only after push lands cleanly.
+
+## P17-C.1 — schema nullable FK + pure WhatsApp-doc gate predicate (2026-04-21)
+
+Hash: `4ef6a68`
+Follows: `47e1799` (P17-B green + /chat live-update slice pushed).
+
+First sub-slice of P17-C. Strictly additive. Zero behavior change.
+
+### What this slice lands
+
+**Schema (`prisma/schema.prisma`).** A nullable FK from `Campaign`
+to `FileUpload` plus the back-relation:
+
+```prisma
+// on Campaign:
+whatsappDocumentUploadId String?
+whatsappDocumentUpload   FileUpload? @relation("CampaignWhatsAppDocument", fields: [whatsappDocumentUploadId], references: [id], onDelete: SetNull)
+
+// on FileUpload:
+whatsappHeaderCampaigns Campaign[] @relation("CampaignWhatsAppDocument")
+```
+
+`onDelete: SetNull` — deleting the PDF safely falls the campaign
+back to the plain P17-A template path. Cascade would be too
+aggressive (campaign still valid on email/SMS); Restrict would be
+operator-hostile (can't delete a PDF without unwiring every
+referring campaign).
+
+**Pure predicate
+(`src/lib/providers/whatsapp/sendPlan.ts`).**
+
+```ts
+campaignWantsWhatsAppDocument({
+  whatsappDocumentUploadId,
+  templateWhatsAppName,
+  templateWhatsAppLanguage,
+}): boolean
+```
+
+Returns `true` iff all three fields are non-null AND length > 0.
+Co-located with `decideWhatsAppMessage` because P17-C.2 will call
+it as the planner's first branching check. Narrow input shape so
+downstream callers (confirm-time checks in C.3, widget readiness
+lines in C.5) don't have to construct a full planner-input object.
+
+### Five new pins
+
+In `tests/unit/whatsapp-document-gate.test.ts`:
+
+1. All three fields present + non-empty → `true`.
+2. Missing `whatsappDocumentUploadId` → `false`.
+3. Missing `templateWhatsAppName` → `false` (doc header requires
+   template).
+4. Missing `templateWhatsAppLanguage` → `false` (Meta keys
+   templates on name+language).
+5. Empty-string (length-0 but non-null) → `false`, tested for each
+   of the three fields individually.
+
+### Non-changes
+
+- NO planner branch change. `decideWhatsAppMessage` still emits
+  `kind: "template"` without `headerDocument`.
+- NO `WhatsAppPlanCampaign` shape change.
+- NO chat, widget, route, server-action, or admin-UI change.
+- NO delivery or payload change.
+- NO call-site added — the predicate is importable but unused.
+  P17-C.2 lands the first caller.
+
+### Verification
+
+- `npm test` — 1623 / 1623 pass (prior 1618 + 5 new pins).
+- `npx tsc --noEmit` — clean.
+- `npx prisma generate` — clean.
+- `npx next build` — clean.
+
+### Design notepad
+
+Full P17-C design + sub-slice breakdown (C.1 through C.5/C.6) +
+5 audit asks committed as `.p17c-notepad.md` in this slice.
+
+### Five audit asks
+
+1. **Predicate input shape.** Narrow local `WhatsAppDocumentGateInput`
+   vs. reusing `WhatsAppPlanCampaign`. I went narrow because the
+   gate has a single responsibility and callers vary. Agree, or
+   prefer unified input with the planner?
+
+2. **`onDelete: SetNull` vs. alternatives.** SetNull is the safe
+   fallback; Cascade too aggressive; Restrict operator-hostile.
+   Agree?
+
+3. **Single nullable FK vs. sibling config row.** One column now,
+   `CampaignWhatsAppConfig` sibling row as a future refactor if
+   per-campaign template overrides / caching are needed. Agree
+   with the "premature to sibling-row now" call?
+
+4. **Predicate scope.** The gate checks configuration only, not
+   "will the send work" (i.e. it doesn't walk the FK to verify
+   the FileUpload exists / has bytes). C.3's confirm-time upload
+   will catch empty bytes via P17-B's short-circuit guards.
+   Agree with the split?
+
+5. **Sub-slice size.** This slice is tiny — one field, one
+   predicate, five pins. Is this the right atomic size for the
+   P17-C cadence, or would you prefer a fatter first slice that
+   also lands the C.2 planner branch?
+
+### Next step
+
+On green-light, P17-C.2: extend `WhatsAppPlanCampaign` with the
+new field, add the planner's `headerDocument` branch using the
+predicate as the gate. That slice plans the doc envelope but
+doesn't call the media-upload seam yet (C.3 does).
