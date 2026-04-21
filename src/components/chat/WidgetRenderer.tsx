@@ -44,11 +44,16 @@ export function WidgetRenderer({
   widget,
   fmt,
   onDismiss,
+  onConfirmedOutcome,
   locale,
 }: {
   widget: ClientWidget;
   fmt: FormatContext;
   onDismiss?: (widgetKey: string) => void;
+  onConfirmedOutcome?: (outcome: {
+    summary: string;
+    isError: boolean;
+  }) => void;
   locale?: "en" | "ar";
 }) {
   // Translate the widget envelope into the directive envelope
@@ -81,7 +86,11 @@ export function WidgetRenderer({
 
   return (
     <>
-      <DirectiveRenderer directive={directive} fmt={fmt} />
+      <DirectiveRenderer
+        directive={directive}
+        fmt={fmt}
+        onConfirmedOutcome={onConfirmedOutcome}
+      />
       {showDismiss && (
         <button
           type="button"

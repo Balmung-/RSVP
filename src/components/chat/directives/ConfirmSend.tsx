@@ -256,10 +256,15 @@ export function ConfirmSend({
   props,
   fmt,
   messageId,
+  onConfirmedOutcome,
 }: {
   props: ConfirmSendProps;
   fmt: FormatContext;
   messageId?: string;
+  onConfirmedOutcome?: (outcome: {
+    summary: string;
+    isError: boolean;
+  }) => void;
 }) {
   const [state, setState] = useState<SendState>(() => deriveSendState(props));
   // Sync local SendState when the persisted state on props changes —
@@ -347,6 +352,16 @@ export function ConfirmSend({
             ? String((body as Record<string, unknown>).error)
             : null) ?? `http_${res.status}`;
         setState({ phase: "error", error: err });
+        if (
+          body &&
+          typeof body === "object" &&
+          typeof (body as Record<string, unknown>).summary === "string"
+        ) {
+          onConfirmedOutcome?.({
+            summary: (body as Record<string, unknown>).summary as string,
+            isError: true,
+          });
+        }
         return;
       }
       const b = (body ?? {}) as {
@@ -377,6 +392,9 @@ export function ConfirmSend({
             : null) ??
           (typeof b.error === "string" ? b.error : "send_failed");
         setState({ phase: "error", error: err });
+        if (typeof b.summary === "string") {
+          onConfirmedOutcome?.({ summary: b.summary, isError: true });
+        }
         return;
       }
       const r = b.result ?? {};
@@ -392,6 +410,9 @@ export function ConfirmSend({
         skipped: typeof r.skipped === "number" ? r.skipped : 0,
         failed: typeof r.failed === "number" ? r.failed : 0,
       });
+      if (typeof b.summary === "string") {
+        onConfirmedOutcome?.({ summary: b.summary, isError: false });
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "network_error";
       setState({ phase: "error", error: msg });

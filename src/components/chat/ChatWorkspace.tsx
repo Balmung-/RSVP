@@ -8,6 +8,7 @@ import { decideResumeAction } from "./resumeLast";
 import { shouldRefreshOnVisibility } from "./visibilityRefresh";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
+import { appendConfirmedOutcome } from "./confirmedOutcome";
 import type { SessionListItem } from "@/app/api/chat/sessions/handler";
 import { deriveSessionTitle } from "@/lib/ai/session-title";
 import {
@@ -374,6 +375,26 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     return () => document.removeEventListener("visibilitychange", handler);
   }, [refreshSnapshot]);
 
+  // Chat-local live bridge for confirm/import POSTs. Those routes
+  // persist a settled assistant transcript row on the server but do
+  // not stream back over SSE, so without this the open session only
+  // sees the new summary after a manual refresh or visibility bounce.
+  //
+  // The local append gives the operator immediate feedback; the
+  // follow-up snapshot pull keeps widgets + ids authoritative without
+  // asking the operator to reload.
+  const handleConfirmedOutcome = useCallback(
+    (outcome: { summary: string; isError: boolean }) => {
+      setTurns((prev) => appendConfirmedOutcome(prev, outcome));
+      const currentSession = sessionIdRef.current;
+      if (currentSession) {
+        void refreshSnapshot(currentSession);
+      }
+      void refreshSessions();
+    },
+    [refreshSessions, refreshSnapshot],
+  );
+
   // ---- send -------------------------------------------------------
 
   const send = useCallback(async () => {
@@ -608,6 +629,7 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           phase={phase}
           focusRequest={focusRequest}
           onDismissWidget={handleDismissWidget}
+          onConfirmedOutcome={handleConfirmedOutcome}
         />
       </div>
     </div>

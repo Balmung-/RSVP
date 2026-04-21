@@ -50,6 +50,7 @@ export function WorkspaceDashboard({
   phase,
   focusRequest,
   onDismissWidget,
+  onConfirmedOutcome,
 }: {
   widgets: ClientWidget[];
   fmt: FormatContext;
@@ -61,6 +62,15 @@ export function WorkspaceDashboard({
   // `isTerminalConfirmWidget` gate so the button only appears on
   // the kinds + states the server will agree to delete.
   onDismissWidget?: (widgetKey: string) => void;
+  // Confirm/import routes persist a transcript row without an SSE
+  // channel. ChatWorkspace uses this callback to append the summary
+  // locally and then reconcile from the authoritative session
+  // snapshot, keeping the open /chat surface live with no manual
+  // refresh.
+  onConfirmedOutcome?: (outcome: {
+    summary: string;
+    isError: boolean;
+  }) => void;
 }) {
   // W4 focus plumbing. Each rendered widget registers its DOM node
   // via a ref-callback keyed by widgetKey. When `focusRequest`
@@ -176,6 +186,7 @@ export function WorkspaceDashboard({
                       widget={w}
                       fmt={fmt}
                       onDismiss={onDismissWidget}
+                      onConfirmedOutcome={onConfirmedOutcome}
                       locale={fmt.locale}
                     />
                   </div>

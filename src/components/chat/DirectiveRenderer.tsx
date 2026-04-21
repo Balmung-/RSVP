@@ -65,9 +65,14 @@ export type AnyDirective = {
 export function DirectiveRenderer({
   directive,
   fmt,
+  onConfirmedOutcome,
 }: {
   directive: AnyDirective;
   fmt: FormatContext;
+  onConfirmedOutcome?: (outcome: {
+    summary: string;
+    isError: boolean;
+  }) => void;
 }) {
   switch (directive.kind) {
     case "campaign_list":
@@ -114,6 +119,7 @@ export function DirectiveRenderer({
           props={directive.props as unknown as ConfirmSendProps}
           fmt={fmt}
           messageId={directive.messageId}
+          onConfirmedOutcome={onConfirmedOutcome}
         />
       );
     case "workspace_rollup":
@@ -163,6 +169,7 @@ export function DirectiveRenderer({
           props={directive.props as unknown as ConfirmImportProps}
           fmt={fmt}
           messageId={directive.messageId}
+          onConfirmedOutcome={onConfirmedOutcome}
         />
       );
     default:

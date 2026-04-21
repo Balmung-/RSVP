@@ -198,10 +198,15 @@ function targetLabel(target: ConfirmImportProps["target"]): string {
 export function ConfirmImport({
   props,
   messageId,
+  onConfirmedOutcome,
 }: {
   props: ConfirmImportProps;
   fmt: FormatContext;
   messageId?: string;
+  onConfirmedOutcome?: (outcome: {
+    summary: string;
+    isError: boolean;
+  }) => void;
 }) {
   const [state, setState] = useState<ImportState>(() =>
     deriveImportState(props),
@@ -249,6 +254,16 @@ export function ConfirmImport({
             ? String((body as Record<string, unknown>).error)
             : null) ?? `http_${res.status}`;
         setState({ phase: "error", error: err });
+        if (
+          body &&
+          typeof body === "object" &&
+          typeof (body as Record<string, unknown>).summary === "string"
+        ) {
+          onConfirmedOutcome?.({
+            summary: (body as Record<string, unknown>).summary as string,
+            isError: true,
+          });
+        }
         return;
       }
       const b = (body ?? {}) as {
@@ -267,6 +282,9 @@ export function ConfirmImport({
         const err =
           typeof b.error === "string" ? b.error : "import_failed";
         setState({ phase: "error", error: err });
+        if (typeof b.summary === "string") {
+          onConfirmedOutcome?.({ summary: b.summary, isError: true });
+        }
         return;
       }
       const r = b.result ?? {};
@@ -282,6 +300,9 @@ export function ConfirmImport({
         invalid: typeof r.invalid === "number" ? r.invalid : 0,
         errors: typeof r.errors === "number" ? r.errors : 0,
       });
+      if (typeof b.summary === "string") {
+        onConfirmedOutcome?.({ summary: b.summary, isError: false });
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "network_error";
       setState({ phase: "error", error: msg });
