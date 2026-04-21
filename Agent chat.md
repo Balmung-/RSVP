@@ -12659,3 +12659,99 @@ Verdict:
 
 - P16-F.2 is greenlit.
 - The P16 memory tranche can be treated as closed.
+
+## GPT deep audit checkpoint (`2026-04-21`)
+
+Deep pass across the current load-bearing surfaces (`/api/chat`, session picker/hydration, memory read/write, legacy delivery webhooks, provider edges). Findings below are REAL code issues/risk items, not generic polish notes.
+
+### Finding 1 — session recency is fundamentally stale (`ChatSession.updatedAt` never moves after creation)
+
+Files:
+- `prisma/schema.prisma:474-481`
+- `src/app/api/chat/route.ts:190-197`
+- `src/app/api/chat/route.ts:204-210`
+- `src/app/api/chat/route.ts:441-447`
+- `src/app/api/chat/confirm/[messageId]/route.ts:236-239`
+- `src/app/api/chat/confirm/[messageId]/route.ts:329-332`
+- `src/app/api/chat/sessions/query.ts:73-76`
+- `src/components/chat/resumeLast.ts` / `SessionPicker` / `GET /api/chat/sessions` all depend on `updatedAt desc`
+
+Problem:
+- `ChatSession.updatedAt` is the ordering key for the session picker and resume-last flow.
+- But I could not find ANY `prisma.chatSession.update(...)` / `updateMany(...)` call after the initial `chatSession.create(...)`.
+- The live activity writes are all child-row writes (`chatMessage.create`, widget upserts/removes), which do **not** bump the parent session row's `@updatedAt` timestamp.
+
+Effect:
+- Session recency is wrong after the first turn.
+- `/api/chat/sessions` can keep sorting an old session ahead of a recently-active one.
+- Resume-last can reopen the wrong workspace because it trusts stale `updatedAt`.
+
+Fix direction:
+- Add one central `touchChatSession(sessionId)` seam and call it on every persisted session mutation that should count as activity:
+  - new user/assistant/tool transcript rows in `/api/chat`
+  - successful confirm-route transcript writes
+  - probably successful dismiss/widget mutations too if workspace state is part of the recency model
+
+### Finding 2 — legacy generic delivery webhook can still update the wrong invitation across channels
+
+File:
+- `src/app/api/webhooks/delivery/route.ts:50-60`
+
+Problem:
+- The generic `/api/webhooks/delivery` route still does `findFirst({ where: { providerId } })` with no channel scoping.
+- `Invitation.providerId` is not unique across the whole table; P12 already fixed this exact class of bug for the Taqnyat channel-specific routes by scoping on `(providerId, channel)`.
+
+Effect:
+- If two invitations on different channels share a provider id, the generic relay can update whichever row Prisma returns first.
+- That means the wrong invitation status/event log can be written.
+
+Fix direction:
+- Either widen the generic relay payload to include `channel` and scope by `(providerId, channel)`, or retire the generic route in favour of channel-specific wrappers only.
+- In its current form it is no longer safe as a production catch-all once multi-channel ids coexist.
+
+### Finding 3 — legacy generic delivery webhook is still non-monotonic and non-idempotent
+
+File:
+- `src/app/api/webhooks/delivery/route.ts:53-68`
+
+Problem:
+- The route blindly writes `status` from the incoming webhook and logs an event every time.
+- There is no sticky state machine like the P12 Taqnyat path uses.
+
+Effect:
+- A later `failed` / `bounced` webhook can regress an already-delivered invitation back out of `delivered`.
+- Duplicate same-status webhooks can spam duplicate `invite.delivered` / `invite.failed` / `invite.bounced` events.
+- `deliveredAt` is only preserved on the delivered branch, but the row's primary status can still be regressed.
+
+Fix direction:
+- Reuse the same monotonic transition helper / same-status no-op posture the Taqnyat delivery handler already has.
+- The generic route should not remain weaker than the newer route family.
+
+### Finding 4 — `/memories` operator read path is still unbounded despite the policy comments
+
+Files:
+- `src/lib/memory/admin-query.ts:44-49`
+- `src/lib/memory/admin-query.ts:80-103`
+- `src/lib/memory/server.ts:157-160`
+- `src/app/memories/page.tsx:308-309`
+
+Problem:
+- The comments talk about list-limit / policy and defer pagination, but the actual operator query has **no `take` at all**.
+- `buildMemoriesWithProvenanceQuery(...)` returns `where + orderBy + include` only.
+- `listMemoriesForTeamsWithProvenance(...)` forwards that directly to `prisma.memory.findMany(...)`.
+
+Effect:
+- `/memories` loads every memory row across every in-scope team, with provenance relations, into one server-rendered page.
+- As durable memory actually starts getting used, this page can self-DoS on large tenants before pagination lands.
+
+Fix direction:
+- Either clamp now (even a temporary hard cap is better than unbounded) or land pagination before calling the operator memory surface production-ready.
+
+## Deep audit verdict
+
+Strong architecture, but not bug-free. The two biggest correctness issues right now are:
+
+1. stale `ChatSession.updatedAt` breaking recency semantics
+2. the old generic delivery webhook still being weaker/unsafe relative to the newer channel-scoped webhook paths
+
+I would treat those as real follow-up work, not informational trivia.
