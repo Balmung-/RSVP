@@ -16142,3 +16142,59 @@ If Claude resumes after this checkpoint, the next product tranche should build o
 ### 2026-04-21 - GPT hash note - P17-F
 
 The code hash for the P17-F tranche above is `8f1d235` (`P17-F: keep chat summary live via snapshot refresh`).
+### 2026-04-21 - GPT tranche - P17-G (`hash pending`)
+
+Verdict: **landed by GPT**.
+
+What shipped in the working tree:
+- Closed the gap where the WhatsApp invitation "PDF" path was only enforced by the browser picker.
+- Campaign create/edit binding now accepts `whatsappDocumentUploadId` only when the upload is:
+  - owned by the operator (`uploadedBy = me.id`)
+  - `contentType = application/pdf`
+- The preflight blocker layer now treats both cases as `no_whatsapp_document`:
+  - missing/deleted upload
+  - existing upload with non-PDF MIME
+- `propose_send` now:
+  - looks up `filename + contentType`
+  - blocks non-PDF uploads before render
+  - only shows the "Will attach PDF" readiness line when the row is actually a PDF
+- `send_campaign` now re-enforces the same PDF check server-side before fan-out.
+- The delivery edge in `src/lib/delivery.ts` now fails closed with `doc_not_pdf` if an old/bad row still reaches the sender.
+- ConfirmSend copy now tells the operator exactly what to fix: re-upload a PDF on the campaign edit page.
+
+Files touched:
+- `src/lib/uploads.ts`
+- `src/app/campaigns/new/page.tsx`
+- `src/app/campaigns/[id]/edit/page.tsx`
+- `src/lib/ai/tools/send-blockers.ts`
+- `src/lib/ai/tools/propose_send.ts`
+- `src/lib/ai/tools/send_campaign.ts`
+- `src/lib/delivery.ts`
+- `src/components/chat/directives/ConfirmSend.tsx`
+- `tests/unit/send-blockers-whatsapp.test.ts`
+- `tests/unit/send-whatsapp.test.ts`
+
+Why this matters for the pilot:
+- The approved Taqnyat template is a **document PDF** header. Before this slice, a crafted POST could still bind a DOCX/TXT/etc. upload and the delivery edge would try to send it.
+- This slice makes the pilot contract true at every layer:
+  1. bind-time
+  2. preview/blocker-time
+  3. confirm/send-time
+  4. delivery-edge
+
+Verification on my side:
+- `npm test` -> 1704/1704 pass
+- `npx tsc --noEmit` -> clean
+- `NODE_ENV=production npx next build` -> clean
+- `NODE_ENV=production npm run build` still hits the same local Windows Prisma DLL rename lock; that is environment noise, not a code failure
+
+Recommended next move from this checkpoint:
+1. Keep the pilot chat-first.
+2. Do **not** widen admin/manual-send surfaces next.
+3. Next tranche should be a true client-pilot `/chat` tranche:
+   - runtime/env proof on the real backend
+   - one real `/chat` WhatsApp PDF send proof
+   - operator-visible failure/recovery on the same `/chat` path
+### 2026-04-21 - GPT hash note - P17-G
+
+The code hash for the P17-G tranche above is `03a8939` (`P17-G: enforce PDF-only WhatsApp document path`).
