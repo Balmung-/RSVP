@@ -15313,3 +15313,89 @@ need to happen and the P17-C tranche ships.
 Also pending: GPT's written verdicts on C.2 / C.3 / C.4 notepads
 (the tranche has been advancing serially while those audit
 rounds happen asynchronously).
+
+
+## P17-C.6 scouting + P17-C tranche closeout — 2026-04-21
+
+### Scouting question
+
+Per the C.5 notepad's next step: whether `confirm_send` needs
+any aggregate blockers beyond C.5 (e.g. "all selected invitees
+share a common template language"). If nothing new surfaces, C.6
+doesn't land and the P17-C tranche ships.
+
+### Hypotheses considered
+
+1. **Cross-invitee template-language consistency.** No-op at the
+   schema level. `Campaign.templateWhatsAppLanguage` is a single
+   scalar on the campaign row; `Invitee` has no per-recipient
+   template override. Every invitee gets the same (name, language)
+   pair by construction. No aggregate check possible or needed.
+
+2. **Doc byte-length preflight (`doc_empty`).** Out of scope.
+   `/api/uploads` already rejects zero-byte files at write time;
+   delivery edge already emits `doc_empty` per-invitation (C.3);
+   C.5 explicitly declared byte-length + MIME non-goals
+   ("delivery-edge concerns"). No motivating gap.
+
+3. **Content-type preflight (`doc_not_pdf`).** Out of scope —
+   belongs with a future UI slice. Grep confirms
+   `whatsappDocumentUploadId` has no operator-facing write path
+   in `src/app/` today; the field is schema-only. When the
+   campaign-edit UI exposes it, the assignment picker should gate
+   on MIME at pick time (symmetric with the upload route). Landing
+   a preflight blocker ahead of the UI bakes a constraint into
+   send-time that isn't enforced at assignment-time — wrong slice
+   ordering.
+
+4. **All-invitees-unreachable aggregate.** Already covered by
+   `no_ready_messages` + per-channel `by_channel` buckets.
+   Nothing new to add.
+
+5. **Per-invitee failure mode inventory** (from
+   `performWhatsAppSend` + `resolveInternalDocLink`):
+   - `no_phone` / `unsubscribed` → audience buckets.
+   - `no_template` / `template_vars_malformed` → existing
+     blockers.
+   - `doc_not_found` → C.5's `no_whatsapp_document`.
+   - `doc_upload_deps_missing` → config error, not
+     operator-fixable; correct to surface as per-invitation error.
+   - `doc_link_not_internal` → defensive, planner-internal
+     invariant; not operator-fixable.
+   - `doc_empty` + Meta upload errors → runtime / delivery-edge,
+     not preflightable without re-reading bytes or round-tripping
+     to Meta.
+
+   No per-invitee failure class emerges as a candidate for a new
+   aggregate-preflight blocker.
+
+### Verdict — P17-C tranche shipped
+
+C.6 does NOT land. The P17-C tranche ships as five slice commits
+on `origin/main`:
+
+- C.1 (schema + gate predicate) → `4ef6a68`
+- C.2 (planner link placeholder) → `ccad607`
+- C.3 (delivery-edge just-in-time upload intercept) → `33a6184`
+- C.4 (post-swap payload provenance) → `9010e11`
+- C.5 (ConfirmSend + widget validator + blocker end-to-end) →
+  `63ae3f5`
+
+Operators can now see a WhatsApp-PDF campaign's readiness
+end-to-end inside chat (C.5 surface), and the planner + delivery
+edge honor Meta's header-document component (C.1–C.4).
+
+### Tranche-adjacent, not tranche-blocking
+
+- **Campaign-edit UI for `whatsappDocumentUploadId`.** No
+  operator can set the field via UI today — schema-only,
+  settable via Prisma Studio or a migration. A future slice (P17-D
+  or a dedicated tranche) should expose it on the campaign-edit
+  page with a MIME-gated file picker.
+
+- **Re-upload CTA on the `no_whatsapp_document` blocker row.**
+  C.5 is prose ("re-upload on the campaign edit page"), not a
+  first-class button. Lands with the UI slice above.
+
+- **GPT verdicts on C.2 / C.3 / C.4 / C.5 notepads.**
+  Asynchronous; audit rounds run alongside shipping.
