@@ -15135,3 +15135,181 @@ blocker set needs to grow (e.g. aggregate check "all selected
 invitees share a common template-language"), the send-blockers
 helper gets the extension. Otherwise, C.5 is the last slice in
 the P17-C tranche and the tranche ships.
+
+---
+
+## P17-C.5 hash 63ae3f5 — WhatsApp PDF readiness end-to-end (2026-04-21)
+
+### What lands
+
+C.5 is the first end-to-end chat-path proof slice for the P17-C
+tranche — the operator now visibly sees the invitation-PDF flow
+from inside the chat widgets, not just from server-side delivery
+effects.
+
+**Four surfaces updated in one slice:**
+
+1. **`src/lib/ai/tools/send-blockers.ts`** — `CampaignForBlockers`
+   gains `whatsappDocumentUploadId: string | null`.
+   `computeBlockers` accepts a new optional
+   `docUploadExists?: boolean` and emits a new blocker code
+   `no_whatsapp_document` iff ALL of:
+     - channel set includes WhatsApp (scalar `"whatsapp"` or
+       umbrella `"all"` — NOT `"both"`);
+     - `campaignWantsWhatsAppDocument(...)` returns true (both
+       template fields AND a non-empty upload id present);
+     - `docUploadExists === false` (strict — undefined / true
+       skip the blocker).
+
+2. **`src/lib/ai/tools/propose_send.ts`** — selects
+   `whatsappDocumentUploadId`; when the gate predicate is true,
+   loads the FileUpload row (filename only) and threads
+   `docUploadExists` into `computeBlockers`. Widens the
+   `template_preview` props envelope with
+   `whatsapp_document: { filename } | null`.
+
+3. **`src/lib/ai/tools/send_campaign.ts`** — mirrors the select
+   widening + FileUpload existence check + blocker threading at
+   confirm time, so a forged POST / bad history rehydrate that
+   hits the confirm route against a campaign whose upload was
+   deleted is refused with `no_whatsapp_document` before any
+   invitation fan-out. Selects `id` only here — this tool
+   enforces, it doesn't preview.
+
+4. **`src/components/chat/directives/ConfirmSend.tsx`** —
+   `ConfirmSendProps.template_preview.whatsapp_document` typed;
+   renders a new "Will attach PDF: <filename>" row under the
+   WhatsApp template identity row. `BLOCKER_LABEL` gains a
+   `no_whatsapp_document` entry pointing the operator at the
+   edit page.
+
+**Validator symmetry (both widget and directive sides):**
+
+5. **`src/lib/ai/widget-validate.ts`** / **`src/lib/ai/directive-validate.ts`** —
+   mirrored `validateWhatsAppDocumentLabel` helpers
+   (`null | { filename: nonEmpty }`). The field is REQUIRED on
+   every post-C.5 `confirm_send` blob — a missing field is
+   drift and fails closed, same discipline D.2 applied to
+   `whatsapp_template`.
+
+### Design calls
+
+- **`computeBlockers` stays pure.** The Prisma lookup for the
+  FileUpload row lives in the caller, not the helper — matches
+  the existing pattern where `audience` is loaded outside and
+  passed in. This keeps the blocker helper unit-testable without
+  prisma and lets the caller batch the lookup with its other
+  reads.
+
+- **Optional `docUploadExists` with three-state semantic.**
+  `undefined` is treated as "caller opted out of the check" — NOT
+  "doc is missing". This is load-bearing: pre-C.5 callers that
+  pass no flag don't suddenly start emitting a false-positive
+  blocker, and a caller that does the lookup and gets a present
+  row passes `true`.
+
+- **Blocker scoped by predicate.** `no_whatsapp_document` only
+  fires when `campaignWantsWhatsAppDocument(...)` is true — so a
+  campaign whose template is misconfigured (predicate returns
+  false) surfaces `no_whatsapp_template` instead, not a stacked
+  doc blocker. The fix-order stays: template first, then doc.
+
+- **`whatsapp_document` required on every blob (not optional).**
+  Mirrors D.2's stance on `whatsapp_template`. Missing = drift,
+  reject. The renderer's branching stays a simple truthy check
+  on null vs populated; it never has to discriminate "undefined
+  vs null" to decide whether the pre-C.5 blob is OK.
+
+- **Render placement under the template identity row.** The PDF
+  is an attachment on THAT template (not an alternative artifact),
+  so rendering the readiness line immediately below
+  `whatsapp_template` reads naturally. Filename rendered in slate
+  tone (not `font-mono`) because it's a user-facing filename, not
+  an identifier.
+
+- **Directive-side validator updated too.** Even though
+  propose_send emits widgets (W3 migration), the directive-side
+  `confirm_send` validator is kept structurally identical on
+  purpose (per the "independent validators" comment at the file
+  tops). Extending one without the other would drift the two
+  trust gates; the mirrored test suites catch that on review.
+
+### What does NOT land in C.5
+
+- **No migration for existing rows.** Widget blobs written before
+  C.5 will fail the new validator gate on reload — they'd get
+  filtered out by the `validateWidgetProps` read-path guard and
+  the workspace dashboard would render without them. This is
+  acceptable because the tool emissions always write the full
+  current-shape props, so the next `propose_send` call replaces
+  the stale blob. If that becomes a problem (operator leaves a
+  browser tab on a pre-C.5 session for weeks), a one-line
+  defaulter could be added to `rowToWidget`.
+- **No filename truncation.** The widget renders the full
+  filename. Worst-case operators might upload a 200-char filename
+  that blows out the card layout. The upload pipeline has its own
+  filename cap (Prisma `VARCHAR` default); the card doesn't pile
+  on a second one. If a long filename breaks the layout in
+  practice, a `clip(..., N)` over the filename is trivial to add.
+- **No clickable re-upload CTA.** The `no_whatsapp_document`
+  blocker copy points the operator at "the campaign edit page"
+  in prose. A first-class "Re-upload PDF" button in the blocker
+  row would close the loop faster but involves cross-surface
+  routing work outside C.5 scope.
+- **No empty-file / MIME re-check at this layer.** C.3 owns the
+  delivery-edge `doc_empty` guard + Taqnyat's MIME validation;
+  C.5 is a preflight "does the reference resolve?" check only.
+
+### Audit asks for GPT
+
+1. **Optional `docUploadExists` three-state semantic.** I treat
+   `undefined` as opt-out (no blocker) and `false` as "row is
+   missing, emit blocker." Alternative: make it required, force
+   every caller to do the lookup or pass `true` to bypass. My
+   read: optional + undefined-as-opt-out is the non-breaking
+   evolution path (unaffected callers don't change); explicit
+   required would be cleaner at a higher refactor cost. Agree?
+
+2. **FileUpload lookup in the tool handler, not the helper.**
+   Keeps `computeBlockers` a pure unit-testable function. Con:
+   each tool handler duplicates the same 6-line predicate-guarded
+   lookup (propose_send and send_campaign have near-identical
+   blocks now). Worth extracting to a `loadDocExistenceFor(campaign)`
+   helper, or is the tiny duplication fine?
+
+3. **`whatsapp_document` required on every blob.** Mirrors D.2's
+   stance on `whatsapp_template`. Pre-C.5 blobs in the DB will
+   fail the new validator. This is the "fail closed on drift"
+   design we've committed to. Are we comfortable with a soft
+   widget disappearance for stale blobs, or should `rowToWidget`
+   default-fill the field at read time (so old blobs keep
+   rendering)?
+
+4. **Validator duplication (widget + directive).** I updated both
+   `widget-validate.ts` and `directive-validate.ts` +
+   `validateWhatsAppDocumentLabel` in both. File-top comments
+   explain why they're kept independent, but in C.5 the directive
+   path isn't actively emitting `confirm_send` anywhere I found.
+   Is the directive validator dead code I should retire in a
+   separate slice, or is there a remaining producer path (legacy
+   rehydration?) I missed?
+
+5. **Filename as user-facing label.** The card renders the
+   operator-uploaded filename verbatim. Meta doesn't attach
+   filename metadata to the message itself (the recipient sees
+   the PDF with whatever filename Meta serves), so showing the
+   operator-chosen filename is our UI contract, not a
+   protocol-level truth. Worth calling out with a `<title>` /
+   tooltip that the recipient won't see this name, or is it
+   clear enough from context?
+
+### Next step
+
+P17-C.6 — scouting whether `confirm_send` needs any aggregate
+blockers beyond C.5 (e.g. "all selected invitees share a common
+template language"). If nothing new surfaces, C.6 doesn't
+need to happen and the P17-C tranche ships.
+
+Also pending: GPT's written verdicts on C.2 / C.3 / C.4 notepads
+(the tranche has been advancing serially while those audit
+rounds happen asynchronously).
