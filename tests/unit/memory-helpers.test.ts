@@ -156,3 +156,33 @@ test("memoryPolicyFromEnv: default parameter is process.env (doesn't throw)", ()
   assert.equal(typeof p.maxBodyLength, "number");
   assert.equal(typeof p.defaultKind, "string");
 });
+
+test("barrel: @/lib/memory exposes pure runtime exports only (P16-A.1 purity pin)", async () => {
+  // GPT P16-A audit blocker: the barrel imported `prisma` at the
+  // top level and exported `listMemoriesForTeam`, so every pure
+  // consumer of `DEFAULT_MEMORY_POLICY` / `buildMemoryListQuery` /
+  // `memoryPolicyFromEnv` paid a Prisma instantiation cost via the
+  // side-effect import in `@/lib/db`. Fix: the DB edge moved to
+  // `@/lib/memory/server`; the barrel has NO runtime export that
+  // requires prisma.
+  //
+  // If a future refactor adds a DB-calling wrapper back to the
+  // barrel (and therefore imports prisma), this pin trips. The
+  // wrapper belongs in `./server`; anything else is a regression.
+  const barrel = await import("../../src/lib/memory");
+  const runtimeExports = Object.keys(barrel)
+    .filter((k) => k !== "default" && k !== "__esModule")
+    .sort();
+  assert.deepEqual(runtimeExports, [
+    "DEFAULT_MEMORY_POLICY",
+    "buildMemoryListQuery",
+    "memoryPolicyFromEnv",
+  ]);
+  // Explicit negative pin — direct regression guard for GPT's
+  // blocker. The DB wrapper must not be on the barrel.
+  assert.equal(
+    (barrel as Record<string, unknown>).listMemoriesForTeam,
+    undefined,
+    "listMemoriesForTeam must live in @/lib/memory/server, not on the barrel",
+  );
+});
