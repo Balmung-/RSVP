@@ -14315,3 +14315,77 @@ You are no longer blocked on P17-B.
 The only thing between here and `main` is integrating the already-green
 `/chat` live-update slice cleanly and keeping `.claude/` out unless
 intended.
+## Integration log — GPT /chat live-update slice committed as fcc8d63 (2026-04-21)
+
+Sits after the P17-B re-audit verdict (397a1c0) per the integration
+order the verdict spelled out. This is the step-2 commit: "Commit
+the GPT-owned `/chat` live-update slice as its own clean unit."
+
+### What landed
+
+Hash: `fcc8d63`. 9 files, +186 / -2:
+
+- `src/components/chat/confirmedOutcome.ts` (new, pure)
+- `src/components/chat/ChatWorkspace.tsx` (workspace-owned callback)
+- `src/components/chat/WorkspaceDashboard.tsx`,
+  `WidgetRenderer.tsx`, `DirectiveRenderer.tsx` (optional prop
+  threaded through the renderer chain)
+- `src/components/chat/directives/ConfirmSend.tsx`,
+  `ConfirmImport.tsx` (call the callback at each exit path
+  carrying a persisted summary)
+- `tests/unit/confirmed-outcome.test.ts` (new, 3 pins) + wired
+  into `package.json` test script
+
+All new props are optional — no call-site migration forced.
+
+### Why this closes Directive B (2026-04-21)
+
+Before this slice, confirm_send / confirm_import POSTs persisted the
+settled assistant row server-side but didn't stream back over SSE.
+The open `/chat` session only saw the new summary after a manual
+refresh or visibility bounce. Directive B made "same open chat
+updates live — no refresh allowed" a pilot blocker.
+
+The slice's bridge is narrow and correct:
+
+1. Optimistic local append via pure `appendConfirmedOutcome` helper.
+2. Silent `refreshSnapshot(currentSession)` to reconcile widgets + ids
+   from `GET /api/chat/session/:id` (authoritative).
+3. `refreshSessions()` so the left-rail session list keeps recency.
+
+The `/api/chat` SSE path is unchanged. No new route, no new server
+action, no schema change.
+
+### Residual (not a P17-C blocker)
+
+This bridge covers operator-triggered confirm/import POSTs. It does
+NOT create a live push path for webhook-driven delivery-state
+changes (delivered/bounced/etc.) to surface inside an open chat
+session. If P17-C needs that, it grows by one seam; if not, this
+bridge is enough for the first pilot proof.
+
+### Combined-tree verification (post-integration, pre-push)
+
+Fresh on `fcc8d63`:
+
+- `npm test` — 1618 / 1618 pass (prior 1615 + 3 new pure-helper pins).
+- `npx tsc --noEmit` — clean.
+- `npx next build` — clean (first-load JS shared 87.3 kB).
+
+### What's still outside the tree
+
+- `.claude/` — local CLI session state. Kept out per the re-audit's
+  explicit direction ("Do NOT include `.claude/` unless there is an
+  explicit reason to ship it"). Still untracked; not gitignored yet
+  because adding the gitignore entry itself is a non-zero ship
+  decision I'm deferring to an explicit ask.
+
+### Next move
+
+Per the re-audit's remaining steps:
+
+5. Push `main`.
+6. Only then start P17-C.
+
+Executing step 5 now. P17-C design scouting (per the questions in
+`.p17b-notepad.md` line ~238) starts only after push lands cleanly.
