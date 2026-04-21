@@ -14,6 +14,7 @@ import {
 } from "@/lib/ai/widgetKeys";
 import { tryRefreshSummaryForConfirm } from "@/lib/ai/workspace-summary";
 import { classifyPreClaim } from "@/lib/ai/confirm-preclaim";
+import { touchChatSession } from "@/lib/chat/session-activity";
 
 // The confirmation endpoint for destructive AI actions.
 //
@@ -219,16 +220,24 @@ export async function POST(
       parsedInput,
       ctx,
       {
-        claim: () =>
-          prisma.chatMessage.updateMany({
+        claim: async () => {
+          const r = await prisma.chatMessage.updateMany({
             where: { id: row.id, confirmedAt: null },
             data: { confirmedAt: new Date() },
-          }),
+          });
+          // Claim write — session-activity. Bumping the parent so
+          // the claimed session floats to the top of the picker
+          // even when the caller won't post a follow-up message.
+          // See `src/lib/chat/session-activity.ts`.
+          await touchChatSession(prisma, row.sessionId);
+          return r;
+        },
         release: async () => {
           await prisma.chatMessage.updateMany({
             where: { id: row.id },
             data: { confirmedAt: null },
           });
+          await touchChatSession(prisma, row.sessionId);
         },
         dispatchSend: (input, c) =>
           dispatch("send_campaign", input, c, { allowDestructive: true }),
@@ -236,6 +245,7 @@ export async function POST(
           await prisma.chatMessage.create({
             data: { sessionId, role: "assistant", content, isError },
           });
+          await touchChatSession(prisma, sessionId);
         },
         auditConfirm: ({ sessionId, data }) =>
           logAction({
@@ -313,16 +323,20 @@ export async function POST(
       parsedInput,
       ctx,
       {
-        claim: () =>
-          prisma.chatMessage.updateMany({
+        claim: async () => {
+          const r = await prisma.chatMessage.updateMany({
             where: { id: row.id, confirmedAt: null },
             data: { confirmedAt: new Date() },
-          }),
+          });
+          await touchChatSession(prisma, row.sessionId);
+          return r;
+        },
         release: async () => {
           await prisma.chatMessage.updateMany({
             where: { id: row.id },
             data: { confirmedAt: null },
           });
+          await touchChatSession(prisma, row.sessionId);
         },
         dispatchCommit: (input, c) =>
           dispatch("commit_import", input, c, { allowDestructive: true }),
@@ -330,6 +344,7 @@ export async function POST(
           await prisma.chatMessage.create({
             data: { sessionId, role: "assistant", content, isError },
           });
+          await touchChatSession(prisma, sessionId);
         },
         auditConfirm: ({ sessionId, data }) =>
           logAction({

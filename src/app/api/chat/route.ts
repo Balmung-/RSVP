@@ -17,6 +17,7 @@ import { tryRefreshSummaryForChatTool } from "@/lib/ai/workspace-summary";
 import { gateRuntimeForChatRoute } from "./runtime-gate";
 import { handleToolSuccess } from "./handle-tool-success";
 import { deriveSessionTitle } from "@/lib/ai/session-title";
+import { touchChatSession } from "@/lib/chat/session-activity";
 import type {
   InternalAssistantContent,
   InternalMessage,
@@ -209,6 +210,11 @@ export async function POST(req: Request) {
     },
     select: { id: true },
   });
+  // Recency-bump AFTER the child write is durable. `@updatedAt` on
+  // ChatSession doesn't fire on child-row INSERT, so the session
+  // picker / resume-last ordering would otherwise see a stale
+  // parent timestamp. See `src/lib/chat/session-activity.ts`.
+  await touchChatSession(prisma, sessionId);
 
   // Build the tenant awareness + tool ctx. Both are request-scoped
   // via React.cache(); calling them from multiple places in this
@@ -445,6 +451,7 @@ export async function POST(req: Request) {
               content: assistantText,
             },
           });
+          await touchChatSession(prisma, sessionId);
 
           // If the model didn't request tools, we're done. The
           // stream produced its final text already.
@@ -543,6 +550,7 @@ export async function POST(req: Request) {
               },
               select: { id: true },
             });
+            await touchChatSession(prisma, sessionId);
 
             if (result.ok) {
               // Directive emit + widget upsert + summary-rollup
