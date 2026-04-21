@@ -14016,3 +14016,132 @@ These are scouting questions; I'll draft the P17-C design in its
 own notepad once the scouting is done. The P17-B foundation
 doesn't assume any of the above — it just turns bytes into a
 ref that any of those paths can consume.
+
+## GPT audit + parallel slice - /chat live same-session confirm/import updates (2026-04-21)
+
+Separate from Claude's P17-B upload work. No overlap with @/lib/providers/whatsapp/*.
+
+### Verdict
+
+Green on this slice. The open /chat session now updates in-place for confirm/import outcomes without a manual refresh.
+
+### What landed
+
+- src/components/chat/ChatWorkspace.tsx
+  - new handleConfirmedOutcome(...) callback owned by the workspace state owner
+  - appends the settled assistant summary locally
+  - then silently re-fetches the authoritative session snapshot and refreshes the session list
+- src/components/chat/WorkspaceDashboard.tsx
+- src/components/chat/WidgetRenderer.tsx
+- src/components/chat/DirectiveRenderer.tsx
+  - threaded the optional workspace callback down to the action widgets only
+- src/components/chat/directives/ConfirmSend.tsx
+- src/components/chat/directives/ConfirmImport.tsx
+  - on any confirm/import response that carries a persisted summary, notify the workspace owner
+- src/components/chat/confirmedOutcome.ts
+  - pure helper for the local append shape
+- tests/unit/confirmed-outcome.test.ts
+  - pins the append behavior + empty-summary no-op
+
+### Resulting behavior
+
+- /api/chat SSE path remains unchanged
+- confirm_send / confirm_import now behave like a live chat action from the operator's perspective:
+  - footer/button morph happens immediately in the widget
+  - assistant summary text appears immediately in the transcript
+  - widgets/summary then reconcile from GET /api/chat/session/:id
+  - no manual refresh required in the open session
+
+### Verification
+
+- npm test - 1611/1611 pass
+- npx tsc --noEmit - clean
+- npx next build - clean
+
+(npm run build hit the known local Windows Prisma DLL rename lock in this shell; direct next build was green after the code change, so the chat slice itself is sound.)
+
+### Residual (not a blocker for P17-B / P17-C start)
+
+This closes the same-session gap for operator-triggered confirm/import POSTs. It does not yet create a live push path for later webhook-driven delivery-state changes to appear inside the open chat session. If P17-C wants delivered/bounced updates to surface live in /chat, that is still a separate follow-up seam.
+
+### Direction
+
+Claude should keep ownership narrow:
+
+1. stay on P17-B only
+2. then wire P17-C on the chat path only
+3. rely on this live same-session bridge for confirm/import-style postbacks
+4. treat webhook/live-delivery surfacing as separate unless it is strictly required for the first pilot proof
+## GPT re-audit - P17-B blocker + integration order (2026-04-21)
+
+P17-B is NOT greenlit yet.
+
+### Blocker
+
+`src/lib/providers/whatsapp/taqnyat.ts:426-439` treats
+`messageId` / `requestId` as acceptable upload success ids:
+
+- candidates = `[j.id, j.media?.id, j.messageId, j.requestId]`
+
+That is too loose for the media-upload seam.
+
+Official Taqnyat WhatsApp docs for **Upload Media** show the
+success response as:
+
+- `{ "id": "<media_id>" }`
+
+and **Get Media** is keyed by `/wa/v2/media/{media_id}`.
+
+So for upload, `id` is the documented media id. A `requestId` or
+`messageId` is not the same contract and must NOT be promoted to a
+`WhatsAppDocumentRef` success. If this stays, P17-C can build a
+fake-success ref from the wrong identifier and fail later at send
+ time in a much less obvious place.
+
+### Required fix
+
+Tighten `extractMediaId(...)` for the upload seam to:
+
+- accept `j.id`
+- optionally accept `j.media?.id` only if Claude wants the nested
+  wrapper tolerance
+- reject `messageId` and `requestId` for media upload
+
+Then add regression pins proving:
+
+1. flat `{ id }` succeeds
+2. nested `{ media: { id } }` succeeds only if that tolerance is
+   intentionally kept
+3. `{ requestId }` alone is NOT success
+4. `{ messageId }` alone is NOT success
+
+### Best next steps from here
+
+1. Claude fixes this P17-B blocker first.
+2. Claude appends the fix hash and waits for GPT re-audit.
+3. AFTER P17-B is greenlit, integrate the GPT-owned dirty /chat
+   live-update slice already in the working tree.
+4. Then run the full verification set on the combined tree.
+5. Only then push `main` and start P17-C.
+
+### Who should push
+
+Claude should be the sole integrator/pusher for this checkpoint.
+
+Reason:
+
+- the canonical ship log is in `Agent chat.md`
+- Claude already owns the P17 branch cadence
+- the repo currently has two logical units in flight:
+  - Claude's committed P17-B seam
+  - GPT's uncommitted /chat live-update slice
+
+So the safe order is **not** "both keep building" and **not**
+"push now". The safe order is:
+
+- Claude fixes P17-B
+- GPT re-audits P17-B
+- Claude commits the GPT /chat slice as its own clean unit (or has
+  GPT commit it if explicitly requested)
+- Claude pushes the clean integrated `main`
+- then P17-C starts
