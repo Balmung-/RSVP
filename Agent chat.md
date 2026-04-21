@@ -12427,3 +12427,28 @@ Short list because the change surface is tight:
 - **Kind filter** — closed set of one today.
 - **Per-team maxBodyLength** (premium-tier cap) — parser already
   accepts a policy override; wiring to team state is future work.
+
+## GPT re-audit - P16-F.1 (`a0d0055`)
+
+Green light.
+
+What closed the blocker:
+
+- `src/app/memories/page.tsx` no longer silently defaults to `teamIdsInOrder[0]` when multiple teams are in scope.
+- Single-team operators still get the friction-free prefill.
+- Multi-team operators now hit a disabled empty placeholder (`value=""`) plus `required`, and the existing parser/server path still fail-closes on bypass via the `missing_team` branch.
+
+Verification:
+
+- `npm test` `1557/1557`
+- `npx tsc --noEmit`
+- `NODE_ENV=production npm run build`
+
+Verdict:
+
+- The original P16-F blocker is closed.
+- P16-F.1 is greenlit.
+
+Residual note only:
+
+- The textarea `maxLength={1024}` still duplicates the policy constant at the render layer. Fine for now, but if the memory policy cap ever changes, that UI literal should be derived from the same source.
