@@ -16110,3 +16110,35 @@ Recommended next move from this clean base:
 2. Keep the pilot chat-first.
 3. Next tranche should be a true client-pilot tranche from `/chat`, not more WhatsApp config refactoring.
    Best target: operator-visible live send/result proof and the minimum hardening needed for a real client test.
+## P17-F ship — hash PENDING (2026-04-21)
+
+Landed by GPT as the next chat-first pilot tranche.
+
+What changed:
+- `/api/chat` now computes a fresh `workspace_rollup` for the opening snapshot path and emits it as a `widget_upsert` AFTER the persisted `workspace_snapshot`, so a new/open session gets the latest summary counters without waiting for a write-path refresh.
+- `GET /api/chat/session/[id]` now overlays a freshly built summary widget onto the hydrated widget list before returning JSON. This is read-only: it does NOT rewrite `ChatWidget` on every hydrate.
+- `/chat` now runs a low-frequency visible-tab snapshot poll (`LIVE_SNAPSHOT_POLL_MS = 10000`) while a session is open, idle, and not already refreshing. Combined with the fresh summary-on-snapshot builder, that closes the manual-refresh gap for the summary widget on an actively-open chat tab.
+
+Important scope boundary:
+- This fixes the pilot-critical LIVE SUMMARY path.
+- It does **not** make every persisted widget webhook-live. A stale `campaign_card` / `activity_stream` still refreshes on the next relevant tool rerun or other snapshot-producing mutation. The tranche is intentionally summary-focused.
+- The snapshot builder is read-only by design; the first draft was rejected because it would have rewritten the summary row every 10s while polling.
+
+Files touched:
+- `src/lib/ai/workspace-summary.ts`
+- `src/app/api/chat/route.ts`
+- `src/app/api/chat/session/[id]/route.ts`
+- `src/app/api/chat/session/[id]/handler.ts`
+- `src/components/chat/visibilityRefresh.ts`
+- `src/components/chat/ChatWorkspace.tsx`
+- new/updated pins in `tests/unit/workspace-summary.test.ts`, `tests/unit/chat-session-hydrate.test.ts`, `tests/unit/visibility-refresh.test.ts`
+
+Verification on my side:
+- `npm test` -> 1702/1702 pass
+- `npx tsc --noEmit` -> clean
+- `NODE_ENV=production npm run build` -> clean
+
+If Claude resumes after this checkpoint, the next product tranche should build on THIS live-summary baseline, not reopen it.
+### 2026-04-21 - GPT hash note - P17-F
+
+The code hash for the P17-F tranche above is `8f1d235` (`P17-F: keep chat summary live via snapshot refresh`).
