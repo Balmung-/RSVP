@@ -80,6 +80,10 @@ export type HydrateDeps = {
   prismaLike: PrismaLike;
   // Optional read-only builder for server-owned snapshot widgets.
   buildSummaryWidget?: () => Promise<Widget | null>;
+  // Optional read-only overlay for live widget kinds whose values
+  // should track the DB on snapshot refresh (e.g. campaign cards
+  // and activity stream). Fail-soft: callers can omit it entirely.
+  refreshWidgets?: (widgets: Widget[]) => Promise<Widget[]>;
 };
 
 export async function hydrateSessionHandler(
@@ -139,10 +143,13 @@ export async function hydrateSessionHandler(
   }));
 
   const turns = rebuildUiTurns(transcriptRows);
+  const liveWidgets = deps.refreshWidgets
+    ? await deps.refreshWidgets(widgetResult.widgets)
+    : widgetResult.widgets;
   const widgets =
     summaryWidget === null
-      ? widgetResult.widgets
-      : upsertSummaryWidget(widgetResult.widgets, summaryWidget);
+      ? liveWidgets
+      : upsertSummaryWidget(liveWidgets, summaryWidget);
 
   return {
     kind: "ok",

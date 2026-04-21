@@ -461,6 +461,67 @@ test("200 overlays a freshly built summary widget onto the hydrated widget list"
   );
 });
 
+test("200 refreshes live widgets before applying the summary overlay", async () => {
+  const stalePrimary = widgetRow({
+    sessionId: "s-1",
+    widgetKey: "campaigns.list",
+    kind: "campaign_list",
+    slot: "primary",
+    props: JSON.stringify({ items: [] }),
+  });
+  const { deps } = makeDeps({ widgets: [stalePrimary] });
+  deps.refreshWidgets = async (widgets) =>
+    widgets.map((widget) =>
+      widget.widgetKey === "campaigns.list"
+        ? {
+            ...widget,
+            props: {
+              items: [
+                {
+                  id: "c-live",
+                  name: "Live Campaign",
+                  status: "active",
+                  event_at: null,
+                  venue: null,
+                  team_id: null,
+                  stats: { total: 12, responded: 5, headcount: 18 },
+                },
+              ],
+            },
+          }
+        : widget,
+    );
+  deps.buildSummaryWidget = async () => ({
+    widgetKey: "workspace.summary",
+    kind: "workspace_rollup",
+    slot: "summary",
+    props: {
+      campaigns: { draft: 0, active: 1, closed: 0, archived: 0, total: 1 },
+      invitees: { total: 12 },
+      responses: { total: 5, attending: 4, declined: 1, recent_24h: 1 },
+      invitations: {
+        sent_24h: 3,
+        sent_email_24h: 1,
+        sent_sms_24h: 1,
+        sent_whatsapp_24h: 1,
+      },
+      generated_at: "2026-04-19T10:00:00.000Z",
+    },
+    order: 0,
+    sourceMessageId: null,
+    createdAt: "2026-04-19T10:00:00.000Z",
+    updatedAt: "2026-04-19T10:00:00.000Z",
+  });
+
+  const r = await hydrateSessionHandler("s-1", deps);
+  const ok = assertOk(r);
+  assert.equal(ok.body.widgets.length, 2);
+  assert.equal(ok.body.widgets[0].widgetKey, "workspace.summary");
+  assert.equal(ok.body.widgets[1].widgetKey, "campaigns.list");
+  const items = ok.body.widgets[1].props.items as Array<{ id: string }>;
+  assert.equal(items[0].id, "c-live");
+});
+
 test("200 counts drifted widget rows in `skipped`, drops them from `widgets`", async () => {
   // A broken row (bad JSON in `props`) must not blank the dashboard —
   // listWidgets returns it in `skipped` and suppresses it from the

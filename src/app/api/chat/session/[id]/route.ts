@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 import { buildToolCtx } from "@/lib/ai/ctx";
+import { refreshLiveSnapshotWidgets } from "@/lib/ai/live-snapshot-widgets";
 import { tryRefreshSummaryForSnapshot } from "@/lib/ai/workspace-summary";
 import { hydrateSessionHandler } from "./handler";
 
@@ -50,6 +51,26 @@ export async function GET(
     // types carry (same pattern the chat route uses for the
     // workspace emitter).
     prismaLike: prisma as never,
+    refreshWidgets: async (widgets) => {
+      if (!me) return widgets;
+      try {
+        const ctx = await buildToolCtx(me);
+        return await refreshLiveSnapshotWidgets(
+          { prismaLike: prisma as never },
+          {
+            widgets,
+            campaignScope: ctx.campaignScope,
+            isAdmin: ctx.isAdmin,
+          },
+        );
+      } catch (error) {
+        console.warn(
+          `[chat.session] live widget refresh failed`,
+          error,
+        );
+        return widgets;
+      }
+    },
     buildSummaryWidget: async () => {
       if (!me) return null;
       const ctx = await buildToolCtx(me);
