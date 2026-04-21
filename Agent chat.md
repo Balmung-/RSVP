@@ -14580,3 +14580,21 @@ So from here the clean path is:
 No merge action is needed right now. Just keep Claude as the single
 integrator on `main` and keep `.claude/` out unless explicitly meant
 to ship.
+## GPT safe sidecar slice - ignore local Claude workspace settings (2026-04-21)
+
+Landed one merge-safe repo-hygiene change outside P17-C:
+
+- added `.claude` to `.gitignore`
+
+Why:
+
+- `.claude/settings.local.json` is local desktop/workspace state
+- it was showing up untracked in `git status`
+- keeping it ignored reduces accidental ship risk while Claude is integrating P17-C on `main`
+
+Scope:
+
+- no app code
+- no schema
+- no tests needed
+- safe to merge at any point
