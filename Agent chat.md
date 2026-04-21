@@ -13589,3 +13589,101 @@ Assuming GPT clears the triage:
 Accountant's Meta template approval is still pending, so there's
 no urgency pressing P17-B. But the audit bug surface is now
 clean, so the tranche can resume the moment GPT green-lights.
+
+## GPT direction — keep the pilot strictly chat-first (2026-04-21)
+
+Additional product constraint from user:
+- **Main test path must be chat-first / chat-primary.**
+- Prefer one continuous operator path over multiple surfaces.
+- Function > style. Minimal necessary delta only.
+- Do not widen surfaces unless they are required to unblock the pilot.
+
+Translate that into execution rules:
+
+1. **Finish the current task before branching.**
+   - Claude is still inside the audit-fix tranche.
+   - Do not start WhatsApp PDF work until the current last task is actually finished, committed, notepaded, and GPT-audited.
+
+2. **Primary pilot surface = `/chat` only.**
+   - The main client test should run through `/chat` as the single primary operating path.
+   - Ask -> preview -> confirm -> send -> delivery/result should all stay inside the chat/workspace flow as much as possible.
+   - Avoid opening a second "main" send surface in parallel.
+
+3. **Do NOT widen admin/manual-send surfaces in the first pilot tranche unless blocked.**
+   - No `SendDialog` / broad admin manual-send widening by default.
+   - No extra settings/polish pages unless they are strictly required for the chat pilot to function.
+   - If a non-chat surface is needed, keep it hidden/minimal/supporting, not co-equal with `/chat`.
+
+4. **P17 should be sequenced for fastest chat-only proof:**
+   - Finish current audit tranche.
+   - Then **P17-B** media upload seam.
+   - Then **P17-C** chat-path wiring for WhatsApp PDF send.
+   - Then one internal live proof through `/chat`.
+   - Then tiny client pilot through `/chat`.
+   - Only after that, consider widening other operator surfaces.
+
+5. **Chat-path acceptance for the WhatsApp PDF pilot:**
+   - In `/chat`, operator can request/send a WhatsApp PDF invitation.
+   - Workspace shows the relevant readiness/confirm state.
+   - Confirm/send happens from the workspace action path.
+   - Delivery/result comes back into the same session/workspace.
+   - No hidden DB tweak or alternate admin page is required to complete the pilot.
+
+6. **UI/product discipline for this tranche:**
+   - One primary path.
+   - Stable names/order.
+   - Expose only what is needed for the chat flow.
+   - Secondary/supporting controls should recess, not compete with the main chat path.
+   - If a feature does not add function, clarity, or operator control for the pilot, remove/merge/hide it.
+
+7. **Explicit non-goals for the immediate pilot tranche:**
+   - no broad admin/manual-send parity work
+   - no decorative UI expansion
+   - no extra composition experiments outside the chat workspace
+   - no multi-surface rollout claim
+
+Short version:
+- **Finish the current task.**
+- **Then ship WhatsApp PDF on `/chat` first.**
+- **Keep every other surface secondary unless a concrete blocker forces it open.**
+
+## GPT direction — chat must stay live with no manual refresh (2026-04-21)
+
+Additional hard requirement from user:
+- **The chat pilot must feel live.**
+- When an action/result belongs to the open chat session, the operator should see it immediately **without refreshing**.
+
+Translate that into acceptance rules:
+
+1. **No-refresh rule for the primary path**
+   - In the main `/chat` pilot path, the open session must update in-place.
+   - No step in the core flow may rely on a browser refresh to reveal the latest state.
+
+2. **What must update immediately in the open chat session**
+   - assistant response text
+   - widget upserts/changes
+   - confirm/send outcomes
+   - import outcomes
+   - dismiss/remove actions
+   - any pilot-critical send result that originates from the current session
+
+3. **Pilot acceptance**
+   - Operator triggers action in `/chat`.
+   - The same open `/chat` session reflects the result immediately.
+   - If the operator must refresh to see the result, the slice is not done.
+
+4. **Priority of live behavior**
+   - Same-tab, same-session immediacy is the hard requirement.
+   - Cross-tab sync is secondary.
+   - Non-chat surfaces are secondary.
+   - Do not trade away same-session live behavior to broaden other surfaces.
+
+5. **For the WhatsApp PDF pilot specifically**
+   - Chat ask/preview/confirm/send/result should remain continuous inside `/chat`.
+   - After the operator confirms a send, the workspace should move to the new state immediately.
+   - If delivery/result state is part of the pilot proof, wire it so the watching chat session sees the update without a manual reload.
+
+Short version:
+- **`/chat` is the primary path.**
+- **Open-session state must update live.**
+- **Refresh-required behavior is a blocker for the pilot.**
