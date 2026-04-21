@@ -14,14 +14,17 @@ import {
 //   - `buildMemoryRecallQuery(teamId, opts)` — the Prisma query
 //     shape for the recall path. Pins tenant safety, kind
 //     gating, deterministic ordering, and the recall-specific
-//     limit clamp.
+//     take clamp (which P16-C.1 made an OVERFETCH of the final
+//     user-facing limit — see the "take overfetches" group of
+//     pins below).
 //   - `rankMemoriesForRecall(rows, opts)` — the post-fetch
 //     shaping step. Pins stable ordering, body-level dedup,
 //     and clamping independent of the DB path.
 //
 // Both are pure. The server-only wrapper `recallMemoriesForTeam`
 // is a 2-line composition over these functions; its boundary
-// behavior is implicit in the coverage here.
+// behavior is implicit in the coverage here, with one explicit
+// end-to-end regression pin (the "backfill" test at the bottom).
 
 // ---- fixtures ----
 
@@ -61,7 +64,7 @@ function mem(overrides: Partial<TestMemory>): TestMemory {
 // buildMemoryRecallQuery
 // ============================================================
 
-test("buildMemoryRecallQuery: happy path — teamId-gated where + stable order + default limit", () => {
+test("buildMemoryRecallQuery: happy path — teamId-gated where + stable order + overfetched take", () => {
   const q = buildMemoryRecallQuery("team-abc");
   assert.deepEqual(q.where, { teamId: "team-abc" });
   // Deterministic ordering: updatedAt desc with id desc as the
@@ -71,7 +74,14 @@ test("buildMemoryRecallQuery: happy path — teamId-gated where + stable order +
     { updatedAt: "desc" },
     { id: "desc" },
   ]);
-  assert.equal(q.take, DEFAULT_MEMORY_POLICY.recallDefaultLimit);
+  // P16-C.1 — `take` OVERFETCHES the user's final limit so the
+  // ranker has dedup headroom. At default policy:
+  //   userLimit = recallDefaultLimit = 10
+  //   take = min(recallScanMaxLimit=100, 10 * 4) = 40
+  // A future factor/cap retune must update this number
+  // deliberately; a silent change would flip the overfetch
+  // guarantee.
+  assert.equal(q.take, 40);
 });
 
 test("buildMemoryRecallQuery: where clause has EXACTLY teamId when no kinds (tenant-safety pin)", () => {
@@ -158,34 +168,81 @@ test("buildMemoryRecallQuery: unknown kind throws (closed set invariant)", () =>
   );
 });
 
-test("buildMemoryRecallQuery: caller-supplied limit is honored within bounds", () => {
+test("buildMemoryRecallQuery: caller-supplied limit drives overfetched take (limit × factor)", () => {
+  // P16-C.1 — the caller's `limit` is the USER-FACING cap (what
+  // the ranker will ultimately deliver). The builder multiplies
+  // it by the overfetch factor to pick the DB `take`, giving the
+  // ranker dedup headroom. For limit=5: take = min(100, 5 * 4) = 20.
   const q = buildMemoryRecallQuery("team-abc", { limit: 5 });
-  assert.equal(q.take, 5);
+  assert.equal(q.take, 20);
 });
 
-test("buildMemoryRecallQuery: limit is clamped to policy.recallMaxLimit (upper bound)", () => {
+test("buildMemoryRecallQuery: limit above recallMaxLimit clamps user-side, then take hits recallScanMaxLimit", () => {
+  // Two guardrails compose here:
+  //   1. User limit first clamps to policy.recallMaxLimit (25).
+  //   2. Overfetch = 25 * 4 = 100, which also equals
+  //      policy.recallScanMaxLimit — at default policy, max user
+  //      limit exactly saturates the scan budget.
+  // A caller passing an absurd limit thus gets `take: 100` (the
+  // hard DB scan ceiling), never more.
   const q = buildMemoryRecallQuery("team-abc", { limit: 100_000 });
-  assert.equal(q.take, DEFAULT_MEMORY_POLICY.recallMaxLimit);
+  assert.equal(q.take, DEFAULT_MEMORY_POLICY.recallScanMaxLimit);
 });
 
-test("buildMemoryRecallQuery: limit is clamped to 1 (lower bound, 0 and negatives)", () => {
-  assert.equal(buildMemoryRecallQuery("team-abc", { limit: 0 }).take, 1);
-  assert.equal(buildMemoryRecallQuery("team-abc", { limit: -10 }).take, 1);
+test("buildMemoryRecallQuery: limit is clamped to 1 user-side, then overfetched (0 and negatives)", () => {
+  // User limit floors to 1 (zero/negatives collapse). Overfetch
+  // then multiplies: 1 * 4 = 4 rows fetched from the DB so the
+  // ranker has some dedup room even for a 1-row final output.
+  assert.equal(buildMemoryRecallQuery("team-abc", { limit: 0 }).take, 4);
+  assert.equal(buildMemoryRecallQuery("team-abc", { limit: -10 }).take, 4);
 });
 
-test("buildMemoryRecallQuery: NaN / Infinity collapse to bounds (not undefined)", () => {
+test("buildMemoryRecallQuery: NaN / Infinity collapse user-side, then overfetch (never undefined)", () => {
   // `take: undefined` in Prisma = "no limit" = fetch everything.
-  // Same clamp philosophy as the list builder.
-  assert.equal(buildMemoryRecallQuery("team-abc", { limit: Number.NaN }).take, 1);
+  // Same clamp philosophy as the list builder — non-finite user
+  // limits collapse to 1 / recallMax BEFORE the overfetch, so
+  // the DB never sees `take: NaN` / `take: undefined`.
+  //   NaN       -> userLimit=1 -> take=4
+  //   Infinity  -> userLimit=25 -> take=100 (scanMax)
+  assert.equal(buildMemoryRecallQuery("team-abc", { limit: Number.NaN }).take, 4);
   assert.equal(
     buildMemoryRecallQuery("team-abc", { limit: Number.POSITIVE_INFINITY }).take,
-    DEFAULT_MEMORY_POLICY.recallMaxLimit,
+    DEFAULT_MEMORY_POLICY.recallScanMaxLimit,
   );
 });
 
-test("buildMemoryRecallQuery: fractional limits floor to integers", () => {
+test("buildMemoryRecallQuery: fractional limits floor user-side, then overfetch", () => {
+  // 7.9 -> userLimit floors to 7 -> take = 7 * 4 = 28.
+  // Prisma's `take` must be an integer; flooring here prevents
+  // `take: 31.6` from reaching the DB layer.
   const q = buildMemoryRecallQuery("team-abc", { limit: 7.9 });
-  assert.equal(q.take, 7);
+  assert.equal(q.take, 28);
+});
+
+test("buildMemoryRecallQuery: take is ALWAYS >= userLimit (overfetch invariant)", () => {
+  // Core regression pin for the P16-C.1 blocker: the DB `take`
+  // must never be smaller than the user's final limit, or the
+  // ranker would under-fill even when no duplicates exist. This
+  // holds for every user limit in [1, recallMaxLimit].
+  for (let limit = 1; limit <= DEFAULT_MEMORY_POLICY.recallMaxLimit; limit++) {
+    const q = buildMemoryRecallQuery("team-abc", { limit });
+    assert.ok(
+      (q.take as number) >= limit,
+      `take (${q.take}) must be >= userLimit (${limit}) to guarantee the ranker can fill the final output`,
+    );
+  }
+});
+
+test("buildMemoryRecallQuery: take is NEVER > recallScanMaxLimit (DB payload cap)", () => {
+  // The complementary invariant: the overfetch is CAPPED so no
+  // retune of recallMaxLimit or the overfetch factor can make
+  // the builder scan an unbounded number of rows. Pin at the
+  // highest reasonable user limit.
+  const q = buildMemoryRecallQuery("team-abc", { limit: Number.POSITIVE_INFINITY });
+  assert.ok(
+    (q.take as number) <= DEFAULT_MEMORY_POLICY.recallScanMaxLimit,
+    `take (${q.take}) must never exceed recallScanMaxLimit (${DEFAULT_MEMORY_POLICY.recallScanMaxLimit})`,
+  );
 });
 
 test("buildMemoryRecallQuery: custom policy recall bounds honored end-to-end", () => {
@@ -193,24 +250,29 @@ test("buildMemoryRecallQuery: custom policy recall bounds honored end-to-end", (
     ...DEFAULT_MEMORY_POLICY,
     recallDefaultLimit: 3,
     recallMaxLimit: 5,
+    // P16-C.1 — scan cap moves with the user-facing caps. Set
+    // tight enough that the upper-bound test below exercises the
+    // scanMax clamp path.
+    recallScanMaxLimit: 20,
   };
-  // Default uses custom.recallDefaultLimit
+  // Default: userLimit=3, take = min(20, 3*4) = 12
   const qDefault = buildMemoryRecallQuery("team-abc", { policy: custom });
-  assert.equal(qDefault.take, 3);
-  // Over-max uses custom.recallMaxLimit
+  assert.equal(qDefault.take, 12);
+  // Over-max: userLimit clamps to recallMaxLimit=5, take =
+  // min(20, 5*4) = 20 (exactly the scan cap).
   const qClamped = buildMemoryRecallQuery("team-abc", {
     limit: 100,
     policy: custom,
   });
-  assert.equal(qClamped.take, 5);
+  assert.equal(qClamped.take, 20);
 });
 
-test("buildMemoryRecallQuery: recall bounds are STRICTLY SMALLER than list bounds (prompt-budget guard)", () => {
-  // Sanity pin: recall feeds the model's prompt context, which is
-  // token-budgeted. If a future policy retune makes recallMax >=
-  // listMax the "smaller cap for recall" invariant silently flips
-  // and the prompt path would accept far more memory rows than
-  // intended.
+test("buildMemoryRecallQuery: policy invariant — recallMax ≤ recallScanMax ≤ listMax", () => {
+  // Sanity pin: recall feeds the model's prompt context (token-
+  // budgeted) and the scan budget (DB payload-budgeted); both
+  // must stay bounded by the wider list path. A future policy
+  // retune that flips any of these orderings trips this before
+  // the invariant quietly breaks in production.
   assert.ok(
     DEFAULT_MEMORY_POLICY.recallDefaultLimit < DEFAULT_MEMORY_POLICY.listDefaultLimit,
     "recallDefaultLimit must stay below listDefaultLimit",
@@ -218,6 +280,15 @@ test("buildMemoryRecallQuery: recall bounds are STRICTLY SMALLER than list bound
   assert.ok(
     DEFAULT_MEMORY_POLICY.recallMaxLimit < DEFAULT_MEMORY_POLICY.listMaxLimit,
     "recallMaxLimit must stay below listMaxLimit",
+  );
+  // P16-C.1 invariants:
+  assert.ok(
+    DEFAULT_MEMORY_POLICY.recallMaxLimit <= DEFAULT_MEMORY_POLICY.recallScanMaxLimit,
+    "recallMaxLimit must be <= recallScanMaxLimit (the scan must cover at least the final limit)",
+  );
+  assert.ok(
+    DEFAULT_MEMORY_POLICY.recallScanMaxLimit <= DEFAULT_MEMORY_POLICY.listMaxLimit,
+    "recallScanMaxLimit must be <= listMaxLimit (list path is the wide-read ceiling)",
   );
 });
 
@@ -394,11 +465,44 @@ test("rankMemoriesForRecall: NaN / Infinity clamp to bounds", () => {
   );
 });
 
-test("rankMemoriesForRecall: dedup can reduce output below limit (no backfilling)", () => {
-  // Recall limit 5, but 4 of the 10 rows are dupes. The ranker
-  // does NOT fetch more to compensate — it returns up to `limit`,
-  // but may return fewer if dedup trims. Matches the contract
-  // "up to N" rather than "exactly N".
+test("rankMemoriesForRecall: backfills from input — duplicates at head don't starve later uniques", () => {
+  // P16-C.1 — the ranker's own contribution to the backfill
+  // guarantee. Given enough unique rows in its input, it keeps
+  // pulling uniques past the duplicate head until it hits the
+  // user's limit. 4 dupes of "fact A" at the top, then 5 distinct
+  // facts. User asks for limit=5. Output: 1 ("fact A") + 4
+  // distinct = 5 rows (the distinct facts B..E are 4 items, plus
+  // A is 1 → total 5, exactly the limit).
+  const rows = [
+    mem({ id: "1", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 9) }),
+    mem({ id: "2", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 8) }),
+    mem({ id: "3", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 7) }),
+    mem({ id: "4", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 6) }),
+    mem({ id: "5", body: "fact B", updatedAt: new Date(2026, 3, 21, 10, 5) }),
+    mem({ id: "6", body: "fact C", updatedAt: new Date(2026, 3, 21, 10, 4) }),
+    mem({ id: "7", body: "fact D", updatedAt: new Date(2026, 3, 21, 10, 3) }),
+    mem({ id: "8", body: "fact E", updatedAt: new Date(2026, 3, 21, 10, 2) }),
+  ];
+  const out = rankMemoriesForRecall(rows, { limit: 5 });
+  assert.equal(
+    out.length,
+    5,
+    "ranker MUST backfill past the duplicate head up to the user limit when uniques exist",
+  );
+  assert.deepEqual(
+    out.map((r) => r.id),
+    ["1", "5", "6", "7", "8"],
+    "most-recent duplicate of A survives; later uniques fill up in recency order",
+  );
+});
+
+test("rankMemoriesForRecall: output falls short of limit ONLY when input lacks enough uniques (ranker is pure over its input)", () => {
+  // Complement to the backfill test. The ranker is a pure
+  // function — it can only draw from what it was given. If the
+  // input itself has fewer unique bodies than the limit, the
+  // output is necessarily shorter. Ensuring ENOUGH uniques reach
+  // the ranker is the BUILDER's job (overfetch), pinned in the
+  // P16-C.1 end-to-end test below.
   const rows = [
     mem({ id: "1", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 9) }),
     mem({ id: "2", body: "fact A", updatedAt: new Date(2026, 3, 21, 10, 8) }),
@@ -407,7 +511,7 @@ test("rankMemoriesForRecall: dedup can reduce output below limit (no backfilling
     mem({ id: "5", body: "fact B", updatedAt: new Date(2026, 3, 21, 10, 5) }),
   ];
   const out = rankMemoriesForRecall(rows, { limit: 5 });
-  assert.equal(out.length, 2, "dedup reduces 5 rows (4 dupes) to 2 unique facts");
+  assert.equal(out.length, 2, "only 2 unique bodies exist in input; ranker returns both");
   assert.deepEqual(
     out.map((r) => r.id),
     ["1", "5"],
@@ -447,5 +551,77 @@ test("rankMemoriesForRecall: custom policy recallDefaultLimit + recallMaxLimit h
   assert.equal(
     rankMemoriesForRecall(rows, { policy: custom, limit: 100 }).length,
     3,
+  );
+});
+
+// ============================================================
+// end-to-end (builder + ranker) — P16-C.1 regression pin
+// ============================================================
+
+test("P16-C.1 regression: duplicate head in the scan window does NOT starve the final recall", () => {
+  // This is the pin for the blocker GPT flagged on `4020f17`:
+  // if the builder's DB `take` equals the user's final limit,
+  // a cluster of duplicate writes at the head of the team's
+  // newest-N window will crowd out later uniques, and the prompt
+  // path returns far fewer memories than requested.
+  //
+  // Scenario: 30 rows in the team, newest-first. The top 8 share
+  // one body ("hot fact" — operator edited it in a burst); the
+  // next 25 are distinct.
+  //
+  // User requests limit=10.
+  //
+  // OLD (broken) behavior: builder take = 10. DB returns rows
+  // 0-9 = 8 dupes + 2 uniques. Ranker dedups to 1 + 2 = 3 rows.
+  // User wanted 10, got 3. BROKEN.
+  //
+  // NEW behavior: builder take = min(100, 10 * 4) = 40. DB
+  // returns rows 0-29 (only 30 exist). Ranker dedups to 1 + 25
+  // uniques = 26 candidates, then caps to 10. User gets 10.
+  const hotDupes = Array.from({ length: 8 }, (_, i) =>
+    mem({
+      id: `dup-${i}`,
+      body: "team prefers morning campaign sends",
+      updatedAt: new Date(2026, 3, 21, 11, 59 - i),
+    }),
+  );
+  const uniques = Array.from({ length: 25 }, (_, i) =>
+    mem({
+      id: `uniq-${String(i).padStart(2, "0")}`,
+      body: `unique fact ${i}`,
+      updatedAt: new Date(2026, 3, 21, 10, 59 - i),
+    }),
+  );
+  // Pre-sorted newest-first, matching the builder's orderBy.
+  const dbContents = [...hotDupes, ...uniques];
+
+  // Simulate the server wrapper: builder decides `take`, DB
+  // returns that many rows in orderBy order, ranker shapes.
+  const q = buildMemoryRecallQuery("team-abc", { limit: 10 });
+  const fetched = dbContents.slice(0, q.take as number);
+  const out = rankMemoriesForRecall(fetched, { limit: 10 });
+
+  assert.equal(
+    out.length,
+    10,
+    "duplicate head MUST NOT starve the recall when uniques exist below — user asked for 10, must receive 10",
+  );
+  // First row is the most-recent duplicate of the hot fact.
+  // The remaining 9 are the 9 newest uniques, in recency order.
+  assert.equal(out[0].id, "dup-0", "newest duplicate of the hot fact survives");
+  assert.deepEqual(
+    out.slice(1).map((r) => r.id),
+    [
+      "uniq-00",
+      "uniq-01",
+      "uniq-02",
+      "uniq-03",
+      "uniq-04",
+      "uniq-05",
+      "uniq-06",
+      "uniq-07",
+      "uniq-08",
+    ],
+    "9 newest uniques fill the rest in recency order",
   );
 });

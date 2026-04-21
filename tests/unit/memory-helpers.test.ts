@@ -119,6 +119,10 @@ test("buildMemoryListQuery: custom policy is honored end-to-end", () => {
     // something sensible for shape-completeness.
     recallDefaultLimit: 5,
     recallMaxLimit: 10,
+    // P16-C.1 — the recall builder overfetches up to this cap;
+    // again, the list builder doesn't consume it, but the type
+    // demands the field.
+    recallScanMaxLimit: 40,
   };
   const qDefault = buildMemoryListQuery("team-abc", { policy: custom });
   assert.equal(qDefault.take, 10, "default limit should use custom.listDefaultLimit");
@@ -140,6 +144,12 @@ test("DEFAULT_MEMORY_POLICY: shape is frozen + values are stable", () => {
   // context, which is token-budgeted.
   assert.equal(DEFAULT_MEMORY_POLICY.recallDefaultLimit, 10);
   assert.equal(DEFAULT_MEMORY_POLICY.recallMaxLimit, 25);
+  // P16-C.1 — DB-level scan ceiling for the recall builder's
+  // overfetch. Between `recallMaxLimit` and `listMaxLimit` — the
+  // builder scans more than the user's final limit (to give
+  // post-fetch dedup headroom) but strictly less than the list
+  // path's wide-read ceiling.
+  assert.equal(DEFAULT_MEMORY_POLICY.recallScanMaxLimit, 100);
 });
 
 test("memoryPolicyFromEnv: returns defaults in P16-A (no env reads yet)", () => {

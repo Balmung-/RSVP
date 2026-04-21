@@ -9,10 +9,12 @@ import { MEMORY_KINDS, type MemoryKind } from "./validate";
 //
 //   buildMemoryRecallQuery(teamId, opts) -> Prisma.MemoryFindManyArgs
 //     Shape of the DB query. Filters by teamId (required) + an
-//     optional kind allow-list, orders deterministically, clamps
-//     `take` to the policy bounds. This is where tenant safety
-//     and the hard DoS guard live; the ranker below cannot widen
-//     either.
+//     optional kind allow-list, orders deterministically, and
+//     picks a `take` that OVERFETCHES beyond the user's final
+//     recall limit so the ranker's post-fetch dedup has headroom
+//     to backfill (P16-C.1 — see the take computation below).
+//     This is where tenant safety and the hard DoS guard live;
+//     the ranker below cannot widen either.
 //
 //   rankMemoriesForRecall(rows, opts) -> MemoryRecord[]
 //     Post-fetch shaping. Stable-sorts by updatedAt desc (tie
@@ -21,6 +23,20 @@ import { MEMORY_KINDS, type MemoryKind } from "./validate";
 //     trimmed body, and clamps to the final recall limit.
 //     Separating this from the query keeps the ranking policy
 //     unit-testable without a live Postgres.
+//
+// P16-C.1 — overfetch invariant:
+//   The builder's DB `take` is NOT the user-facing recall limit.
+//   Instead: `take = min(recallScanMaxLimit, userLimit *
+//   RECALL_OVERFETCH_FACTOR)`. Why:
+//
+//   If the builder's take equaled the user's final limit, a
+//   cluster of duplicate writes at the head of the scan window
+//   (e.g. the operator edits the same hot fact five times in a
+//   row) would starve the final output — dedup collapses them to
+//   one row, and no later uniques get a chance because they were
+//   never fetched. 4x overfetch means three duplicates per
+//   delivered row are tolerated before we fall short; the scan
+//   max caps the worst-case payload.
 //
 // Why this lives alongside — not inside — `query.ts`:
 //   `buildMemoryListQuery` feeds the operator UI (P16-E) where
@@ -94,6 +110,27 @@ function clamp(value: number, min: number, max: number): number {
   return Math.floor(value);
 }
 
+// P16-C.1 — overfetch multiplier for the builder's DB `take`.
+//
+// Rationale: the recall path must deliver `userLimit` UNIQUE rows
+// when enough uniques exist, even if the newest N positions in
+// the team's memory log contain duplicate bodies (e.g. an
+// operator editing the same hot fact in a burst). A 4x overfetch
+// means three duplicates per delivered row are absorbed before
+// the output can fall short of `userLimit`. The absolute DB
+// payload is still bounded by `policy.recallScanMaxLimit`, so the
+// DoS guard at the scan seam is unchanged.
+//
+// Kept as a module constant rather than a policy knob because:
+//   - callers tune the user-facing caps (default/max limit) but
+//     never the dedup-headroom ratio;
+//   - policy inflation is worse than a named constant for a
+//     value that's tightly coupled to the dedup semantics;
+//   - at default policy (recallMax=25, scanMax=100), 25 * 4 =
+//     100 consumes exactly the scan budget — the factor is
+//     calibrated to the shipped caps.
+const RECALL_OVERFETCH_FACTOR = 4;
+
 export function buildMemoryRecallQuery(
   teamId: string,
   opts: MemoryRecallOptions = {},
@@ -106,8 +143,26 @@ export function buildMemoryRecallQuery(
   }
 
   const policy = opts.policy ?? DEFAULT_MEMORY_POLICY;
-  const requested = opts.limit ?? policy.recallDefaultLimit;
-  const take = clamp(requested, 1, policy.recallMaxLimit);
+  // First, normalise the user's requested limit via the same
+  // clamp the ranker will apply. This keeps the "user-facing
+  // cap" number a single, testable value — used here only to
+  // compute the overfetch; the ranker will clamp the same input
+  // again on its side so its behavior is independent of builder
+  // internals.
+  const userLimit = clamp(
+    opts.limit ?? policy.recallDefaultLimit,
+    1,
+    policy.recallMaxLimit,
+  );
+  // Overfetch the DB read so post-fetch dedup can backfill when
+  // the newest window contains duplicates. Bounded by
+  // `recallScanMaxLimit` — a hard payload ceiling so a future
+  // policy retune can't accidentally let the builder scan
+  // unbounded rows. See RECALL_OVERFETCH_FACTOR above.
+  const take = Math.min(
+    policy.recallScanMaxLimit,
+    userLimit * RECALL_OVERFETCH_FACTOR,
+  );
 
   // Kind filter shaping.
   //
@@ -210,8 +265,9 @@ export function rankMemoriesForRecall(
   const limit = clamp(requested, 1, policy.recallMaxLimit);
 
   // Copy before sorting — don't mutate the caller's array. Sort
-  // is O(n log n) which is fine; n is bounded by the recall max
-  // (25 today).
+  // is O(n log n) which is fine; when called via the server
+  // wrapper, n is bounded by the builder's `take`
+  // (≤ recallScanMaxLimit — 100 today).
   const sorted = rows.slice().sort(byRecency);
 
   // Dedup: first occurrence wins (which is the most recent by

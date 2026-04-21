@@ -66,6 +66,25 @@ export type MemoryPolicy = {
   // upper bound for useful recall. A caller passing
   // `{ limit: 1_000 }` to the recall path clamps to this value.
   recallMaxLimit: number;
+
+  // P16-C.1 — hard ceiling on the DB-level `take` for the recall
+  // path. Distinct from `recallMaxLimit` because the recall
+  // builder OVERFETCHES: it scans more rows than the user's final
+  // limit so the ranker's post-fetch dedup has headroom to
+  // backfill unique memories when the newest N rows include
+  // duplicates (the pathological case is an operator repeatedly
+  // editing the same hot fact, which otherwise crowds out older
+  // uniques).
+  //
+  // Invariant chain: `recallMaxLimit <= recallScanMaxLimit
+  // <= listMaxLimit`. 100 is chosen so:
+  //   - at max user limit (25), scan budget is fully consumed
+  //     (25 * 4 = 100), tolerating 3 duplicates per delivered row;
+  //   - the worst-case fetch payload is ~100 KB (100 rows *
+  //     1024-char body cap), still negligible vs chat context;
+  //   - it stays well below `listMaxLimit` so the "list is the
+  //     wide read path" framing is preserved.
+  recallScanMaxLimit: number;
 };
 
 // Immutable defaults. Every future policy consumer that wants
@@ -78,6 +97,7 @@ export const DEFAULT_MEMORY_POLICY: MemoryPolicy = Object.freeze({
   listMaxLimit: 200,
   recallDefaultLimit: 10,
   recallMaxLimit: 25,
+  recallScanMaxLimit: 100,
 });
 
 // Scaffolded for future env-driven overrides. P16-A returns the
