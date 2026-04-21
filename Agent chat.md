@@ -16198,3 +16198,43 @@ Recommended next move from this checkpoint:
 ### 2026-04-21 - GPT hash note - P17-G
 
 The code hash for the P17-G tranche above is `03a8939` (`P17-G: enforce PDF-only WhatsApp document path`).
+### 2026-04-21 - GPT tranche - P17-H (`hash pending`)
+
+Verdict: **landed by GPT**.
+
+What shipped in the working tree:
+- `/api/chat/session/[id]` now overlays fresh server-side data for the dynamic pilot widgets already on the board:
+  - `campaign_list`
+  - `campaign_card`
+  - `activity_stream`
+- New helper: `src/lib/ai/live-snapshot-widgets.ts`.
+  - Rebuilds those widget props from the DB under the operator's current scope.
+  - Leaves every other widget kind untouched.
+  - Drops a `campaign_card` if the campaign is now out of scope / gone, rather than serving stale data forever.
+- `hydrateSessionHandler` gained an optional `refreshWidgets(...)` seam, and the route wrapper now wires the real live-refresh helper into it.
+- The existing `/chat` poll / visibility refresh path benefits automatically because it already reuses `GET /api/chat/session/[id]`.
+
+Why this matters for the pilot:
+- Before this slice, open `/chat` stayed live for transcript + summary only. Detailed widgets (campaign card, campaign list, activity stream) stayed stale until the tool was rerun.
+- After this slice, the operator can keep `/chat` open and watch the dashboard stay honest on the same snapshot path that already drives live session refresh.
+- This is still intentionally narrow: no new client polling logic, no new SSE event vocabulary, no admin/manual-send widening.
+
+Verification on my side:
+- Focused pins:
+  - `tests/unit/live-snapshot-widgets.test.ts`
+  - `tests/unit/chat-session-hydrate.test.ts`
+- Full suite:
+  - `npm test` -> 1705/1705 pass
+  - `npx tsc --noEmit` -> clean
+  - `NODE_ENV=production npx next build` -> clean
+
+Recommended next move from this checkpoint:
+1. Keep the pilot chat-first.
+2. Stop widening config/admin surfaces.
+3. Next tranche should be real client-pilot proof work:
+   - runtime/env confirmed live on the intended backend
+   - one real `/chat` WhatsApp PDF send proof
+   - operator-visible failure/recovery on the same `/chat` path
+### 2026-04-21 - GPT hash note - P17-H
+
+The code hash for the P17-H tranche above is `9f10280` (`P17-H: refresh live chat widgets on snapshot`).
