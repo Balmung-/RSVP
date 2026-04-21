@@ -261,3 +261,182 @@ function extractErrorText(j: {
   }
   return j.message ?? "unknown";
 }
+
+// ---- P17-B — media upload seam ---------------------------------
+//
+// `taqnyatUploadMedia` is a standalone function, NOT a method on
+// `WhatsAppProvider`. Rationale:
+//
+//   - Media upload is a Taqnyat-specific implementation detail.
+//     The stub provider (`stubWhatsApp`) has no upload to fake,
+//     and future providers (360dialog, Meta direct, etc.) will
+//     each expose their own upload flow — forcing an `uploadMedia`
+//     method onto the interface would either pollute every stub
+//     with a throw-or-return-fake branch, or introduce an
+//     optional-method check at every caller.
+//   - The caller for P17-C is the campaign/send wiring, which
+//     can import this function directly when the WhatsApp
+//     provider is Taqnyat (it will already be branching on
+//     `getWhatsAppProvider().name === "taqnyat-whatsapp"` to know
+//     whether the headerDocument path is supported).
+//   - Keeping the interface minimal preserves the "one channel,
+//     one send method" framing the rest of the app leans on.
+//
+// Envelope shape:
+//
+//   - URL:          POST https://api.taqnyat.sa/wa/v2/media/
+//   - Content-Type: multipart/form-data (boundary set by runtime)
+//   - Auth:         Authorization: Bearer <TAQNYAT_WHATSAPP_TOKEN>
+//   - Fields (multipart):
+//       messaging_product = "whatsapp"          // Meta requires
+//       type              = "<mime/type>"       // e.g. application/pdf
+//       file              = <binary>            // filename + type
+//
+// We DO NOT set Content-Type manually — FormData in Node 18+ /
+// undici sets `multipart/form-data; boundary=...` with a
+// randomised boundary when the body is passed to fetch. Setting
+// it manually would omit the boundary and the request would
+// fail at the multipart parser.
+//
+// Response shape: Taqnyat proxies Meta's `{ id: "<media_id>" }`
+// envelope. We accept both the flat and nested shapes for
+// forward-compatibility (`{ id }`, `{ media: { id } }`). Empty
+// or missing id on a 2xx is treated as a failure — we refuse
+// to fabricate a success reference.
+//
+// Returned ref is a `WhatsAppDocumentRef { kind: "id" }` carrying
+// the filename the caller supplied. Mirrors the upload→reference
+// flow: the uploader doesn't need the filename to perform the
+// upload (Meta records it from the multipart part) but the send-
+// time envelope DOES need it (the ref goes into either the
+// standalone-document `document.filename` or the template
+// header-parameter `document.filename`). Caching it on the ref
+// means the caller doesn't have to thread it through a second
+// time.
+//
+// NOTE on media expiry: Meta retains uploaded media ids for 30
+// days. For the invitation-PDF flow (which sends the document
+// shortly after upload) this is comfortable headroom; if a
+// future flow needs longer retention, the uploader caller will
+// need to re-upload on a schedule. We don't cache / persist ids
+// here — that's a decision for the P17-C wiring.
+
+export type TaqnyatMediaUploadResult =
+  | { ok: true; ref: WhatsAppDocumentRef }
+  | { ok: false; error: string; retryable?: boolean };
+
+export type TaqnyatMediaUploadOptions = {
+  token: string;
+  bytes: Uint8Array;
+  filename: string;
+  mimeType: string;
+  // DI seam for unit tests — real callers use global fetch.
+  fetchImpl?: typeof fetch;
+};
+
+export async function taqnyatUploadMedia(
+  opts: TaqnyatMediaUploadOptions,
+): Promise<TaqnyatMediaUploadResult> {
+  if (!opts.token) {
+    return { ok: false, error: "whatsapp-media: missing token" };
+  }
+  if (!opts.filename || opts.filename.length === 0) {
+    // Defensive: a missing filename would make the multipart part
+    // anonymous and the returned ref unusable at send time (both
+    // the standalone-document and template-header-document paths
+    // carry filename forward to the recipient-visible envelope).
+    return { ok: false, error: "whatsapp-media: missing filename" };
+  }
+  if (!opts.mimeType || opts.mimeType.length === 0) {
+    return { ok: false, error: "whatsapp-media: missing mimeType" };
+  }
+  if (!opts.bytes || opts.bytes.byteLength === 0) {
+    return { ok: false, error: "whatsapp-media: empty bytes" };
+  }
+  const form = buildMediaUploadFormData(
+    opts.bytes,
+    opts.filename,
+    opts.mimeType,
+  );
+  const fetchFn = opts.fetchImpl ?? globalThis.fetch;
+  const res = await fetchFn("https://api.taqnyat.sa/wa/v2/media/", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${opts.token}`,
+      // NO Content-Type — FormData serializer sets it with boundary.
+    },
+    body: form,
+  });
+  const j = (await res.json().catch(() => ({}))) as {
+    id?: string | number;
+    media?: { id?: string | number };
+    messageId?: string | number;
+    requestId?: string | number;
+    message?: string;
+    error?: { message?: string } | string;
+  };
+  const mediaId = extractMediaId(j);
+  if (res.ok && mediaId) {
+    return {
+      ok: true,
+      ref: { kind: "id", mediaId, filename: opts.filename },
+    };
+  }
+  const errText = extractErrorText(j);
+  return {
+    ok: false,
+    error: `whatsapp-media ${res.status}: ${errText}`,
+    retryable: res.status >= 500,
+  };
+}
+
+// Exported for direct unit coverage — the multipart field set is
+// the part most likely to drift against Meta/Taqnyat. Tests pin
+// the exact field names, their values, and the file part's
+// `name` + `type` so a silent regression (e.g. renaming
+// `messaging_product` to `product`) trips before a live upload.
+export function buildMediaUploadFormData(
+  bytes: Uint8Array,
+  filename: string,
+  mimeType: string,
+): FormData {
+  const form = new FormData();
+  // Meta requires `messaging_product="whatsapp"` on every
+  // outbound WhatsApp Cloud API request, including media uploads.
+  form.append("messaging_product", "whatsapp");
+  // `type` is the MIME type of the file content. Meta uses this
+  // to classify the media (document / image / audio / video) —
+  // the `type` field on the SEND-time envelope maps to a Meta
+  // media type (e.g. "document") separately, but this upload-time
+  // field is the literal MIME type of the bytes.
+  form.append("type", mimeType);
+  // File part: Blob-wrap the bytes so FormData treats it as a
+  // file (with filename + content-type headers in the multipart
+  // part), not as a plain text field.
+  //
+  // TypeScript 5 in this repo infers `Blob` as the DOM Blob,
+  // which accepts `Uint8Array` in its BlobPart list. The cast
+  // below flattens any conditional narrowing ambiguity without
+  // changing behaviour.
+  const blob = new Blob([bytes as unknown as BlobPart], { type: mimeType });
+  form.append("file", blob, filename);
+  return form;
+}
+
+function extractMediaId(j: {
+  id?: string | number;
+  media?: { id?: string | number };
+  messageId?: string | number;
+  requestId?: string | number;
+}): string | null {
+  // Primary shape: Meta's `{ id: "<media_id>" }` — Taqnyat's proxy
+  // returns this flat. Nested `{ media: { id } }` is the fallback
+  // for a hypothetical future wrapper shape.
+  const candidates = [j.id, j.media?.id, j.messageId, j.requestId];
+  for (const c of candidates) {
+    if (c === undefined || c === null) continue;
+    const s = String(c);
+    if (s.length > 0) return s;
+  }
+  return null;
+}
