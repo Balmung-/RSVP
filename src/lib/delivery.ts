@@ -3,6 +3,7 @@ import { getEmailProvider, getSmsProvider, getWhatsAppProvider } from "./provide
 import { renderEmail, renderSms, buildVars } from "./preview";
 import { isUnsubscribed, unsubscribeUrl } from "./inbound";
 import { decideWhatsAppMessage } from "./providers/whatsapp/sendPlan";
+import { taqnyatUploadMedia } from "./providers/whatsapp/taqnyat";
 import type { Campaign, Invitee } from "@prisma/client";
 
 // Orchestrates the outbound. Pure function of (campaign, invitee) → delivery.
@@ -168,6 +169,36 @@ export interface WhatsAppSendDeps {
     message: import("./providers/types").WhatsAppMessage,
   ) => Promise<import("./providers/types").SendResult>;
   now: () => Date;
+
+  // P17-C.3 — doc-header just-in-time upload seams. Both optional.
+  // The intercept runs only when the plan has a template message
+  // with a `headerDocument: { kind: "link" }` pointing at our own
+  // `/api/files/<id>` route (the C.2 placeholder). For any other
+  // plan shape these deps are never consulted, so plain-template
+  // / text / session-text tests don't need to provide them. When
+  // the intercept IS triggered and the deps are absent, the send
+  // fails cleanly with `doc_upload_deps_missing` rather than
+  // silently passing the unreachable internal URL through to the
+  // provider.
+  //
+  // Split into two seams (load + upload) rather than combined into
+  // a single `resolveHeaderDocument(link)` helper so tests can
+  // exercise each failure class independently: a missing
+  // FileUpload row is a DB fact, an upload failure is a network /
+  // BSP fact, and conflating them would hide the distinction that
+  // operators care about when debugging.
+  loadFileUpload?: (id: string) => Promise<
+    | { contents: Uint8Array; filename: string; contentType: string }
+    | null
+  >;
+  uploadMedia?: (opts: {
+    bytes: Uint8Array;
+    filename: string;
+    mimeType: string;
+  }) => Promise<
+    | { ok: true; ref: import("./providers/types").WhatsAppDocumentRef }
+    | { ok: false; error: string }
+  >;
 }
 
 export type WhatsAppSendResult =
@@ -233,7 +264,43 @@ export async function performWhatsAppSend(
     return { ok: false, error: plan.reason };
   }
 
-  const res = await deps.send(plan.message);
+  // P17-C.3 — just-in-time doc-header resolution. The planner (C.2)
+  // emits a placeholder `headerDocument: { kind: "link" }` pointing
+  // at our own `/api/files/<id>` route; Meta can't fetch that
+  // (auth-required, non-public). So we intercept here, read the
+  // FileUpload bytes, upload them to Meta via Taqnyat's `/media`
+  // endpoint (P17-B), and rebuild the message with a Meta
+  // `{ kind: "id", mediaId, filename }` ref before handing to the
+  // provider. Any failure in that chain fails the invitation row
+  // with a structured error — the chat propose_send / confirm_send
+  // widgets (P17-C.5) will surface those errors to the operator.
+  //
+  // This intercept is idempotent per-send: each recipient re-uploads
+  // the PDF. Meta's 30-day media retention means a cache could be
+  // added later, but for the pilot (single-template, single-PDF
+  // operator flow) the simplicity of "one upload per send" is worth
+  // more than the saved round trips.
+  let messageToSend = plan.message;
+  if (
+    messageToSend.kind === "template" &&
+    messageToSend.headerDocument !== undefined &&
+    messageToSend.headerDocument.kind === "link"
+  ) {
+    const swap = await resolveInternalDocLink(
+      messageToSend.headerDocument.link,
+      deps,
+    );
+    if (!swap.ok) {
+      await deps.updateInvitation(inv.id, {
+        status: "failed",
+        error: swap.error,
+      });
+      return { ok: false, error: swap.error };
+    }
+    messageToSend = { ...messageToSend, headerDocument: swap.ref };
+  }
+
+  const res = await deps.send(messageToSend);
   if (res.ok) {
     await deps.updateInvitation(inv.id, {
       status: "sent",
@@ -244,7 +311,7 @@ export async function performWhatsAppSend(
       kind: "invite.sent",
       refType: "invitation",
       refId: inv.id,
-      data: JSON.stringify({ channel: "whatsapp", kind: plan.message.kind }),
+      data: JSON.stringify({ channel: "whatsapp", kind: messageToSend.kind }),
     });
     return { ok: true, invitationId: inv.id };
   }
@@ -272,6 +339,50 @@ export async function sendWhatsApp(
       },
       send: (msg) => getWhatsAppProvider().send(msg),
       now: () => new Date(),
+      // P17-C.3 — real-deps resolver wiring. Both deps are only
+      // consulted when the plan carries a placeholder-link
+      // headerDocument; plain-template / text sends never touch
+      // them. Kept here (not split into a separate module) so the
+      // DI seam + its real implementation sit in the same file
+      // the rest of delivery choreography lives in — one hop
+      // from the intercept that calls them.
+      loadFileUpload: async (id) => {
+        const row = await prisma.fileUpload.findUnique({
+          where: { id },
+          select: { contents: true, filename: true, contentType: true },
+        });
+        if (row === null) return null;
+        // Prisma returns `Buffer` for Bytes columns; Buffer IS a
+        // Uint8Array subclass, but constructing a fresh view keeps
+        // the return type independent of the driver's choice and
+        // ensures the consumer sees a plain Uint8Array (what
+        // `taqnyatUploadMedia` expects).
+        return {
+          contents: new Uint8Array(row.contents),
+          filename: row.filename,
+          contentType: row.contentType,
+        };
+      },
+      uploadMedia: async (upload) => {
+        const token = process.env.TAQNYAT_WHATSAPP_TOKEN;
+        if (!token || token.length === 0) {
+          // Mirrors `taqnyatUploadMedia`'s own missing-token
+          // refusal, but we don't even try to call it — the
+          // upload would fail identically, and this way the
+          // invitation's error string tells the operator exactly
+          // what's missing without a network round-trip.
+          return {
+            ok: false,
+            error: "whatsapp-media: missing token",
+          };
+        }
+        return await taqnyatUploadMedia({
+          token,
+          bytes: upload.bytes,
+          filename: upload.filename,
+          mimeType: upload.mimeType,
+        });
+      },
     },
     campaign,
     invitee,
@@ -311,4 +422,102 @@ function payloadForPlan(
     language: plan.message.languageCode,
     variables: plan.message.variables ?? [],
   });
+}
+
+// P17-C.3 — placeholder-link → Meta-mediaId swap.
+//
+// The planner emits `headerDocument: { kind: "link", link:
+// "/api/files/<id>" }` as a sentinel (C.2). Meta itself cannot
+// fetch `/api/files/<id>` (auth-required, non-public), so this
+// helper is the only path that makes the send actually succeed:
+//
+//   1. Parse the id out of the internal link shape.
+//   2. Load the FileUpload row via the injected `loadFileUpload`
+//      dep — returns bytes + filename + MIME.
+//   3. Upload to Meta via the injected `uploadMedia` dep (wired
+//      to `taqnyatUploadMedia` in the real-deps path, P17-B).
+//   4. Return the Meta `{ kind: "id", mediaId, filename }` ref.
+//
+// Failure classes (each returns a distinct `error` string):
+//   - `doc_link_not_internal`    — the link doesn't match the
+//                                  internal /api/files/<id> shape.
+//                                  Shouldn't happen with the current
+//                                  planner output; defensive against
+//                                  a future planner widening.
+//   - `doc_upload_deps_missing`  — the intercept was triggered but
+//                                  the caller didn't supply the
+//                                  resolution deps. Treat as a
+//                                  configuration error (likely a
+//                                  test harness that didn't wire
+//                                  them or a build where Taqnyat
+//                                  isn't the configured BSP).
+//   - `doc_not_found`            — the FileUpload row referenced by
+//                                  the id doesn't exist. The
+//                                  operator may have deleted the
+//                                  file after configuring the
+//                                  campaign. `onDelete: SetNull`
+//                                  in the schema catches the common
+//                                  case, but a race between "send"
+//                                  and "delete" can still surface
+//                                  this.
+//   - `doc_empty`                — the row exists but has zero bytes
+//                                  (shouldn't happen via the upload
+//                                  route — /api/uploads rejects
+//                                  empty files — but defensive
+//                                  against a DB state bug).
+//   - otherwise                  — passthrough of the uploadMedia
+//                                  dep's error string (which includes
+//                                  the HTTP status / BSP message
+//                                  when relevant; see
+//                                  `taqnyatUploadMedia` for the
+//                                  exact format).
+async function resolveInternalDocLink(
+  link: string,
+  deps: WhatsAppSendDeps,
+): Promise<
+  | { ok: true; ref: import("./providers/types").WhatsAppDocumentRef }
+  | { ok: false; error: string }
+> {
+  const uploadId = parseInternalFileLink(link);
+  if (uploadId === null) {
+    return { ok: false, error: "doc_link_not_internal" };
+  }
+  if (!deps.loadFileUpload || !deps.uploadMedia) {
+    return { ok: false, error: "doc_upload_deps_missing" };
+  }
+  const row = await deps.loadFileUpload(uploadId);
+  if (row === null) {
+    return { ok: false, error: "doc_not_found" };
+  }
+  if (row.contents.byteLength === 0) {
+    return { ok: false, error: "doc_empty" };
+  }
+  return await deps.uploadMedia({
+    bytes: row.contents,
+    filename: row.filename,
+    mimeType: row.contentType,
+  });
+}
+
+// Extracts the FileUpload id from the planner's placeholder-link
+// shape. Returns null if the link doesn't match the exact
+// `/api/files/<non-empty-id>` pattern — NOT a generic URL parser.
+// Matches the planner's output in `sendPlan.ts` one-to-one; a
+// planner-side rename (e.g. `/api/files` → `/api/media`) would
+// want to be reflected here too, and the strict match makes that
+// drift surface as a test failure rather than a silent send
+// failure at the provider level.
+function parseInternalFileLink(link: string): string | null {
+  const prefix = "/api/files/";
+  if (!link.startsWith(prefix)) return null;
+  const id = link.slice(prefix.length);
+  if (id.length === 0) return null;
+  // Refuse anything that looks like a continued path (another `/`)
+  // or a querystring — the planner never emits those, so their
+  // presence signals either a caller that bypassed the planner or
+  // a future planner change that didn't update this resolver.
+  if (id.includes("/") || id.includes("?") || id.includes("#")) {
+    return null;
+  }
+  return id;
 }

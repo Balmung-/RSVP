@@ -9,6 +9,7 @@ import type { Campaign, Invitee } from "@prisma/client";
 import type {
   WhatsAppMessage,
   SendResult,
+  WhatsAppDocumentRef,
 } from "../../src/lib/providers/types";
 
 // P13-B — choreography tests for `performWhatsAppSend`.
@@ -64,6 +65,18 @@ type SideEffects = {
     data: string;
   }>;
   sendCalls: WhatsAppMessage[];
+  // P17-C.3 — doc-header resolution tracking. Every intercept call
+  // (loadFileUpload / uploadMedia) is recorded so tests can assert
+  // both "was called with the right args" and "was NOT called when
+  // the intercept shouldn't fire." The latter guards against a
+  // regression that, say, accidentally triggers an upload on every
+  // send regardless of plan shape.
+  loadFileUploadCalls: string[];
+  uploadMediaCalls: Array<{
+    bytes: Uint8Array;
+    filename: string;
+    mimeType: string;
+  }>;
 };
 
 function mkEffects(): SideEffects {
@@ -73,6 +86,8 @@ function mkEffects(): SideEffects {
     updateCalls: [],
     eventLogs: [],
     sendCalls: [],
+    loadFileUploadCalls: [],
+    uploadMediaCalls: [],
   };
 }
 
@@ -81,6 +96,26 @@ function mkDeps(
     unsubscribed?: boolean;
     sendResult?: SendResult;
     nextInvId?: string;
+    // P17-C.3 — doc-header resolution wiring. Both optional so
+    // existing (non-doc) tests can keep passing `{}`. Tests that
+    // exercise the intercept configure the return values
+    // explicitly.
+    //
+    //   - `fileUpload === undefined` → loadFileUpload dep is NOT
+    //     supplied on deps (forces the `doc_upload_deps_missing`
+    //     path when combined with omitted `uploadMedia`).
+    //   - `fileUpload === null`      → dep supplied, returns null
+    //     (the FileUpload row doesn't exist — `doc_not_found`).
+    //   - `fileUpload === { ... }`   → dep supplied, returns row.
+    //
+    // Same three-state convention for `uploadMedia`: undefined =
+    // dep absent; any value = dep supplied with that return.
+    fileUpload?:
+      | { contents: Uint8Array; filename: string; contentType: string }
+      | null;
+    uploadMedia?:
+      | { ok: true; ref: WhatsAppDocumentRef }
+      | { ok: false; error: string };
   } = {},
 ): { deps: WhatsAppSendDeps; effects: SideEffects } {
   const effects = mkEffects();
@@ -106,6 +141,29 @@ function mkDeps(
       );
     },
     now: () => NOW,
+    // Conditionally attach doc deps — opts.fileUpload === undefined
+    // means "don't provide the dep at all," which exercises the
+    // `doc_upload_deps_missing` path.
+    ...(opts.fileUpload !== undefined
+      ? {
+          loadFileUpload: async (id: string) => {
+            effects.loadFileUploadCalls.push(id);
+            return opts.fileUpload ?? null;
+          },
+        }
+      : {}),
+    ...(opts.uploadMedia !== undefined
+      ? {
+          uploadMedia: async (upload: {
+            bytes: Uint8Array;
+            filename: string;
+            mimeType: string;
+          }) => {
+            effects.uploadMediaCalls.push(upload);
+            return opts.uploadMedia!;
+          },
+        }
+      : {}),
   };
   return { deps, effects };
 }
@@ -437,4 +495,258 @@ test("template-first rule: template used even when sessionOpen + templateSms als
   assert.deepEqual(r, { ok: true, invitationId: INV_ID });
   assert.equal(effects.sendCalls.length, 1);
   assert.equal(effects.sendCalls[0].kind, "template");
+});
+
+// ---- P17-C.3: doc-header placeholder → mediaId swap -------------
+//
+// When the planner emits a template message with a placeholder
+// `headerDocument: { kind: "link", link: "/api/files/<id>" }`,
+// performWhatsAppSend intercepts BEFORE the provider.send call,
+// reads the FileUpload bytes via `loadFileUpload`, uploads them
+// via `uploadMedia` (wired to Taqnyat in real deps), and swaps
+// the ref to `{ kind: "id", mediaId, filename }`. Any failure in
+// that chain fails the invitation row with a structured error;
+// the chat widgets (P17-C.5) will render those errors later.
+
+const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31]); // "%PDF-1"
+const UPLOAD_ID = "upl-abc123";
+const MEDIA_ID = "4455667788";
+
+test("doc-header: happy path — load + upload + send with id-ref headerDocument", async () => {
+  // Full chain: doc-configured campaign → planner emits link
+  // placeholder → loadFileUpload called with id parsed from link
+  // → uploadMedia called with bytes+filename+mime → provider.send
+  // called with an id-shape headerDocument ref → invitation
+  // marked sent. Pins every step of the handoff in order.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: PDF_BYTES,
+      filename: "invitation.pdf",
+      contentType: "application/pdf",
+    },
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: MEDIA_ID, filename: "invitation.pdf" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: true, invitationId: INV_ID });
+  // loadFileUpload called with the id parsed from the planner's
+  // placeholder link — NOT the full `/api/files/<id>` URL.
+  assert.deepEqual(effects.loadFileUploadCalls, [UPLOAD_ID]);
+  // uploadMedia receives bytes + filename + mime unchanged from
+  // the FileUpload row (no re-projection).
+  assert.equal(effects.uploadMediaCalls.length, 1);
+  assert.equal(effects.uploadMediaCalls[0].bytes, PDF_BYTES);
+  assert.equal(effects.uploadMediaCalls[0].filename, "invitation.pdf");
+  assert.equal(effects.uploadMediaCalls[0].mimeType, "application/pdf");
+  // Provider.send receives the SWAPPED message — the
+  // headerDocument is now an id-ref, not the link placeholder.
+  assert.equal(effects.sendCalls.length, 1);
+  const sent = effects.sendCalls[0];
+  assert.equal(sent.kind, "template");
+  if (sent.kind !== "template") return;
+  assert.deepEqual(sent.headerDocument, {
+    kind: "id",
+    mediaId: MEDIA_ID,
+    filename: "invitation.pdf",
+  });
+  // Invitation ends up sent, not failed.
+  assert.ok(
+    effects.updateCalls.some((u) => u.status === "sent"),
+    "invitation should be marked sent",
+  );
+});
+
+test("doc-header: plain template (no doc ref) skips load + upload entirely", async () => {
+  // A negative pin: without `whatsappDocumentUploadId` set, the
+  // planner emits no headerDocument, and the intercept must NOT
+  // fire. Catches a regression that accidentally resolves the
+  // (absent) headerDocument on every send — which would make
+  // plain-template sends fail the moment a deployment lacks
+  // doc deps.
+  const { deps, effects } = mkDeps({
+    // Doc deps intentionally NOT supplied; if the intercept fires
+    // we'd hit `doc_upload_deps_missing` and the send would fail.
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "rsvp_invitation_v1",
+      templateWhatsAppLanguage: "en_US",
+      // whatsappDocumentUploadId: null (mkCampaign default)
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: true, invitationId: INV_ID });
+  assert.deepEqual(effects.loadFileUploadCalls, []);
+  assert.deepEqual(effects.uploadMediaCalls, []);
+  // Provider.send fired once, with a template message carrying no
+  // headerDocument at all.
+  assert.equal(effects.sendCalls.length, 1);
+  const sent = effects.sendCalls[0];
+  assert.equal(sent.kind, "template");
+  if (sent.kind !== "template") return;
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(sent, "headerDocument"),
+    false,
+  );
+});
+
+test("doc-header: loadFileUpload returns null → invitation failed doc_not_found, no upload, no send", async () => {
+  // Operator has deleted the FileUpload AFTER configuring the
+  // campaign (onDelete:SetNull would usually null the FK, but a
+  // race between send queueing and delete can still surface
+  // this). Must fail cleanly — NOT call uploadMedia (would be
+  // a no-op, but we pin the "fail-fast" discipline).
+  const { deps, effects } = mkDeps({
+    fileUpload: null, // dep provided, but returns "row not found"
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: "should-not-appear", filename: "x" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: false, error: "doc_not_found" });
+  assert.deepEqual(effects.loadFileUploadCalls, [UPLOAD_ID]);
+  // Crucially, NO upload, NO send.
+  assert.deepEqual(effects.uploadMediaCalls, []);
+  assert.deepEqual(effects.sendCalls, []);
+  // Invitation is marked failed with the structured error.
+  assert.ok(
+    effects.updateCalls.some(
+      (u) => u.status === "failed" && u.error === "doc_not_found",
+    ),
+    "invitation should be marked failed with error=doc_not_found",
+  );
+});
+
+test("doc-header: FileUpload with empty bytes → invitation failed doc_empty, no upload, no send", async () => {
+  // Defensive pin against a DB state bug: a FileUpload row that
+  // exists but has zero-length contents (shouldn't happen via
+  // /api/uploads — it rejects empty files — but the schema
+  // allows it). The length-0 guard mirrors P17-B's
+  // `taqnyatUploadMedia` short-circuit; catching it pre-upload
+  // means the operator sees `doc_empty` rather than the generic
+  // `whatsapp-media: empty bytes` — the former is immediately
+  // actionable (re-upload the PDF), the latter sounds like a
+  // network problem.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: new Uint8Array(0),
+      filename: "invitation.pdf",
+      contentType: "application/pdf",
+    },
+    uploadMedia: {
+      ok: true,
+      ref: { kind: "id", mediaId: "nope", filename: "x" },
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: false, error: "doc_empty" });
+  assert.deepEqual(effects.loadFileUploadCalls, [UPLOAD_ID]);
+  assert.deepEqual(effects.uploadMediaCalls, []);
+  assert.deepEqual(effects.sendCalls, []);
+  assert.ok(
+    effects.updateCalls.some(
+      (u) => u.status === "failed" && u.error === "doc_empty",
+    ),
+    "invitation should be marked failed with error=doc_empty",
+  );
+});
+
+test("doc-header: uploadMedia fails → invitation failed with upload error, no send", async () => {
+  // Meta / BSP upload rejection. The intercept passes the error
+  // string through verbatim (no rewrap) so the operator sees
+  // exactly what Taqnyat said — "whatsapp-media 401: bad token"
+  // or similar. No provider.send call on upload failure;
+  // invitation marked failed.
+  const { deps, effects } = mkDeps({
+    fileUpload: {
+      contents: PDF_BYTES,
+      filename: "invitation.pdf",
+      contentType: "application/pdf",
+    },
+    uploadMedia: {
+      ok: false,
+      error: "whatsapp-media 401: invalid token",
+    },
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, {
+    ok: false,
+    error: "whatsapp-media 401: invalid token",
+  });
+  assert.deepEqual(effects.loadFileUploadCalls, [UPLOAD_ID]);
+  assert.equal(effects.uploadMediaCalls.length, 1);
+  assert.deepEqual(effects.sendCalls, []);
+  assert.ok(
+    effects.updateCalls.some(
+      (u) =>
+        u.status === "failed" &&
+        u.error === "whatsapp-media 401: invalid token",
+    ),
+    "invitation should be marked failed with the upload error verbatim",
+  );
+});
+
+test("doc-header: dep not supplied → invitation failed doc_upload_deps_missing, no load, no send", async () => {
+  // Harness-level failure mode: the caller's deps forgot to wire
+  // the resolution path but passed a doc-configured campaign.
+  // Failing with `doc_upload_deps_missing` (rather than silently
+  // sending the unreachable `/api/files/<id>` URL through to the
+  // provider) is what makes this testable at all — the operator
+  // or test author sees an obvious "you forgot to wire it" error
+  // instead of a confusing "Meta can't fetch this URL."
+  const { deps, effects } = mkDeps({
+    // fileUpload + uploadMedia both undefined → neither dep is
+    // on the returned `deps` object.
+  });
+  const r = await performWhatsAppSend(
+    deps,
+    mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: UPLOAD_ID,
+    }),
+    mkInvitee(),
+  );
+  assert.deepEqual(r, { ok: false, error: "doc_upload_deps_missing" });
+  // Neither intercept sub-step fired — the deps check short-
+  // circuits before loadFileUpload would be invoked.
+  assert.deepEqual(effects.loadFileUploadCalls, []);
+  assert.deepEqual(effects.uploadMediaCalls, []);
+  assert.deepEqual(effects.sendCalls, []);
 });
