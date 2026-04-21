@@ -50,8 +50,8 @@ async function createCampaign(formData: FormData) {
   // P17-D.4: the FK check also scopes on `uploadedBy = me.id` so an
   // editor can only bind *their own* upload cuid to a campaign.
   // Without this scope, any editor who learns another operator's
-  // upload id (guessing or via `/api/files/[id]` which is public by
-  // id) could attach another operator's PDF to their own campaign.
+  // upload id could attach another operator's PDF to their own
+  // campaign.
   // Team-shared upload reuse is out of scope for the pilot — it
   // needs an explicit ownership model on FileUpload beyond the
   // single `uploadedBy` column.

@@ -64,3 +64,16 @@ export async function storeUpload(params: {
 export async function fetchUpload(id: string) {
   return prisma.fileUpload.findUnique({ where: { id } });
 }
+
+export async function isUploadPubliclyReferenced(id: string): Promise<boolean> {
+  const needle = `/api/files/${id}`;
+  const [attachmentCount, campaignCount] = await Promise.all([
+    prisma.campaignAttachment.count({ where: { url: needle } }),
+    prisma.campaign.count({
+      where: {
+        OR: [{ brandLogoUrl: needle }, { brandHeroUrl: needle }],
+      },
+    }),
+  ]);
+  return attachmentCount > 0 || campaignCount > 0;
+}

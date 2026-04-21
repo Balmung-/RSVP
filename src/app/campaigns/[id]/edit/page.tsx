@@ -10,6 +10,7 @@ import { logAction } from "@/lib/audit";
 import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
+import { resolveOwnedWhatsAppUpload } from "@/lib/campaign-whatsapp-render";
 
 export const dynamic = "force-dynamic";
 
@@ -122,35 +123,42 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   if (!c) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
-  // P17-D.3 + D.4 + D.5: resolve the attached WhatsApp PDF's
+  // P17-D.3 + D.4 + D.5 + D.6: resolve the attached WhatsApp PDF's
   // {id, filename} pair ONLY when the current viewer owns the
   // upload. Scoped on `uploadedBy = me.id` — the same scope the
   // updateCampaign server action enforces — so a non-owner never
   // sees another editor's filename, AND (D.5) never has the
   // unauthorized upload cuid reach the rendered HTML.
   //
-  // D.5 closes the read/leak path GPT flagged on 3e5a9b2: before
+  // D.5 closed the read/leak path GPT flagged on 3e5a9b2: before
   // D.5, `CampaignForm` received the raw `campaign` row and
   // forwarded `campaign.whatsappDocumentUploadId` into
   // `WhatsAppDocumentInput`'s `defaultValue`, which then emitted
   // the id in a hidden <input> — letting a non-owner inspect the
   // DOM, lift the cuid, and fetch `/api/files/<id>` (public by
-  // id). We now compute the ownership result server-side and pass
-  // a `safeCampaign` into the form with the FK nulled when the
+  // id). We compute the ownership result server-side and pass a
+  // `safeCampaign` into the form with the FK nulled when the
   // scope fails. `no_whatsapp_document` still surfaces the gap on
   // next propose_send; the save-path FK-null posture from D.1 +
   // D.4 still applies (an unauthorized editor saving without
   // re-uploading nulls the row-side FK).
+  //
+  // D.6: the pure ownership-masking + filename-resolve step lives
+  // in `@/lib/campaign-whatsapp-render` so it can be unit-pinned
+  // without a Prisma mock (see
+  // `tests/unit/campaign-whatsapp-render.test.ts`). The impure
+  // Prisma lookup stays here so the calling page keeps full
+  // control of the ownership scope (today: `uploadedBy = me.id`;
+  // a future team-shared or admin-carve-out scope swaps the
+  // lookup without touching the masking seam).
   const ownedUpload = c.whatsappDocumentUploadId
     ? await prisma.fileUpload.findFirst({
         where: { id: c.whatsappDocumentUploadId, uploadedBy: me.id },
         select: { id: true, filename: true },
       })
     : null;
-  const whatsappDocumentFilename = ownedUpload?.filename ?? null;
-  const safeCampaign = ownedUpload
-    ? c
-    : { ...c, whatsappDocumentUploadId: null };
+  const { safeCampaign, whatsappDocumentFilename } =
+    resolveOwnedWhatsAppUpload(c, ownedUpload);
   // Non-admins see only teams they belong to (plus the current team of
   // the campaign so the picker still reflects its actual assignment
   // and submits don't silently orphan it). Admins see every team.
