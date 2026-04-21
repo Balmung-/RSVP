@@ -10793,3 +10793,159 @@ Organized by concern:
 - **No boundary tests for `createMemoryForTeam`** — the server helper is 3 lines of composition over the validator. Testing it requires a live Prisma, which stays out of the unit suite per house convention. Coverage of the validator + the fact that the helper passes the canonical shape verbatim to Prisma's `data` is sufficient.
 
 Ready for audit.
+
+## Claude notepad - P16-C (`4020f17`)
+
+### Why this slice
+
+Per GPT's strict next sequence: "make memory retrievable in a deterministic, tenant-safe way". P16-A gave us the operator-list read path (`buildMemoryListQuery` / `listMemoriesForTeam`). P16-C gives us the RECALL read path — the one P16-D will call from `/api/chat` to inject relevant memories into the model's prompt context.
+
+The two paths share *some* shape (teamId-gated where, updatedAt desc ordering) but live under different policy budgets: operator UI wants wide pagination, recall wants a tight, deduplicated, token-budgeted set. Merging them would force every later caller to pass a boolean flag to pick mode; splitting keeps intent obvious at the import site.
+
+### Regression surfaces protected
+
+1. **Tenant safety re-pinned at the recall builder.** `where` keys are exactly `["teamId"]` (no kinds) or `["teamId", "kind"]` (with kinds). Mirrors the P16-A invariant — a future accidental `OR: [...]` widening trips the test before it ships. Pinned with `Object.keys` assertions.
+
+2. **Closed `MEMORY_KINDS` re-enforced at the recall seam.** P16-B closed the set at the write validator. P16-C re-enforces it at the retrieval builder — a caller passing `kinds: ["preference"]` gets a loud throw, not a silently narrowed query that returns zero rows and LOOKS like "no matches". Pinned by three throw assertions (unknown kind alone, unknown in a mixed valid+invalid array, non-array kinds).
+
+3. **Recall-specific limit bounds.** New `recallDefaultLimit: 10` + `recallMaxLimit: 25` in the policy. STRICTLY SMALLER than list bounds — a sanity pin asserts this at the DEFAULT_MEMORY_POLICY level so a future policy retune that accidentally flips `recallMax >= listMax` trips immediately. 25 rows × 1024-char cap = ~25 KB of memory text, which is already near the practical upper bound for useful prompt recall.
+
+4. **Deterministic ordering.** `orderBy: [{ updatedAt: "desc" }, { id: "desc" }]`. Ties on timestamp (two memories updated in the same millisecond — happens under load) are broken by id desc. Cuids are monotonic enough that this tracks "newer record wins", matching updatedAt's intent. Without the secondary key, the same query could return different orderings across requests. Pinned by a tie-break test.
+
+5. **Empty `kinds: []` is a loud throw, not a silent interpretation.** "Filter to no kinds" vs "no filter" are both plausible readings of an empty array — both are likely caller bugs. Callers who want "all kinds" omit the field entirely; the throw surfaces the mistake at dev time rather than shipping a silent interpretation choice.
+
+6. **`take: undefined` sentinel avoided.** Same NaN/Infinity/fractional clamp philosophy as P16-A's `buildMemoryListQuery`. NaN → min, Infinity → max, fractional → floor. Pinned.
+
+7. **Dedup preserves provenance of the surviving (most-recent) row.** When two memories share a body, the newer one's provenance (session/message/user IDs) flows into the recall output — the older is dropped entirely. The ranker does NOT merge provenance. Pinned.
+
+8. **Whitespace-normalised dedup key.** "team  prefers morning" (two spaces) and "team prefers morning" (one) are the same fact for recall purposes. The normalisation is internal to the dedup key only — the stored body on the surviving row is preserved AS-IS (display-layer trimming is a caller concern). Pinned.
+
+9. **Ranker does not mutate input.** Sorts a COPY, returns a new array. A caller passing `rows` from `prisma.memory.findMany` and reusing it elsewhere isn't surprised by a reordered array. Pinned.
+
+10. **Non-array / null / undefined input returns `[]`.** Defensive — a buggy caller dropping `null` into the recall path shouldn't crash the prompt builder. The server-only wrapper is type-safe so in practice this branch is unreachable, but pinning prevents a future refactor from throwing here and cascading to a 500.
+
+11. **Barrel stays pure — three DB wrappers pinned absent.** Updated P16-A.1 purity pin: expected set now includes all pure exports (P16-B's `MEMORY_KINDS` + `validateMemoryWrite`, P16-C's `buildMemoryRecallQuery` + `rankMemoriesForRecall`). Explicit negative pins for `listMemoriesForTeam`, `createMemoryForTeam`, `recallMemoriesForTeam`. Any future refactor that re-adds a DB edge to the barrel trips the test.
+
+### Implementation
+
+**Policy ([src/lib/memory/policy.ts](src/lib/memory/policy.ts))**
+
+```ts
+// New knobs:
+recallDefaultLimit: 10,   // default recall row count
+recallMaxLimit: 25,       // hard ceiling for recall limits
+```
+
+Values chosen so recall at max still fits in ~25 KB of memory text (small enough to leave room for non-memory context; large enough that the team's core facts can surface). Policy stays `Object.freeze`'d from P16-A.
+
+**Retrieval module ([src/lib/memory/retrieval.ts](src/lib/memory/retrieval.ts))**
+
+```ts
+export function buildMemoryRecallQuery(
+  teamId: string,
+  opts: MemoryRecallOptions = {},
+): Prisma.MemoryFindManyArgs;
+// Throws on: missing teamId, non-array kinds, empty kinds,
+// unknown kind. Returns clamped take, stable orderBy, optional
+// kind filter in `in: [...]` form.
+
+export function rankMemoriesForRecall(
+  rows: readonly MemoryRecord[],
+  opts: MemoryRankOptions = {},
+): MemoryRecord[];
+// Pure. Sort (idempotent after DB's ORDER BY), dedup by
+// normalised body, clamp to limit. Non-mutating.
+```
+
+Design choices:
+
+- **MemoryRecord type is derived locally** via `import type { Memory as PrismaMemory } from "@prisma/client"` + `type MemoryRecord = PrismaMemory`. Kept out of the barrel import graph to avoid a circular `index.ts → retrieval.ts → index.ts`. The `import type` is erased at compile time, so the module stays pure.
+- **Clamp function is duplicated** (not shared with `query.ts`). Rationale: the recall and list paths have DIFFERENT bounds. If the clamp were shared and took a bounds-tuple, the only compressed caller pattern would be one that wires a bounds argument — which is exactly how a recall caller could accidentally pick up the larger list bound. Duplication costs 6 lines; the alternative costs a future invariant violation.
+- **Kind dedup in the builder.** A caller passing `kinds: ["fact", "fact"]` (harmless but wasteful — e.g. concatenated filter sources) gets a deduplicated `in` clause, not a padded one. Pinned.
+- **Ranker's dedup key** is `body.trim().replace(/\s+/g, " ")` — trim + collapse whitespace runs. Covers the common cases where the same fact was typed twice with different spacing. Does NOT lowercase (case-sensitive dedup keeps "Morning" and "morning" as distinct — they might reflect different operator intents).
+- **Ranker's tie-break** is `id desc`. String compare on cuids tracks time-ordered, so newer cuid wins when updatedAt is equal. Deterministic across processes.
+
+**Server wrapper ([src/lib/memory/server.ts](src/lib/memory/server.ts))**
+
+```ts
+export async function recallMemoriesForTeam(
+  teamId: string,
+  opts: MemoryRecallOptions = {},
+): Promise<MemoryRecord[]> {
+  const rows = await prisma.memory.findMany(buildMemoryRecallQuery(teamId, opts));
+  return rankMemoriesForRecall(rows, { limit: opts.limit, policy: opts.policy });
+}
+```
+
+Single DB edge. Every future caller (`/api/chat` prompt builder, a future `recall_memories` tool, an operator-UI "preview" panel) goes through here. Builder enforces tenant safety + kind gating + DB-level clamp; ranker enforces dedup + final clamp. Both guardrails are non-bypassable because `prisma.memory.findMany` is only reached via this function.
+
+Index usage:
+- No kind filter → hits `@@index([teamId, updatedAt])` (P16-A added this specifically for hot-list recall ordering)
+- With kind filter → hits `@@index([teamId, kind])` (P16-A's second index, added for exactly this P16-C use case)
+
+**Barrel ([src/lib/memory/index.ts](src/lib/memory/index.ts))**
+
+New re-exports (all pure):
+- `MEMORY_KINDS` + `MemoryKind`, `validateMemoryWrite` + `MemoryWriteInput` (P16-B)
+- `buildMemoryRecallQuery` + `MemoryRecallOptions`, `rankMemoriesForRecall` + `MemoryRankOptions` (P16-C)
+
+Barrel purity pin updated. Expected runtime exports set grew from 3 to 7; negative pins now assert all THREE DB wrappers are absent.
+
+### Test coverage breakdown
+
+**`tests/unit/memory-retrieval.test.ts` — 25 new pins**
+
+*Builder (15)*:
+- Happy path: teamId-only where + desc order + default take
+- Tenant-safety: where keys exactly `["teamId"]` without kinds
+- Tenant-safety: where keys exactly `["kind", "teamId"]` with kinds; clause shape `{ in: [...] }`
+- Duplicate kinds in input → deduped in output clause
+- Missing teamId throws
+- Empty kinds `[]` throws
+- kinds not an array throws
+- Unknown kind (alone / mixed with valid) throws
+- Custom limit honored within bounds
+- Upper clamp to recallMaxLimit (at 100_000)
+- Lower clamp to 1 (0 and negatives)
+- NaN / Infinity → 1 / recallMaxLimit (not undefined)
+- Fractional limits floor
+- Custom policy recall bounds threaded through
+- Recall bounds strictly smaller than list bounds (prompt-budget invariant)
+
+*Ranker (10)*:
+- Empty rows → []
+- Non-array input (null / undefined) → [] (defensive)
+- Sorted input passes through
+- Out-of-order input re-sorted desc
+- Tie-break by id desc
+- Dedup: most-recent survives; provenance preserved
+- Dedup: whitespace normalisation
+- Default limit = recallDefaultLimit
+- Custom limit honored
+- Upper clamp to recallMaxLimit; lower clamp to 1; NaN/Infinity clamp; custom policy threaded
+- Dedup can reduce output below limit (no backfill)
+- Input array not mutated
+
+**`tests/unit/memory-helpers.test.ts` — updated**:
+- Frozen-shape pin gained `recallDefaultLimit: 10` + `recallMaxLimit: 25`
+- Barrel purity pin gained new pure exports + two more negative pins (`createMemoryForTeam`, `recallMemoriesForTeam`)
+- Existing `custom policy is honored end-to-end` test extended with recall fields for type completeness (the test still only exercises list bounds)
+
+### Verification
+
+- `npm test`: **1429/1429** (+30 from P16-B's 1399; +25 retrieval + +5 shape/purity updates)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+### What this deliberately does NOT cover (scope-capped per GPT)
+
+- **No prompt injection** — P16-D. The recall path returns rows; WHERE those rows end up in the model's input (system prompt? tool result? assistant message?) is P16-D's call.
+- **No `/api/chat` route integration** — P16-D. The route is untouched.
+- **No tool wiring** — no `recall_memories` tool exists. When/if one lands, it calls `recallMemoriesForTeam` without reshaping either pure helper.
+- **No UI** — P16-E. No operator surface for previewing what the recall path would inject.
+- **No embeddings / semantic ranking** — out of scope. Today's ranking is "most recently updated + deduplicated", which is deterministic and honest. A future slice that adds an embedding column does so as an additive schema change; the ranker signature doesn't change until callers opt into a score-based ordering.
+- **No cross-team leakage test with a live DB** — the tenant-safety pin is structural (the `where` clause's keys). Verifying no rows leak in practice requires a Postgres fixture, which stays out of the unit suite per house convention.
+
+Ready for audit.
+
+
