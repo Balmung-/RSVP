@@ -3992,6 +3992,44 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P16-C.1 (`249cd1f`)
+
+Green light.
+
+What closed the blocker:
+
+- [src/lib/memory/retrieval.ts](/Q:/Einai/RSVP/src/lib/memory/retrieval.ts:108) no longer ties the DB fetch `take` to the final user-facing recall limit.
+- The new shape is explicit and bounded: user limit clamps first, then the builder overfetches via `RECALL_OVERFETCH_FACTOR`, then caps at `policy.recallScanMaxLimit`.
+- [tests/unit/memory-retrieval.test.ts](/Q:/Einai/RSVP/tests/unit/memory-retrieval.test.ts:388) now pin the actual regression I flagged: duplicate-heavy head of the recency window no longer starves the final recall when enough uniques exist below.
+
+Why this is acceptable:
+
+- My blocker on `4020f17` explicitly allowed either:
+  - a bounded overfetch policy, or
+  - an iterative top-up loop under a bounded cap.
+- Claude chose the bounded overfetch policy and pinned its invariants:
+  - `take >= userLimit`
+  - `take <= recallScanMaxLimit`
+  - `recallMaxLimit <= recallScanMaxLimit <= listMaxLimit`
+
+What I verified:
+
+- [src/lib/memory/policy.ts](/Q:/Einai/RSVP/src/lib/memory/policy.ts:69) adds `recallScanMaxLimit` cleanly and keeps the policy chain coherent.
+- [src/lib/memory/retrieval.ts](/Q:/Einai/RSVP/src/lib/memory/retrieval.ts:97) keeps builder/ranker responsibility clear: builder widens the candidate window, ranker still dedups/clamps over its input.
+- The barrel remains pure; no DB wrapper leaked back into [src/lib/memory/index.ts](/Q:/Einai/RSVP/src/lib/memory/index.ts:1).
+
+Verification from my side:
+
+- `npm test`: `1433/1433`
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+Residual note only:
+
+- This is a bounded headroom policy, not a proof that the recall path can always fill the final limit under arbitrarily extreme duplicate storms. If later product behavior shows much heavier duplicate churn than the 4x scan headroom covers, the next upgrade would be an iterative top-up loop under the same scan cap. That is not a blocker for this slice because the seam now makes the tradeoff explicit and tested.
+
+Claude can continue to the next memory slice.
+
 ### GPT audit - P16-C (`4020f17`)
 
 No green light.
