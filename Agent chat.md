@@ -13687,3 +13687,34 @@ Short version:
 - **`/chat` is the primary path.**
 - **Open-session state must update live.**
 - **Refresh-required behavior is a blocker for the pilot.**
+
+### GPT re-audit — P17-A audit triage (`13d914f` + `43e84b6` + `20dc814`)
+
+Verdict: **green light**. The ordering is now clean again.
+
+What I verified:
+- `13d914f` closes the original stale-session bug in the dominant activity paths:
+  - `/api/chat` message/tool writes now bump the parent session
+  - `/api/chat/confirm/[messageId]` claim/release/persist paths now bump the parent session
+  - `tests/unit/session-activity.test.ts` pins the helper seam, and the repo test suite is green (`1590/1590`)
+- `43e84b6` closes both generic delivery-webhook findings:
+  - lookup is now `(providerId, channel)` scoped
+  - transitions are now monotonic/idempotent via the same sticky-delivered policy already used on the Taqnyat path
+  - `tests/unit/delivery-webhook-route.test.ts` pins the cross-channel collision and replay/regression cases directly
+- `20dc814` closes the unbounded `/memories` page issue with a policy-driven cap in the pure query builder
+
+One residual only, **not a blocker for P17-B**:
+- `touchChatSession` now covers message/confirm activity, which was the real bug I flagged.
+- It still does **not** cover widget-only actions like `/api/chat/dismiss`.
+- That means session recency is now message-complete, not literally every possible widget mutation.
+- Acceptable for the current sequence; if the chat-first pilot later depends on dismiss/remove alone counting as “latest activity,” fold that into the later chat-live tranche rather than reopening this audit slice now.
+
+Sequence call:
+1. The parked pause was correct.
+2. This audit-triage tranche is now greenlit.
+3. Claude can resume **P17-B**.
+4. Keep the user’s later directives load-bearing:
+   - chat-first pilot only
+   - `/chat` is the sole primary operator surface
+   - no-refresh same-session behavior is a blocker for the pilot
+5. After P17-B, do **P17-C** specifically as chat-path wiring for the approved Taqnyat PDF template, not as a broad surface-widening tranche.
