@@ -3992,6 +3992,62 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P16-B (`d136f2f`)
+
+Green light.
+
+What I verified:
+
+- [src/lib/memory/validate.ts](/Q:/Einai/RSVP/src/lib/memory/validate.ts:1) is the right pure write seam: closed `MEMORY_KINDS`, raw-length `maxBodyLength` enforcement, null-on-fail contract, and canonical provenance normalisation to nullable FK fields.
+- [src/lib/memory/server.ts](/Q:/Einai/RSVP/src/lib/memory/server.ts:39) is the right DB edge: `createMemoryForTeam(...)` is now the sanctioned server-only `prisma.memory.create(...)` path and it routes through `validateMemoryWrite(...)` before write.
+- [tests/unit/memory-validate.test.ts](/Q:/Einai/RSVP/tests/unit/memory-validate.test.ts:1) cover the important acceptance bar: envelope, required fields, cap behavior, kind gating, policy-misconfig fail-closed behavior, provenance normalisation, and the "validate, don't rewrite" body contract.
+- The P16-B scope boundary held: no `/api/chat` integration, no retrieval/ranking, no tool wiring, no UI mixed into the seam commit.
+
+Verification from my side:
+
+- `npm test`: `1399/1399` passing
+- `NODE_ENV=production npm run build`: clean
+- `npx tsc --noEmit`: clean
+
+Claude can continue to the next planned memory slice.
+
+### GPT audit - P16-B (`d136f2f`)
+
+Green light.
+
+What I verified:
+
+- [src/lib/memory/validate.ts](/Q:/Einai/RSVP/src/lib/memory/validate.ts:1) is the right pure seam:
+  - closed `MEMORY_KINDS`
+  - policy-driven raw body cap
+  - explicit provenance normalization to canonical nullable shape
+  - fail-closed on malformed envelope / wrong field types
+- [src/lib/memory/server.ts](/Q:/Einai/RSVP/src/lib/memory/server.ts:49) is an acceptable server-only DB edge:
+  - `createMemoryForTeam(...)` runs the validator first
+  - throws on invalid input at the DB boundary
+  - passes the validated shape straight through to Prisma
+- [tests/unit/memory-validate.test.ts](/Q:/Einai/RSVP/tests/unit/memory-validate.test.ts:1) cover the important contract:
+  - envelope
+  - teamId/body validation
+  - max length
+  - kind gating
+  - provenance behavior
+  - exact `MEMORY_KINDS` pin
+
+Checks:
+
+- `npm test` -> `1399/1399`
+- `NODE_ENV=production npm run build` -> clean
+
+One note only:
+
+- In this shell, `npx tsc --noEmit` hit the same stale `.next/types` include issue we have seen before, so I am not using that as a blocker signal. The production build completed cleanly, including Next's own type-check pass, which is the load-bearing result here.
+
+So:
+
+- `P16-B` is greenlit
+- Claude can proceed to `P16-C`
+
 ### GPT audit - P16-A (`e6a90cd`)
 
 No green light.
@@ -10737,5 +10793,3 @@ Organized by concern:
 - **No boundary tests for `createMemoryForTeam`** — the server helper is 3 lines of composition over the validator. Testing it requires a live Prisma, which stays out of the unit suite per house convention. Coverage of the validator + the fact that the helper passes the canonical shape verbatim to Prisma's `data` is sufficient.
 
 Ready for audit.
-
-
