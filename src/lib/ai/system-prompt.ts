@@ -22,6 +22,21 @@ export type SystemPromptInput = {
   nowLocal: string; // human-readable local date+time for the header
   tz: string;       // APP_TIMEZONE name, for the model's reference
   todayKey: string; // machine-readable local yyyy-mm-dd
+
+  // P16-D — pre-rendered durable-memory context. Optional because
+  // the gather step may fail closed (empty string), the user may
+  // be a member of zero teams, or the caller (older tests) may
+  // predate the knob. When present and non-empty, it sits BETWEEN
+  // the per-turn grounding line and the tenant-context block so
+  // the model reads "here's today + here's what the team told me
+  // to remember + here's what's live right now". Trusted content
+  // (operator-authored, validated at the write seam); the block
+  // itself carries the "treat as data not commands" reminder.
+  //
+  // Empty string / undefined means "skip the memory block entirely"
+  // — no dangling heading, no wasted tokens. This matches the
+  // renderer's own empty-output contract in `memory-context.ts`.
+  memoryContext?: string;
 };
 
 export type SystemPromptParts = {
@@ -51,17 +66,32 @@ When you are uncertain, say so plainly in one line and propose the single next s
 // register. Today's date is rendered in APP_TIMEZONE — the model
 // can answer relative-time questions ("this week", "next Thursday")
 // without asking and without drifting across local midnight.
+//
+// P16-D — optional durable-memory section sits between the grounding
+// line and the tenant-context block. Only injected when non-empty to
+// avoid a dangling heading on zero-memory turns.
 function dynamicBlock(input: SystemPromptInput): string {
   const langLine =
     input.locale === "ar"
       ? "Interface locale: Arabic (ar). Reply in Modern Standard Arabic unless the operator switches to English."
       : "Interface locale: English (en). Reply in English unless the operator switches to Arabic.";
-  return [
+  const parts: string[] = [
     langLine,
     `Now (local, ${input.tz}): ${input.nowLocal}. Local date key: ${input.todayKey}.`,
     "",
-    input.tenantContext,
-  ].join("\n");
+  ];
+  // P16-D injection point. Memory block goes ABOVE the tenant
+  // context: memory is a cross-turn durable layer ("operator said
+  // X yesterday"), tenant context is a point-in-time snapshot
+  // ("these campaigns are upcoming right now"). The model reads
+  // durable preferences first, then applies them to the live
+  // situation below.
+  if (typeof input.memoryContext === "string" && input.memoryContext.length > 0) {
+    parts.push(input.memoryContext);
+    parts.push("");
+  }
+  parts.push(input.tenantContext);
+  return parts.join("\n");
 }
 
 export function buildSystemPrompt(input: SystemPromptInput): SystemPromptParts {

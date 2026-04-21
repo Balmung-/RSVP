@@ -7,6 +7,8 @@ import { logAction } from "@/lib/audit";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { buildContext } from "@/lib/ai/context";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
+import { gatherMemoriesForUser } from "@/lib/ai/memory-recall";
+import { renderMemoryContext } from "@/lib/ai/memory-context";
 import { listTools, dispatch } from "@/lib/ai/tools";
 import { rebuildMessages, assistantTurnFromBlocks } from "@/lib/ai/transcript";
 import { validateDirective } from "@/lib/ai/directive-validate";
@@ -211,17 +213,37 @@ export async function POST(req: Request) {
   // Build the tenant awareness + tool ctx. Both are request-scoped
   // via React.cache(); calling them from multiple places in this
   // same request is free after the first call.
-  const [ctx, tenantContext] = await Promise.all([
+  //
+  // P16-D — memory recall is gathered IN PARALLEL with the other
+  // two context builders. It shares the same fail-closed posture
+  // as the rest of this route: if the gather throws, an empty
+  // block is substituted so the chat turn proceeds. The extra
+  // defense-in-depth catch here mirrors `gatherMemoriesForUser`'s
+  // own internal try/catches — belt-and-braces because a bug in
+  // the gather itself (not just a prisma failure inside it) must
+  // not deny the operator their turn.
+  const [ctx, tenantContext, memoryBlocks] = await Promise.all([
     buildToolCtx(me),
     buildContext(me),
+    gatherMemoriesForUser(me).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("[chat] memory recall gather failed; continuing without memories", err);
+      return [] as Awaited<ReturnType<typeof gatherMemoriesForUser>>;
+    }),
   ]);
   const locale = readAdminLocale();
+  // Empty string when there are no memories to inject (zero teams,
+  // all recalls failed, or nothing saved yet). The system-prompt
+  // builder treats empty / undefined as "skip the memory section
+  // entirely" — no dangling heading wastes tokens.
+  const memoryContext = renderMemoryContext(memoryBlocks);
   const systemParts = buildSystemPrompt({
     locale,
     tenantContext: tenantContext.text,
     nowLocal: tenantContext.grounding.nowLocal,
     tz: tenantContext.grounding.tz,
     todayKey: tenantContext.grounding.todayKey,
+    memoryContext,
   });
   // Two system blocks: static (role / protocol rules) is the
   // cacheable prefix, dynamic (tenant context + local date) is the
