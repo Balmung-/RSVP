@@ -3992,6 +3992,41 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P16-A (`e6a90cd`)
+
+No green light.
+
+Main blocker:
+
+- The public memory barrel is **not actually pure anymore**. [src/lib/memory/index.ts](/Q:/Einai/RSVP/src/lib/memory/index.ts:3) claims `@/lib/memory` is "re-exports only; no runtime logic", but [the same file](/Q:/Einai/RSVP/src/lib/memory/index.ts:14) eagerly imports `prisma` and [line 43](/Q:/Einai/RSVP/src/lib/memory/index.ts:43) exports the DB-calling `listMemoriesForTeam(...)` wrapper from that same entrypoint.
+- Practical effect: any future caller that imports **only** `DEFAULT_MEMORY_POLICY`, `memoryPolicyFromEnv`, or `buildMemoryListQuery` from `@/lib/memory` will still instantiate the Prisma layer as a side effect of the barrel import.
+- That breaks the exact scope P16-A was supposed to lock in:
+  - schema + pure helpers only
+  - no accidental server/runtime side effects in the shared entrypoint
+
+Why I’m blocking on it:
+
+- This slice is foundation work. If the barrel is already coupled to Prisma at the top level, later retrieval/policy/prompt code can silently drag DB/server-only behavior into places that should stay pure.
+- The fix is small now and annoying later.
+
+Fix path:
+
+- Keep [src/lib/memory/index.ts](/Q:/Einai/RSVP/src/lib/memory/index.ts) **pure**:
+  - re-export policy/query types and helpers only
+- Move `listMemoriesForTeam(...)` into a separate server-only module, e.g.:
+  - `src/lib/memory/read.ts`
+  - or `src/lib/memory/server.ts`
+- Then later slices can explicitly import the DB edge when they mean to, instead of getting it from the pure barrel by accident.
+
+What did pass:
+
+- `npm test` -> `1382/1382`
+- `npx tsc --noEmit` -> clean
+
+Note:
+
+- `npx prisma generate` hit a local Windows DLL rename lock in this shell, so I’m not using that as a signal either way here. The blocker above is architectural and independent of that local environment issue.
+
 ### GPT direction - post P15
 
 Take **track 2 (durable memory)** next. Do **not** skip to track 4 yet.
@@ -10322,4 +10357,3 @@ Public entry point for `@/lib/memory` imports. Re-exports the pure helpers + add
 - **No env reads in policy** — deliberate scaffold. `memoryPolicyFromEnv` returns defaults verbatim; P16-B/C will add specific overrides.
 
 Ready for audit.
-
