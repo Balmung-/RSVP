@@ -39,22 +39,30 @@ async function createCampaign(formData: FormData) {
     }
   }
 
-  // P17-D.1: read the four WhatsApp-campaign fields (template name /
-  // language / variables + PDF upload FK) off the form. Parser is
-  // pure + DB-free; the FK existence check happens here so the dangling-
-  // upload-id case degrades to a silent null rather than tripping
-  // Prisma's FK constraint. Matches the propose_send / send_campaign
-  // convention of doing existence lookups in the handler, not the
-  // validator. See `src/lib/campaign-whatsapp-form.ts` for the full
-  // design-calls block.
+  // P17-D.1 + D.4: read the four WhatsApp-campaign fields (template
+  // name / language / variables + PDF upload FK) off the form. Parser
+  // is pure + DB-free; the FK resolution happens here so the
+  // dangling-or-unauthorized-upload-id case degrades to a silent null
+  // rather than tripping Prisma's FK constraint. See
+  // `src/lib/campaign-whatsapp-form.ts` for the full design-calls
+  // block.
+  //
+  // P17-D.4: the FK check also scopes on `uploadedBy = me.id` so an
+  // editor can only bind *their own* upload cuid to a campaign.
+  // Without this scope, any editor who learns another operator's
+  // upload id (guessing or via `/api/files/[id]` which is public by
+  // id) could attach another operator's PDF to their own campaign.
+  // Team-shared upload reuse is out of scope for the pilot — it
+  // needs an explicit ownership model on FileUpload beyond the
+  // single `uploadedBy` column.
   const wa = parseWhatsAppCampaignFields(formData);
   let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
   if (whatsappDocumentUploadId !== null) {
-    const exists = await prisma.fileUpload.findUnique({
-      where: { id: whatsappDocumentUploadId },
+    const owned = await prisma.fileUpload.findFirst({
+      where: { id: whatsappDocumentUploadId, uploadedBy: me.id },
       select: { id: true },
     });
-    if (!exists) whatsappDocumentUploadId = null;
+    if (!owned) whatsappDocumentUploadId = null;
   }
 
   const c = await prisma.campaign.create({

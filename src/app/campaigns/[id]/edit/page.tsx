@@ -48,20 +48,28 @@ async function updateCampaign(id: string, formData: FormData) {
     }
   }
 
-  // P17-D.1: mirror createCampaign's WhatsApp-campaign parse + FK
-  // existence check. Same silent-drop-on-dangling-id posture so editing
-  // a campaign that referenced an upload which has since been deleted
-  // doesn't 500 — instead the Campaign row's FK is nulled on save and
-  // the `no_whatsapp_document` blocker shows the gap on the next
-  // propose_send.
+  // P17-D.1 + D.4: mirror createCampaign's WhatsApp-campaign parse +
+  // owned-FK check. Same silent-drop posture when the upload id is
+  // dangling, belongs to a different uploader, or has been deleted —
+  // the Campaign row's FK is nulled on save and the
+  // `no_whatsapp_document` blocker shows the gap on the next
+  // propose_send. See `src/app/campaigns/new/page.tsx` for the full
+  // rationale on the `uploadedBy = me.id` scope.
+  //
+  // Behavioural note: if editor A created the campaign with their
+  // own PDF attached, editor B editing the same campaign later will
+  // see the picker as empty (D.3's filename resolver applies the
+  // same scope), and saving without re-uploading will null the FK.
+  // That's the "safer than loud" pilot posture — team-shared PDF
+  // reuse is a follow-up tranche.
   const wa = parseWhatsAppCampaignFields(formData);
   let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
   if (whatsappDocumentUploadId !== null) {
-    const exists = await prisma.fileUpload.findUnique({
-      where: { id: whatsappDocumentUploadId },
+    const owned = await prisma.fileUpload.findFirst({
+      where: { id: whatsappDocumentUploadId, uploadedBy: me.id },
       select: { id: true },
     });
-    if (!exists) whatsappDocumentUploadId = null;
+    if (!owned) whatsappDocumentUploadId = null;
   }
 
   await prisma.campaign.update({
@@ -114,14 +122,20 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   if (!c) notFound();
   if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
-  // P17-D.3: resolve the attached WhatsApp PDF's filename so
+  // P17-D.3 + D.4: resolve the attached WhatsApp PDF's filename so
   // CampaignForm can display it next to the picker instead of just
-  // the cuid. Only fires when the campaign actually has an FK set,
-  // so no wasted Prisma hit on the common case.
+  // the cuid. Scoped on `uploadedBy = me.id` — the same scope the
+  // updateCampaign server action enforces — so the picker won't
+  // show another editor's filename even if their FK is currently
+  // bound on the campaign row. If the scope fails, the picker
+  // shows as empty and the updateCampaign save-path will null the
+  // FK on next save (the `no_whatsapp_document` blocker then
+  // surfaces the gap at send). Only fires when the campaign has
+  // an FK, so no wasted Prisma hit on the common case.
   const whatsappDocumentFilename = c.whatsappDocumentUploadId
     ? (
-        await prisma.fileUpload.findUnique({
-          where: { id: c.whatsappDocumentUploadId },
+        await prisma.fileUpload.findFirst({
+          where: { id: c.whatsappDocumentUploadId, uploadedBy: me.id },
           select: { filename: true },
         })
       )?.filename ?? null
