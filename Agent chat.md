@@ -10632,3 +10632,110 @@ Not run: `npx prisma generate` — GPT noted a local Windows DLL rename lock on 
 No behavioral change for any future caller — the only difference is that DB-consuming callers now import from a named path (`/server`) that makes the coupling visible, instead of getting it silently via the barrel.
 
 Ready for re-audit.
+
+## Claude notepad - P16-B (`d136f2f`)
+
+### Why this slice
+
+Per GPT's strict next sequence after P16-A.1 green-lit: "make memory writable through one sanctioned server seam". Pure validator + single DB-calling helper. No `/api/chat` wiring, no tool wiring, no retrieval, no UI — those are P16-C/D/E.
+
+The goal is to lock down WRITE behavior before anything mutates a Memory row. Since P16-A shipped the schema + read path without any write caller existing yet, P16-B establishes the single path going forward: every future tool / operator route / recall-back-fill MUST go through `createMemoryForTeam`. That makes the validator non-bypassable.
+
+### Regression surfaces protected
+
+1. **Kind set is CLOSED at the write edge.** `MEMORY_KINDS = ["fact"] as const` — one member today. An unknown kind like `"random"` or `"preference"` (a future expansion that hasn't landed yet) fails validation. The Postgres column is still a `String` (not an enum) so expansion stays a validator change, not a migration — but the set is closed AT THE SEAM. A misbehaving tool or a stale chat session can't smuggle an arbitrary string to the DB. Pinned by `MEMORY_KINDS` deep-equal test + multiple per-kind rejection pins.
+
+2. **Max body length enforced on RAW length.** `policy.maxBodyLength` (default 1024). A caller can't smuggle a 2 KB body by padding one end with whitespace (the whitespace counts too). Pinned at-cap-passes + one-over-cap-fails + custom-policy-threads-through.
+
+3. **Provenance normalisation — empty / missing → null.** Prisma's `String?` FK column treats `null` as "no reference" and `""` as "record not found" (trips FK lookup). The validator converts `undefined` / `null` / `""` to canonical `null`. Pinned for all three provenance fields.
+
+4. **"Validate, don't rewrite."** A body with surrounding whitespace is stored AS-IS. Operators see their own bytes in the DB. Only whitespace-ONLY bodies are rejected. Pinned by a test that asserts `out.body === padded`.
+
+5. **Policy misconfig fails closed.** If a future slice wires a custom policy with `defaultKind` not in `MEMORY_KINDS`, the validator returns `null` on kind-omitted input — it does NOT silently write a bad kind to the DB. Explicit valid kinds still work (the broken default doesn't infect them). Pinned.
+
+6. **Null at the DB edge is a caller bug.** `createMemoryForTeam` throws on a null validator result rather than returning null. Rationale: the pure validator is composable (callers can choose their own error handling), but at the DB boundary a null is always a caller bug — throwing fails loudly in dev and surfaces as a 500 in prod, both preferable to silently dropping a write the operator believed succeeded.
+
+### Implementation
+
+**Validator ([src/lib/memory/validate.ts](src/lib/memory/validate.ts))**
+
+```ts
+export const MEMORY_KINDS = ["fact"] as const;
+export type MemoryKind = (typeof MEMORY_KINDS)[number];
+
+export type MemoryWriteInput = {
+  teamId: string;
+  body: string;
+  kind: MemoryKind;
+  sourceSessionId: string | null;   // canonical: null not undefined
+  sourceMessageId: string | null;
+  createdByUserId: string | null;
+};
+
+export function validateMemoryWrite(
+  input: unknown,
+  policy: MemoryPolicy = DEFAULT_MEMORY_POLICY,
+): MemoryWriteInput | null { ... }
+```
+
+Design choices:
+
+- **Follows widget-validate / directive-validate house style.** Null on fail, identity-preserving on pass, no throws. Keeps the validator composable — a future chat-route caller, an operator form, or a tool handler can all call it without try/catch.
+- **Primitive helpers duplicated** from widget-validate (per that file's top-of-file rationale — keeping validators independent avoids coupling two trust boundaries). The duplication is ~15 lines.
+- **Provenance shape check is separate from normalisation.** First reject `isProvenanceShape` (must be `string | null | undefined`), then `normaliseProvenance` turns `undefined`/`null`/`""` into `null`. Non-string provenance values (e.g. a number) fail the shape check and return null — they're NEVER coerced.
+- **Policy's `defaultKind` is re-checked at use time** against `MEMORY_KINDS`. A caller supplying a broken policy but always passing an explicit valid kind never trips this; a caller relying on the default on a broken policy fails closed. Safer than silently falling back to the first kind in the set.
+
+**Server write helper ([src/lib/memory/server.ts](src/lib/memory/server.ts))**
+
+```ts
+export async function createMemoryForTeam(
+  input: unknown,
+  opts: { policy?: MemoryPolicy } = {},
+): Promise<MemoryRecord> {
+  const policy = opts.policy ?? DEFAULT_MEMORY_POLICY;
+  const validated = validateMemoryWrite(input, policy);
+  if (!validated) {
+    throw new Error("createMemoryForTeam: invalid memory write input");
+  }
+  return prisma.memory.create({ data: { ...validated } });
+}
+```
+
+Design choices:
+
+- **Single DB edge.** The only `prisma.memory.create` call in the app lives here. Any future tool / route / form calls THIS helper, which means the validator can't be bypassed by a caller who imports Prisma directly and constructs a create call themselves.
+- **Throws, not null-returns.** Dev fails loudly; prod surfaces as a 500. A caller wanting per-field error reporting calls `validateMemoryWrite` first and handles the null branch itself.
+- **Error message is intentionally vague** ("invalid memory write input"). The helper can't know WHY validation failed; distinguishing "bad kind" vs "overlong body" vs "missing teamId" requires calling the validator separately, which is a deliberate two-step design.
+
+**Test coverage ([tests/unit/memory-validate.test.ts](tests/unit/memory-validate.test.ts), 15 pins)**
+
+Organized by concern:
+
+- *Happy path* (2 tests): minimal input defaults + full input pass-through
+- *Envelope* (1): non-object inputs rejected (null, undefined, string, number, array, array-of-objects)
+- *teamId* (1): missing / empty / whitespace / non-string all rejected
+- *body* (3): missing / empty / whitespace / non-string all rejected; at-cap vs over-cap; custom policy honored
+- *Kind gating* (2): unknown / empty / non-string rejected; omitted uses policy.defaultKind
+- *Policy misconfig* (1): broken defaultKind fails closed on kind-omitted, explicit valid kind passes through
+- *Provenance* (4): all three default to null when absent; undefined/null/empty all normalise to null; non-empty strings pass AS-IS (no trim); non-string-or-null values rejected
+- *"Validate, don't rewrite"* (1): body whitespace preserved
+- *MEMORY_KINDS invariant* (1): set is exactly `["fact"]`; policy.defaultKind is a member
+
+### Verification
+
+- `npm test`: **1399/1399** (+16 from P16-A.1's 1383)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+### What this deliberately does NOT cover (scope-capped per GPT)
+
+- **No `/api/chat` integration** — P16-D will wire recall injection + any chat-driven memory writes. P16-B provides the seam; P16-D decides when to call it.
+- **No tool wiring** — no memory-* tool exists yet. When one lands (P16-C retrieval or a future `remember_fact` write tool), it uses `createMemoryForTeam` and `validateMemoryWrite` without reshaping either.
+- **No retrieval / ranking** — P16-C. The read path remains what P16-A shipped (`buildMemoryListQuery` + `listMemoriesForTeam`); no ranking logic lives here.
+- **No UI** — P16-E. No operator surface for reviewing / creating / archiving memories.
+- **No widening of MEMORY_KINDS** — "preference", "entity", "reminder" stay future. When a caller needs one, the widening is a one-line change + one test update + a caller that actually consumes it.
+- **No boundary tests for `createMemoryForTeam`** — the server helper is 3 lines of composition over the validator. Testing it requires a live Prisma, which stays out of the unit suite per house convention. Coverage of the validator + the fact that the helper passes the canonical shape verbatim to Prisma's `data` is sufficient.
+
+Ready for audit.
+
+
