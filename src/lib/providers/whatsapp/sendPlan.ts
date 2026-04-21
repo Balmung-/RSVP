@@ -1,4 +1,4 @@
-import type { WhatsAppMessage } from "../types";
+import type { WhatsAppDocumentRef, WhatsAppMessage } from "../types";
 import { render } from "@/lib/template";
 
 // P13 — WhatsApp message-shape planner.
@@ -44,6 +44,17 @@ export type WhatsAppPlanCampaign = {
   // discipline (plain text, no template). A dedicated WhatsApp text
   // column is an easy future extension if SMS ergonomics diverge.
   templateSms: string | null;
+  // P17-C.2 — WhatsApp header-document upload ref. When set (and the
+  // template fields above are also set), the planner adds a
+  // `headerDocument` to the template message. Null / empty means the
+  // plain template path (P17-A). The planner emits a placeholder
+  // `{ kind: "link", link: "/api/files/{id}" }` ref — the chat
+  // confirm_send path (P17-C.3) intercepts plans with a link-ref and
+  // swaps them for a Meta `{ kind: "id", mediaId, filename }` after
+  // uploading the bytes via the Taqnyat media endpoint. Keeping the
+  // planner output "link-only" preserves its purity (no I/O); the
+  // ref-swap happens at the delivery edge.
+  whatsappDocumentUploadId: string | null;
 };
 
 export type WhatsAppPlanInput = {
@@ -110,6 +121,36 @@ export function decideWhatsAppMessage(
       // default empty substitution.
       variables = parsed.value.map((expr) => render(expr, vars));
     }
+    // P17-C.2 — doc-header enrichment. The three-field gate
+    // (`campaignWantsWhatsAppDocument`) is co-located in this module;
+    // inside Rule 1 the name/language checks are redundant with the
+    // ones above, but calling the predicate keeps the doc-readiness
+    // semantics in exactly one place. If it returns true, attach a
+    // placeholder `link` ref pointing at our own `/api/files/{id}`
+    // route. The chat confirm_send edge (P17-C.3) intercepts this
+    // link shape, reads the FileUpload bytes, uploads to Meta via
+    // the Taqnyat media endpoint, and swaps the ref to a
+    // `{ kind: "id", mediaId, filename }` before handing the
+    // message to the provider. The link here is therefore a
+    // sentinel — Meta itself never fetches it. Filename is omitted
+    // deliberately: C.3 supplies it from `FileUpload.filename` when
+    // it builds the final ref, and carrying a filename through the
+    // intermediate state would just be dead data.
+    let headerDocument: WhatsAppDocumentRef | undefined;
+    if (
+      campaignWantsWhatsAppDocument({
+        whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
+        templateWhatsAppName: campaign.templateWhatsAppName,
+        templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+      })
+    ) {
+      headerDocument = {
+        kind: "link",
+        // The `!` is safe: the predicate above returned true only
+        // if this field is non-null and non-empty.
+        link: `/api/files/${campaign.whatsappDocumentUploadId!}`,
+      };
+    }
     return {
       ok: true,
       message: {
@@ -118,6 +159,7 @@ export function decideWhatsAppMessage(
         templateName: campaign.templateWhatsAppName,
         languageCode: campaign.templateWhatsAppLanguage,
         variables,
+        ...(headerDocument !== undefined ? { headerDocument } : {}),
       },
     };
   }

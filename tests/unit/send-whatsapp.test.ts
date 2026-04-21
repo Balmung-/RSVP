@@ -138,6 +138,12 @@ function mkCampaign(overrides: Partial<Campaign> = {}): Campaign {
     brandLogoUrl: null,
     brandHeroUrl: null,
     teamId: null,
+    // P17-C.2 — the planner now reads `whatsappDocumentUploadId`;
+    // without this explicit null the `as Campaign` cast masks a
+    // missing-at-runtime field that crashes the predicate's
+    // length check. Every caller of `decideWhatsAppMessage` must
+    // supply this (even as null) now.
+    whatsappDocumentUploadId: null,
     ...overrides,
   } as Campaign;
 }

@@ -47,6 +47,12 @@ function mkCampaign(
     templateWhatsAppLanguage: null,
     templateWhatsAppVariables: null,
     templateSms: null,
+    // P17-C.2 — the new doc-upload FK defaults to null. Every
+    // existing planner test implicitly asserts that without a doc
+    // ref the template path returns NO headerDocument (the message
+    // deep-equal comparisons in Rule 1 tests would fail otherwise).
+    // Tests that need the doc-branch behavior set this explicitly.
+    whatsappDocumentUploadId: null,
     ...overrides,
   };
 }
@@ -488,4 +494,179 @@ test("pass-through: empty vars map → all expressions render to empty strings",
   assert.equal(r.message.kind, "template");
   if (r.message.kind !== "template") return;
   assert.deepEqual(r.message.variables, ["", ""]);
+});
+
+// ---- P17-C.2: template header-document branch -------------------
+//
+// When all three doc-gate fields are configured
+// (`whatsappDocumentUploadId` + `templateWhatsAppName` +
+// `templateWhatsAppLanguage`), the template path attaches a
+// placeholder `headerDocument` ref pointing at
+// `/api/files/<id>`. The chat confirm_send edge (P17-C.3) will
+// intercept this link shape, upload the FileUpload bytes to Meta
+// via Taqnyat's media endpoint, and swap the ref to
+// `{ kind: "id", mediaId, filename }` before the provider call.
+// Pinning the planner's placeholder output shape here locks the
+// handoff contract to that upstream interception step.
+
+test("doc header: upload id + template name + language → template with placeholder headerDocument link", async () => {
+  // Full happy path: every field the doc-gate requires is set.
+  // The planner must emit a template message with
+  // `headerDocument: { kind: "link", link: "/api/files/<id>" }`.
+  // No `filename` is set at this stage — C.3 supplies it from
+  // `FileUpload.filename` when it rebuilds the ref after upload.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "moather2026_moather2026",
+        templateWhatsAppLanguage: "ar",
+        whatsappDocumentUploadId: "upl-abc123",
+      }),
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.deepEqual(r.message.headerDocument, {
+    kind: "link",
+    link: "/api/files/upl-abc123",
+  });
+});
+
+test("doc header: plain template (no upload id) → headerDocument absent (key not set)", async () => {
+  // The existing Rule 1 happy-path tests assert template-shape via
+  // `deepEqual` with NO headerDocument key, which already catches
+  // regressions. But making it an explicit pin means a future
+  // refactor that accidentally adds `headerDocument: undefined` (a
+  // semantically-different "key present, value undefined" state)
+  // fails loudly. The template message object must NOT carry a
+  // headerDocument property at all when no doc is configured —
+  // otherwise downstream JSON.stringify / provider adapters would
+  // see `"headerDocument": undefined` / `null` and either serialize
+  // it (breaking Meta's envelope) or have to defensively strip it.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "rsvp_invitation_v1",
+        templateWhatsAppLanguage: "en_US",
+        // whatsappDocumentUploadId: null (default in mkCampaign)
+      }),
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(r.message, "headerDocument"),
+    false,
+  );
+});
+
+test("doc header: empty-string upload id → headerDocument absent (length-0 is not configured)", async () => {
+  // Mirrors the predicate's length-0 discipline. An empty string in
+  // the FK column — which could happen via a botched admin edit or a
+  // future form-submit bug — must be treated as "not configured,"
+  // not as "configured but with id=''". The planner degrades to the
+  // plain template path rather than building a `/api/files/` URL.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "moather2026_moather2026",
+        templateWhatsAppLanguage: "ar",
+        whatsappDocumentUploadId: "",
+      }),
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(r.message, "headerDocument"),
+    false,
+  );
+});
+
+test("doc header: upload id present but templateName null → reason:no_template (doc can't rescue missing template)", async () => {
+  // The predicate's reason for requiring a template is exactly this
+  // case: Meta only accepts a header document on a template message.
+  // A doc-configured campaign that's missing its template name can't
+  // suddenly promote itself to template-send just because a PDF is
+  // attached. The planner's Rule-1 guard (name+lang must both be
+  // set) fires first, so we land in Rule 3 — `no_template`. This
+  // pin is about the rule ORDERING: "is the campaign-template
+  // configured" is checked before "does it want a doc header"; the
+  // doc-gate never rescues missing template config.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: null,
+        templateWhatsAppLanguage: "ar",
+        whatsappDocumentUploadId: "upl-abc123",
+      }),
+    }),
+  );
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "no_template");
+});
+
+test("doc header: upload id + template + variables → headerDocument AND variables both present", async () => {
+  // A doc-configured campaign with template BODY variables is the
+  // realistic pilot shape: `moather2026_moather2026` has both a
+  // header document AND body params for name / event-at / etc.
+  // The planner must emit BOTH fields in the same template message
+  // — they're independent components on Meta's side (header and
+  // body). Pinning both in one result means a regression that
+  // accidentally uses an else-branch (doc OR variables but not
+  // both) fails loudly.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "moather2026_moather2026",
+        templateWhatsAppLanguage: "ar",
+        templateWhatsAppVariables: JSON.stringify(["{{name}}", "{{venue}}"]),
+        whatsappDocumentUploadId: "upl-xyz789",
+      }),
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.deepEqual(r.message.variables, ["Ahmed", "Four Seasons"]);
+  assert.deepEqual(r.message.headerDocument, {
+    kind: "link",
+    link: "/api/files/upl-xyz789",
+  });
+});
+
+test("doc header: doc-gate true AND sessionOpen+templateSms → template-with-doc wins over session text", async () => {
+  // Rule ordering pin, doc-aware variant of the existing "template
+  // wins over session text" pin. Adding a PDF to a campaign must
+  // NOT accidentally shift the send path to session-text even when
+  // the recipient is inside the 24h window — the doc header is a
+  // template-component feature, so the template path is the only
+  // correct channel for it. Session text can't carry a PDF.
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "moather2026_moather2026",
+        templateWhatsAppLanguage: "ar",
+        templateSms: "fallback: Hi {{name}}",
+        whatsappDocumentUploadId: "upl-abc123",
+      }),
+      sessionOpen: true,
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.deepEqual(r.message.headerDocument, {
+    kind: "link",
+    link: "/api/files/upl-abc123",
+  });
 });

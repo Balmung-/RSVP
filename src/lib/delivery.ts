@@ -197,6 +197,16 @@ export async function performWhatsAppSend(
       templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
       templateWhatsAppVariables: campaign.templateWhatsAppVariables,
       templateSms: campaign.templateSms,
+      // P17-C.2 — pass the doc-upload FK to the planner. When set
+      // alongside a template name+language, the planner attaches a
+      // placeholder `headerDocument: { kind: "link", ... }` ref that
+      // the chat confirm_send edge (P17-C.3) swaps for a Meta
+      // `{ kind: "id", mediaId, filename }` after uploading the
+      // bytes. In the current delivery path (direct provider send)
+      // this project still works — the link placeholder goes through
+      // to the provider, which will fail Meta's reachability check
+      // on the internal URL. C.3's interception closes that loop.
+      whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
     },
     to: invitee.phoneE164,
     vars: buildVars(campaign, invitee),
