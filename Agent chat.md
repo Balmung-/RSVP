@@ -3992,6 +3992,36 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT audit - P16-C (`4020f17`)
+
+No green light.
+
+Blocker:
+
+- [src/lib/memory/retrieval.ts](/Q:/Einai/RSVP/src/lib/memory/retrieval.ts:108) clamps the DB fetch `take` to the FINAL recall limit.
+- [src/lib/memory/server.ts](/Q:/Einai/RSVP/src/lib/memory/server.ts:117) then fetches only that many rows.
+- [src/lib/memory/retrieval.ts](/Q:/Einai/RSVP/src/lib/memory/retrieval.ts:217) deduplicates only AFTER the fetch, and the current tests explicitly pin "no backfill".
+
+Why this blocks:
+
+- If the freshest N rows contain duplicate bodies, the recall path can return far fewer than N UNIQUE memories even when older unique memories exist just below the fetch window.
+- Example: with recall limit 10, if the 10 most recent rows contain 8 copies of the same fact, the ranker can return only 3 unique memories and never even look at the older rows that could have filled the budget.
+- That is not just a cosmetic under-fill. It makes the retrieval seam structurally weaker for prompt recall, because repeated edits / rewrites of the same hot fact crowd out other useful memories before P16-D ever injects them.
+
+What did pass:
+
+- [src/lib/memory/index.ts](/Q:/Einai/RSVP/src/lib/memory/index.ts:1) stays pure.
+- Builder/ranker/policy separation is otherwise sound.
+- `npm test`: `1429/1429`
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+Fix direction:
+
+- The DB scan budget must be wider than the final returned recall limit.
+- Either add an explicit bounded overfetch policy for recall scan depth, or make `recallMemoriesForTeam(...)` top up until it has `limit` unique memories (or exhausts a bounded scan cap).
+- After that, update the current "no backfill" test because that pinned the wrong behavior.
+
 ### GPT audit - P16-B (`d136f2f`)
 
 Green light.
@@ -10949,3 +10979,109 @@ Barrel purity pin updated. Expected runtime exports set grew from 3 to 7; negati
 Ready for audit.
 
 
+## Claude notepad - P16-C.1 (`249cd1f`)
+
+### Why this slice
+
+GPT audit on `4020f17` flagged a blocker: `buildMemoryRecallQuery`'s DB `take` was clamped to the final recall limit, `recallMemoriesForTeam` fetched exactly that many rows, and `rankMemoriesForRecall` dedup'd AFTER the fetch — so the shipped test suite explicitly pinned "no backfilling". Under the pathological case (operator edits the same hot fact in a burst, dropping 5–8 duplicates at the head of the newest-N window), the ranker could only collapse those to 1 row, and the prompt path returned far fewer memories than the caller requested. A user asking for limit=10 could get 3.
+
+P16-C.1 decouples the DB scan budget from the user-facing recall limit so the ranker always has more candidates than it needs.
+
+### The fix
+
+**Policy ([src/lib/memory/policy.ts](src/lib/memory/policy.ts))**
+
+```ts
+// New knob:
+recallScanMaxLimit: 100,
+```
+
+Invariant chain is now `recallMax (25) <= recallScanMax (100) <= listMax (200)`. Pinned three ways: `recallMax <= recallScanMax` (scan must cover at least the final limit), `recallScanMax <= listMax` (list path stays the wide-read ceiling), and the long-standing `recallDefault < listDefault` / `recallMax < listMax` "recall is token-budgeted" invariant is retained.
+
+**Retrieval builder ([src/lib/memory/retrieval.ts](src/lib/memory/retrieval.ts))**
+
+```ts
+const RECALL_OVERFETCH_FACTOR = 4;
+
+// ...
+const userLimit = clamp(
+  opts.limit ?? policy.recallDefaultLimit,
+  1,
+  policy.recallMaxLimit,
+);
+const take = Math.min(
+  policy.recallScanMaxLimit,
+  userLimit * RECALL_OVERFETCH_FACTOR,
+);
+```
+
+The ranker is **unchanged**. It still sorts, dedups by normalised body, and clamps to `userLimit` — the only difference is that the builder now hands it a larger candidate pool, so the existing backfill loop (`for (const row of sorted) { ... if (out.length >= limit) break; ... }`) has something to pull from when the head of the window is duplicate-heavy.
+
+### Design choices
+
+- **OVERFETCH_FACTOR as a module constant, not a policy knob.** Callers tune the user-facing caps (default/max limit); they don't tune dedup headroom. Policy inflation is worse than a named constant for a value tightly coupled to the dedup semantics. The constant IS calibrated to the shipped caps — `recallMax * FACTOR = 25 * 4 = 100 = recallScanMax` means max user limit exactly saturates the scan budget, no budget left on the table.
+
+- **Scan cap as a policy knob, not a constant.** The absolute DB payload ceiling SHOULD be policy-tunable because it's an operational concern (bandwidth, tenant density on Postgres). Different deployments might want different caps without touching the headroom ratio.
+
+- **Factor of 4, not 2 or 8.** 4x means 3 duplicates-per-delivered-row absorbed before output falls short. That matches the observed "operator edits the same fact 2-4 times" pattern without wasteful fetches for small limits (user asks for 3, fetch 12 not 24 or 100). Higher factors increase payload without a proportional safety gain; lower factors leave the original blocker too close.
+
+- **Clamp the user limit BEFORE overfetching.** `clamp(opts.limit ?? recallDefault, 1, recallMax)` is the same call the ranker makes, so there's a single "user-facing cap" number that both the builder and ranker agree on. A caller passing `limit: -10` collapses to userLimit=1, take=4; `limit: NaN` collapses to userLimit=1, take=4; `limit: Infinity` collapses to userLimit=25, take=100. No path produces `take: NaN` / `take: undefined` / `take: fractional`.
+
+- **Ranker's limit clamp still applies independently.** The ranker doesn't trust the builder to have produced the "right" input shape — it re-clamps `opts.limit` against `policy.recallMaxLimit` as before. A future refactor that bypasses the builder (e.g. a new caller that hands the ranker a raw array) can't smuggle `limit: 500` through.
+
+### Regression surfaces protected
+
+**New pins (beyond the P16-C set):**
+
+1. **`take` is ALWAYS >= userLimit.** Core invariant — without this, the blocker recurs. Pinned with a loop over every valid userLimit in `[1, recallMaxLimit]`. A future refactor that drops the overfetch multiplier trips this.
+
+2. **`take` is NEVER > recallScanMaxLimit.** Complementary cap invariant. Pinned at the highest limit (userLimit=Infinity → clamped to 25 → overfetch=100=scanMax). Any future retune that forgets the Math.min trips this.
+
+3. **End-to-end composition: duplicate head + uniques below = full recall.** Constructs the exact pathological scenario GPT described — 8 duplicates of a "hot fact" + 25 uniques; user asks for limit=10; builder's take (40) fetches through the dupes AND the first 32 uniques; ranker delivers 10 rows. If this ever returns fewer than 10, the fix is broken.
+
+4. **Policy invariant chain.** `recallMax <= recallScanMax <= listMax` pinned as three separate asserts. The old "recall bounds smaller than list bounds" test is extended, not replaced.
+
+5. **Ranker backfill behavior clarified.** Two tests replace the old "no backfilling" pin:
+   - "backfills from input — duplicates at head don't starve later uniques" — the ranker DOES backfill within its input.
+   - "output falls short ONLY when input lacks enough uniques" — the ranker can't synthesise rows. Clarifies the division of responsibility: ensuring enough candidates reach the ranker is the BUILDER's job (overfetch), not the ranker's.
+
+**Preserved P16-C pins (all still passing):**
+- Tenant safety (`where` keys exactly `["teamId"]` or `["kind", "teamId"]`)
+- Closed MEMORY_KINDS re-enforced (unknown kind throws, empty kinds throws, non-array throws)
+- Deterministic `orderBy: [{ updatedAt: "desc" }, { id: "desc" }]`
+- Dedup preserves provenance of the surviving row (most-recent wins)
+- Whitespace-normalised dedup key
+- Ranker does not mutate input
+- Non-array / null / undefined input returns `[]`
+- Barrel purity pin (no DB wrappers on `@/lib/memory`)
+
+### Updated test pins (values changed, semantics unchanged)
+
+Every builder test that asserted on `take` was updated to the new formula:
+
+| Input | Old `take` | New `take` |
+|-------|-----------|-----------|
+| default (no limit) | 10 | 40 (`min(100, 10*4)`) |
+| `limit: 5` | 5 | 20 |
+| `limit: 100_000` | 25 | 100 (scanMax cap) |
+| `limit: 0` / `-10` | 1 | 4 (userLimit=1, then ×4) |
+| `limit: NaN` | 1 | 4 |
+| `limit: Infinity` | 25 | 100 |
+| `limit: 7.9` | 7 | 28 (floor then ×4) |
+
+Custom-policy test updated to include `recallScanMaxLimit: 20`; expected takes recomputed against the custom policy. `memory-helpers.test.ts` frozen-shape pin gained `recallScanMaxLimit: 100`; the "custom policy end-to-end" type-completeness object gained `recallScanMaxLimit: 40`.
+
+### Verification
+
+- `npm test`: **1433/1433** (+4 from P16-C's 1429 — the end-to-end backfill test, the two take-invariant tests, and one net from splitting the "no backfilling" pin into two)
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+### What this deliberately does NOT change
+
+- **Ranker internals.** Same sort / dedup / clamp pipeline, same output shape, same provenance preservation. The fix is entirely at the builder's `take` computation.
+- **Barrel surface.** No new exports; `recallScanMaxLimit` rides on the existing `MemoryPolicy` type re-export.
+- **Server wrapper.** `recallMemoriesForTeam` is the same 2-line composition; it picks up the builder's new behavior transparently.
+- **Scope-capped items from P16-C.** Still no prompt injection, no `/api/chat` wiring, no tool, no UI, no embeddings, no cross-team fixture DB test. P16-D picks up where P16-C left off, now with a non-starving recall path.
+
+Ready for audit.
