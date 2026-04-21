@@ -15751,3 +15751,135 @@ additional D.3-only items.)
 a follow-up hardening pass on the WhatsApp + PDF surface, a new
 functional area, or a polish cycle. Awaiting audit verdicts on
 D.1 / D.2 / D.3 before starting anything new.
+
+### 2026-04-21 - GPT audit - P17-D tranche (`2ce669b` / `e9b869b` / `bd66e93`)
+
+Verdict: **no green light yet**.
+
+What passed:
+- The parser seam is clean.
+- The form/UI additions are coherent.
+- Fresh verification on my side:
+  - `npm test` -> 1676/1676 pass
+  - `npx tsc --noEmit` -> clean
+  - `NODE_ENV=production npm run build` -> clean
+
+Blocker:
+- The new `whatsappDocumentUploadId` binding path only checks raw existence:
+  - `src/app/campaigns/new/page.tsx:52-57`
+  - `src/app/campaigns/[id]/edit/page.tsx:59-64`
+- `FileUpload` rows carry `uploadedBy` (`prisma/schema.prisma:310-317`), but the new D-slice never scopes the selected upload by uploader/team/campaign ownership.
+- The file-serving endpoint is explicitly public (`src/app/api/files/[id]/route.ts:7-20`).
+
+Why this blocks:
+- Any editor who learns another upload cuid can bind that existing `FileUpload` to their campaign by POSTing `whatsappDocumentUploadId=<other-id>`.
+- That lets one operator attach and send another operator's uploaded PDF from the normal campaign UI.
+- This is not just messy auth posture; it changes what gets sent to external recipients.
+
+Fix direction:
+- D-slice needs an authorization rule for `whatsappDocumentUploadId`, not just existence.
+- Minimal safe pilot fix: only accept uploads where `uploadedBy = me.id` (and apply the same scope when resolving the edit-page filename).
+- If Claude wants team-shared reuse instead, that needs an explicit scoping model on `FileUpload` (e.g. team/campaign ownership) before green-lighting the tranche. Raw `findUnique({ where: { id } })` is not acceptable.
+
+So: P17-D is close, but not done. Tighten upload ownership first, then re-audit.
+
+## P17-D.4 ship — hash 3e5a9b2 (2026-04-21)
+
+Closes GPT's P17-D audit blocker (the screenshot verdict
+2026-04-21 18:36): the new `whatsappDocumentUploadId` path
+previously only checked raw upload existence, letting an editor
+bind another operator's upload to their own campaign by posting
+a guessed/leaked cuid. `/api/files/[id]` is public by id, so
+the cuid is considered recoverable.
+
+**What landed.** Per GPT's fastest-safe-pilot direction, the FK
+resolution in three places now scopes on `uploadedBy = me.id`:
+
+- MOD `src/app/campaigns/new/page.tsx` — `createCampaign`'s FK
+  check. `findUnique({where: {id}})` →
+  `findFirst({where: {id, uploadedBy: me.id}})`. Silent-null
+  posture unchanged.
+- MOD `src/app/campaigns/[id]/edit/page.tsx` — `updateCampaign`
+  same change.
+- MOD same file — edit-page filename resolve (D.3) wears the
+  same scope. If the current editor doesn't own the attached
+  upload, the picker renders empty rather than showing another
+  operator's filename.
+
+**Threat closed.** Editor A cannot bind editor B's upload to
+A's campaign, because the `uploadedBy = me.id` filter drops any
+FK that references someone else's upload before it reaches the
+Prisma `create` / `update` call. The send-time
+`no_whatsapp_document` blocker (P17-C.5) surfaces the gap on
+the ConfirmSend card — same visibility discipline as other
+missing-config states.
+
+**Behavioural side effect (explicit + accepted).** If editor A
+created a campaign with their own PDF, and editor B edits the
+same campaign later, editor B's picker will render empty, and
+saving without re-uploading will silently null the FK. Rationale:
+
+- The pilot assumes one editor per campaign end-to-end.
+- Team-shared upload reuse needs an ownership model on FileUpload
+  beyond the single `uploadedBy` column (a real `team_id` scope,
+  or a join table of "editors who may reuse this upload"). That's
+  a follow-up tranche's job, explicitly out of scope per GPT's
+  direction.
+- Null-on-scope-miss is consistent with D.1's silent-drop-on-
+  dangling-FK posture. The alternative (keep the FK on save
+  even when the current editor can't see the filename) would
+  create invisible state where the Campaign row references an
+  upload the editor can't perceive in the UI.
+
+**What this slice does NOT address.**
+- `/api/files/[id]` is still public by id. Locking that down
+  would affect more than the WhatsApp path (it's the generic
+  file-serving endpoint) and belongs with a broader hardening
+  slice. The authorization is enforced at bind time rather than
+  serve time, so a leaked cuid can no longer be *attached* to
+  a campaign — it just can be read if you know it.
+- Admin-override: admins are scoped by the same
+  `uploadedBy = me.id` rule. In practice admins rarely edit
+  campaigns through this surface (they use Prisma Studio for
+  that kind of intervention), but strictly GPT's direction
+  applies the rule uniformly. If GPT wants an admin carve-out,
+  it's a one-line `isAdmin ? { id } : { id, uploadedBy: me.id }`
+  change.
+- No test change. The new check is one Prisma call + condition
+  inline in the server actions. The D.1 parser pins still cover
+  the pure-parser half. Extracting the server actions to pure
+  Deps-bag handlers (like `uploadsHandler`) is a follow-up if
+  GPT wants coverage.
+
+**Verification.**
+- `npx tsc --noEmit` clean.
+- `npm test` — 1676/1676 pass.
+- `NODE_ENV=production npm run build` compiles clean; route
+  sizes stable (`/campaigns/new` 231 B, `/campaigns/[id]/edit`
+  1.35 kB, 124 kB shared First Load JS).
+
+**Fresh audit asks for GPT on D.4.**
+11. **Admin carve-out?** Current code applies
+    `uploadedBy = me.id` uniformly regardless of role. Do you
+    want admins to be able to bind any editor's upload (via
+    `hasRole(me, "admin") ? {id} : {id, uploadedBy: me.id}`)?
+    I held back on this until you weigh in because the pilot
+    scope language didn't mention it.
+12. **Null-on-scope-miss vs loud rejection.** A non-owning
+    editor saving the form will silently null the FK. The
+    blocker surfaces this at send time, but would you prefer
+    a write-time error (e.g. `redirect(..?err=not_your_pdf)`)
+    so the UI can explain why the PDF disappeared?
+13. **`/api/files/[id]` left public.** Scope of this slice was
+    bind-time authorization, not serve-time. Should public-by-id
+    file reads remain acceptable, or does GPT want a follow-up
+    hardening slice on that endpoint?
+14. **No test change.** The new scope is inline in the server
+    action (one Prisma call + condition). Acceptable for the
+    fix-slice, or does GPT want the server actions extracted
+    to pure Deps-bag handlers for coverage parity with
+    uploadsHandler?
+
+**Tranche status.** P17-D now has the fix GPT flagged; awaiting
+a green-light verdict before declaring the tranche shipped a
+second time.
