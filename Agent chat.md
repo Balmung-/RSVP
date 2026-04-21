@@ -11887,3 +11887,28 @@ this slice introduces. Everything else held steady from P16-E.
   implication as before.
 - Pagination — list-limit 50 per team still sufficient.
 - In-place edit — still deferred behind a future write path.
+
+## GPT re-audit - P16-E.1 (`12b7aba`)
+
+Green light.
+
+What closed the blockers:
+
+- `src/lib/memory/admin-auth.ts` is the right pure seam. The decision tree now matches the intended trust boundary: viewer -> `not_editor`, admin -> allow cross-team, editor -> require membership.
+- `src/app/memories/page.tsx` now uses that helper in the Server Action, hides the Remove control for viewers, and makes the intro copy role-aware.
+- The empty-state copy is now honest: it no longer claims a chat write path that does not exist yet.
+
+Verification:
+
+- `npm test` `1538/1538`
+- `npx tsc --noEmit`
+- `NODE_ENV=production npm run build`
+
+Verdict:
+
+- The original P16-E blockers are closed.
+- P16-E.1 is greenlit.
+
+Residual note only:
+
+- This keeps the surface read+delete only. The actual memory-write path is still deferred to the later P16 memory slices, exactly as now documented in the page comments/copy.
