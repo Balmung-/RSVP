@@ -14934,3 +14934,204 @@ doc-configured send, confirm_send shows the right plan, invitation
 persists mediaId provenance) becomes possible — the "first end-
 to-end chat-path proof slice" GPT's P17-C.1 verdict flagged for
 the push. C.5's widget readiness line is the polish pass.
+
+
+## Claude ship log - P17-C.4 invitation payload provenance (9010e11, 2026-04-21)
+
+### What landed
+
+`9010e11` — `P17-C.4: capture doc-header provenance in invitation
+payload post-swap`. Strictly additive: plain-template / text / session-
+text sends take zero new code paths; the doc-header path writes one
+extra `updateInvitation` call. 1639/1639 tests green (1635 → 1639,
++4 new pins on `send-whatsapp.test.ts`). tsc clean, `next build` clean.
+
+Files:
+- `src/lib/delivery.ts`:
+  - `WhatsAppSendDeps.updateInvitation` data param gains optional
+    `payload?: string`. Most update sites still write status /
+    providerId / sentAt / error only; the doc happy path writes a
+    second update carrying just payload.
+  - `resolveInternalDocLink`'s success return widens to
+    `{ ok: true; ref; uploadId: string }`. The parser already had
+    the upload id in hand — threading it out instead of re-parsing
+    at the caller keeps the link-shape matcher in exactly one place.
+  - `performWhatsAppSend`'s intercept block, after a successful
+    swap and BEFORE `deps.send(...)`, calls `deps.updateInvitation`
+    with `{ payload: payloadForDispatch({...}) }` when the swap ref
+    is id-kind. Guarded on `swap.ref.kind === "id"` because the
+    type of `WhatsAppDocumentRef` permits a link-return (no current
+    `uploadMedia` impl produces one, but the type forces the check).
+  - New helper `payloadForDispatch({ templateName, languageCode,
+    variables, mediaId, filename, uploadId })`: builds the JSON the
+    payload column stores (template + language + variables +
+    `documentMediaId` + `documentFilename` + `documentUploadId`).
+    Takes narrow inputs, not a `WhatsAppMessage`, so the helper never
+    has to branch on message kind — every field it reads is required
+    and typed at the call boundary.
+- `tests/unit/send-whatsapp.test.ts`:
+  - `SideEffects.updateCalls` item type gains `payload?: string` so
+    tests can `filter(u => u.payload !== undefined)` to isolate
+    provenance updates from status updates.
+  - Four new pins under `---- P17-C.4: post-swap payload provenance`:
+    happy-path shape (fields + values), plain-template negative
+    (no provenance update), ref-without-filename (explicit `null`
+    serialization), swap-failure negative (no provenance update,
+    only terminal failed-status).
+
+### Payload shape (post-swap, doc-header path)
+
+```jsonc
+{
+  "template": "moather2026_moather2026",
+  "language": "ar",
+  "variables": ["Ahmed Faisal", "Four Seasons"],
+  "documentMediaId": "<Meta media id from uploadMedia>",
+  "documentFilename": "<filename from ref, or null>",
+  "documentUploadId": "<FileUpload row id>"
+}
+```
+
+Non-doc template sends keep the C.2-era shape (no `documentX`
+fields). Session-text sends keep the rendered body (no JSON). The
+shape is a strict superset-or-disjoint relative to what existed —
+readers that parse the old shape don't break; readers that want
+provenance look for the new fields.
+
+### Design calls and why
+
+- **Two updates per doc send, not one.** The post-swap payload
+  update writes BEFORE `deps.send(...)`; the terminal status update
+  writes after. Three alternatives considered:
+  1. *Single deferred create.* Write the invitation AFTER the swap.
+     Loses the "queued" audit state; a swap failure would have no
+     row at all, and operators would have to cross-reference
+     EventLog to know an attempt was made.
+  2. *Merge provenance into the success-status update.* Loses the
+     provenance on provider failure. An operator debugging "we
+     rejected" would see `status: failed, error: <provider msg>`
+     with no record of WHICH media was attempted. The current
+     design preserves the mediaId trail even when the send fails.
+  3. *Only update on success.* Same loss as (2), phrased differently.
+
+  Two updates per doc send is acceptable for pilot volume; if this
+  becomes the bottleneck, a single batched update is a drop-in
+  refactor (swap-then-send becomes swap-then-send-then-combined-
+  update with `Promise.all` or a transaction).
+
+- **Thread `uploadId` out of `resolveInternalDocLink`.** The parser
+  already produced it at entry — re-parsing at the caller would
+  duplicate the `/api/files/<id>` matcher. Threading also means the
+  "did the upload succeed?" result and the "which upload was it?"
+  answer live in the same return value, which is the coherent unit
+  for downstream audit (provenance needs both to be meaningful).
+
+- **`payloadForDispatch` takes narrow inputs, not `WhatsAppMessage`.**
+  The caller already has the fields it needs (templateName,
+  languageCode, variables from `messageToSend`; mediaId + filename
+  from `swap.ref`; uploadId from `swap.uploadId`). Passing the whole
+  message would force `payloadForDispatch` to re-narrow on `.kind`
+  and `.headerDocument.kind`, adding runtime branches that the
+  caller's type narrowing has already resolved. Narrow params =
+  exactly-one-use discipline.
+
+- **`documentFilename: null` (explicit) not missing.** When the
+  upload ref has no filename, the payload still serializes the key
+  with an explicit null rather than omitting it. Keeps the payload
+  schema stable for readers that might iterate the top-level keys;
+  a missing key would be ambiguous ("old row, written before the
+  field existed" vs. "ref had no filename").
+
+- **Guard on `ref.kind === "id"` even though `uploadMedia` always
+  returns id-kind in practice.** The TypeScript return type is
+  `WhatsAppDocumentRef` (discriminated union of id + link), and
+  there's no real-world path that produces a link-ref from the
+  current Taqnyat adapter. But the type forces the check, and a
+  future `uploadMedia` variant that returns a public-URL ref
+  (e.g. for testing or a different BSP) should not crash the
+  provenance capture — it just shouldn't have provenance to
+  capture. Skipping the update in that (currently impossible)
+  case is safer than forcing a throw.
+
+### What does NOT land in C.4
+
+- **No migration of existing invitation rows.** Rows written before
+  C.4 keep their pre-existing payload JSON. Audit readers that
+  want doc provenance on historical rows would need a separate
+  backfill query — out of scope.
+- **No payload-shape contract doc.** The JSON shape is implicit in
+  `payloadForDispatch` + `payloadForPlan`. A formal payload-shape
+  type / zod schema is a future cleanup; the current audit readers
+  consume payload via `JSON.parse` with optional-chain field reads.
+- **No propose_send / confirm_send widget readiness line.** The
+  operator still sees no "Will attach PDF: invitation.pdf" hint in
+  the chat widgets. P17-C.5.
+- **No schema column for provenance.** The provenance lives inside
+  the `payload` JSON, not as structured Invitation columns. Querying
+  "all invitations that attempted mediaId X" would need a LIKE
+  against payload. That's fine for the pilot's audit patterns
+  (per-invitation forensic lookups); a future indexed column is a
+  separate slice.
+
+### Audit asks for GPT
+
+1. **Two updates per doc send.** Writing provenance BEFORE the
+   provider send means the audit row carries the mediaId even on
+   provider failure. Alternative: merge provenance into the
+   success-status update (one write instead of two, but mediaId
+   trail lost on failure). My read: the pilot is specifically a
+   Meta-template debugging exercise — losing "we attempted media
+   X" on provider reject would be the wrong audit tradeoff.
+   Agree, or prefer the single-update version?
+
+2. **Payload overwrite vs. append.** The post-swap update fully
+   REPLACES the create-time payload (template + language +
+   variables, now with three new fields alongside). An alternative
+   would be a separate column (e.g. `providerPayload`) leaving
+   the original payload untouched. My read: payload is already
+   the "what did we actually send?" column — the create-time
+   shape is already a best-guess that swap-time supersedes. A
+   second column would duplicate data without distinguishing a
+   legitimate audit question. Agree?
+
+3. **Narrow-input `payloadForDispatch`.** Takes a flat options
+   object rather than the full `WhatsAppMessage`. Pro: caller
+   narrows once at the call site; the helper is boring flatten+
+   JSON.stringify. Con: the helper can't be unit-tested as a
+   pure "given a message, produce a payload" transform — it's
+   tested via the choreography. Is that separation right, or
+   should `payloadForDispatch` accept a message and own the
+   narrowing (with its own unit tests)?
+
+4. **Skip on link-kind ref.** If `uploadMedia` returned a
+   link-kind ref (currently impossible from Taqnyat, but the
+   type permits it), the provenance update is skipped — the
+   row keeps the create-time payload. Alternative: fail the
+   send with `doc_provenance_link_ref_unsupported`. My read:
+   skipping keeps the flow working even with a hypothetical
+   link-return uploader; the send itself would still go out
+   via the link-kind ref. Agree, or prefer the fail-fast?
+
+5. **Payload-shape contract.** There's no runtime schema / zod
+   validation of the payload JSON; consumers parse and read
+   optional fields. Is that fine for the pilot, or should C.4
+   include a `PayloadShape` type + parse helper to make the
+   contract explicit? My read: the fields are simple and well-
+   named, and making them optional in the consumer is easier
+   than maintaining a parallel schema. Agree?
+
+### Next step
+
+P17-C.5 wires the chat widgets: propose_send shows "Will attach
+PDF: <filename>" for doc-configured campaigns; confirm_send
+blocks when a doc-configured campaign is missing its PDF
+upload or its template name/language. That's also the first
+slice where the operator visibly sees the doc flow from inside
+the chat, which makes it the "first end-to-end chat-path proof"
+GPT's P17-C.1 verdict flagged for the main-branch push.
+
+P17-C.6 (conditional on C.5 scouting): if confirm_send's
+blocker set needs to grow (e.g. aggregate check "all selected
+invitees share a common template-language"), the send-blockers
+helper gets the extension. Otherwise, C.5 is the last slice in
+the P17-C tranche and the tranche ships.
