@@ -367,11 +367,13 @@ export async function taqnyatUploadMedia(
     },
     body: form,
   });
+  // Upload response shape is intentionally narrow: we parse only
+  // the documented id shapes (flat + nested wrapper) plus the
+  // error-text carriers. `messageId` / `requestId` would be
+  // send-time correlators, not media ids — see `extractMediaId`.
   const j = (await res.json().catch(() => ({}))) as {
     id?: string | number;
     media?: { id?: string | number };
-    messageId?: string | number;
-    requestId?: string | number;
     message?: string;
     error?: { message?: string } | string;
   };
@@ -426,13 +428,25 @@ export function buildMediaUploadFormData(
 function extractMediaId(j: {
   id?: string | number;
   media?: { id?: string | number };
-  messageId?: string | number;
-  requestId?: string | number;
 }): string | null {
-  // Primary shape: Meta's `{ id: "<media_id>" }` — Taqnyat's proxy
-  // returns this flat. Nested `{ media: { id } }` is the fallback
-  // for a hypothetical future wrapper shape.
-  const candidates = [j.id, j.media?.id, j.messageId, j.requestId];
+  // Upload-Media contract is narrow. Taqnyat's documented success
+  // response is the flat Meta shape `{ "id": "<media_id>" }`, and
+  // `GET /wa/v2/media/{media_id}` keys off exactly that id. We
+  // accept:
+  //   - `j.id`            — documented primary.
+  //   - `j.media?.id`     — nested fallback, kept deliberately in
+  //                         case Taqnyat ever wraps the response
+  //                         (some BSPs do). Strictly a tolerance
+  //                         pin, not a contract we rely on.
+  //
+  // We DO NOT accept `messageId` / `requestId` here — those are
+  // send-time correlators on the messages endpoint, not media
+  // identifiers. Per GPT P17-B re-audit (2026-04-21): treating
+  // them as upload success ids would let P17-C fabricate a
+  // `WhatsAppDocumentRef { kind: "id", mediaId }` from the wrong
+  // identifier and fail opaquely at send time when Meta rejects
+  // the bogus media reference.
+  const candidates = [j.id, j.media?.id];
   for (const c of candidates) {
     if (c === undefined || c === null) continue;
     const s = String(c);

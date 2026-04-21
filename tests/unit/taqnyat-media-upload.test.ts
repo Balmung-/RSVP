@@ -364,6 +364,117 @@ test("taqnyatUploadMedia: 4xx returns ok:false retryable:false", async () => {
   assert.match(r.error, /invalid token/);
 });
 
+// ---- Upload-Media id-discipline pins (GPT P17-B re-audit, 2026-04-21) ----
+//
+// GPT's re-audit flagged that the original `extractMediaId` accepted
+// `messageId` / `requestId` as fallback candidates. Those fields are
+// send-time correlators on `POST /messages/`, not media identifiers
+// on `POST /media/`. Accepting them here would let the uploader
+// return `{ ok: true, ref: { kind: "id", mediaId } }` built from the
+// wrong identifier; the downstream send envelope would then try to
+// reference a non-existent media id and fail opaquely at Meta.
+//
+// The discipline is: upload success REQUIRES one of Meta's two
+// documented id shapes, `{ id }` flat or `{ media: { id } }` nested.
+// Any other shape on a 200 is a refuse-to-fabricate ok:false.
+
+test("taqnyatUploadMedia: { id } flat shape is the documented success (discipline pin)", async () => {
+  // Companion to the happy-path test at the top of the file — this
+  // one pins the discipline intent: the flat `{ id }` shape is the
+  // documented Meta/Taqnyat Upload-Media response, accepted without
+  // equivocation.
+  const fake = installFakeFetch({
+    status: 200,
+    responseJson: { id: "wa-media-flat" },
+  });
+  const r = await taqnyatUploadMedia({
+    token: "tok",
+    bytes: new Uint8Array([1]),
+    filename: "a.pdf",
+    mimeType: "application/pdf",
+    fetchImpl: fake,
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  if (r.ref.kind === "id") {
+    assert.equal(r.ref.mediaId, "wa-media-flat");
+  }
+});
+
+test("taqnyatUploadMedia: { requestId } alone is NOT upload success (refuse-to-fabricate)", async () => {
+  // Critical discipline pin. `requestId` is a send-time correlator
+  // Taqnyat returns on `POST /messages/`, never a media identifier.
+  // If the uploader ever promotes it to a `mediaId`, P17-C would
+  // build a `WhatsAppDocumentRef` from the wrong id and fail at
+  // send time with a cryptic Meta error. Pin the refusal here.
+  const fake = installFakeFetch({
+    status: 200,
+    responseJson: { requestId: "req-abc-123" },
+  });
+  const r = await taqnyatUploadMedia({
+    token: "tok",
+    bytes: new Uint8Array([1]),
+    filename: "a.pdf",
+    mimeType: "application/pdf",
+    fetchImpl: fake,
+  });
+  assert.equal(
+    r.ok,
+    false,
+    "requestId is a send correlator, never a media id — must not be promoted",
+  );
+});
+
+test("taqnyatUploadMedia: { messageId } alone is NOT upload success (refuse-to-fabricate)", async () => {
+  // Same discipline as `requestId`: `messageId` lives on the send
+  // path's response envelope as a correlator. Accepting it here
+  // would let a broken Taqnyat response shape (or a future BSP
+  // drift) silently corrupt the ref chain. Refuse at the boundary.
+  const fake = installFakeFetch({
+    status: 200,
+    responseJson: { messageId: "msg-def-456" },
+  });
+  const r = await taqnyatUploadMedia({
+    token: "tok",
+    bytes: new Uint8Array([1]),
+    filename: "a.pdf",
+    mimeType: "application/pdf",
+    fetchImpl: fake,
+  });
+  assert.equal(
+    r.ok,
+    false,
+    "messageId is a send correlator, never a media id — must not be promoted",
+  );
+});
+
+test("taqnyatUploadMedia: { id, requestId } picks id (documented field wins over correlator)", async () => {
+  // Defensive pin: if Taqnyat returns BOTH a documented `id` and a
+  // `requestId` on an upload response (some BSPs return a request
+  // correlator alongside the resource), the uploader must pick
+  // `id`. If the order ever flipped in a refactor, this catches it.
+  const fake = installFakeFetch({
+    status: 200,
+    responseJson: { id: "wa-media-ok", requestId: "req-noise" },
+  });
+  const r = await taqnyatUploadMedia({
+    token: "tok",
+    bytes: new Uint8Array([1]),
+    filename: "a.pdf",
+    mimeType: "application/pdf",
+    fetchImpl: fake,
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  if (r.ref.kind === "id") {
+    assert.equal(
+      r.ref.mediaId,
+      "wa-media-ok",
+      "documented id field must win over send-time correlator",
+    );
+  }
+});
+
 test("taqnyatUploadMedia: malformed JSON response body yields ok:false", async () => {
   // Malformed body → we swallow the parse error (`.catch(() => ({}))`)
   // and fall into the "no id found" path. The http status gate
