@@ -14,17 +14,17 @@ datasource db {
 
 // A Campaign is the top-level container. Long-running, reusable.
 model Campaign {
-  id            String     @id @default(cuid())
-  name          String
-  description   String?
-  eventAt       DateTime?
-  venue         String?
-  locale        String     @default("en") // primary locale (en | ar)
-  rsvpDeadline  DateTime?
-  status        String     @default("draft") // draft | active | closed | archived
-  templateEmail String? // optional custom email body (liquid-lite)
-  templateSms   String? // optional custom sms body
-  subjectEmail  String?
+  id                        String    @id @default(cuid())
+  name                      String
+  description               String?
+  eventAt                   DateTime?
+  venue                     String?
+  locale                    String    @default("en") // primary locale (en | ar)
+  rsvpDeadline              DateTime?
+  status                    String    @default("draft") // draft | active | closed | archived
+  templateEmail             String? // optional custom email body (liquid-lite)
+  templateSms               String? // optional custom sms body
+  subjectEmail              String?
   // P13 — WhatsApp template discipline. Business-initiated
   // conversations on Meta Cloud API MUST start from a pre-approved
   // template; free-form session text is only valid inside the 24h
@@ -47,25 +47,25 @@ model Campaign {
   templateWhatsAppName      String?
   templateWhatsAppLanguage  String?
   templateWhatsAppVariables String? // JSON array of expression strings
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
   // Branding (optional overrides for RSVP page + email hero).
-  brandColor    String?   // hex, e.g. "#0a6e3d"
-  brandLogoUrl  String?
-  brandHeroUrl  String?
+  brandColor                String? // hex, e.g. "#0a6e3d"
+  brandLogoUrl              String?
+  brandHeroUrl              String?
 
   // Optional team scoping. null = office-wide.
-  teamId        String?
-  team          Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  teamId String?
+  team   Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
-  invitees      Invitee[]
-  invitations   Invitation[]
-  responses     Response[]
-  stages        CampaignStage[]
-  questions     CampaignQuestion[]
-  attachments   CampaignAttachment[]
-  eventOptions  EventOption[]
-  approvals     SendApproval[]
+  invitees     Invitee[]
+  invitations  Invitation[]
+  responses    Response[]
+  stages       CampaignStage[]
+  questions    CampaignQuestion[]
+  attachments  CampaignAttachment[]
+  eventOptions EventOption[]
+  approvals    SendApproval[]
 
   @@index([status])
   @@index([teamId])
@@ -73,30 +73,30 @@ model Campaign {
 
 // Per-campaign custom question asked on the RSVP page.
 model CampaignQuestion {
-  id          String   @id @default(cuid())
-  campaignId  String
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  order       Int      @default(0)
-  prompt      String
-  kind        String   // short_text | long_text | single_select | multi_select | number | boolean
-  required    Boolean  @default(false)
-  options     String?  // newline-separated, for single_select / multi_select
-  showWhen    String   @default("always") // always | attending | declined
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  answers     Answer[]
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order      Int      @default(0)
+  prompt     String
+  kind       String // short_text | long_text | single_select | multi_select | number | boolean
+  required   Boolean  @default(false)
+  options    String? // newline-separated, for single_select / multi_select
+  showWhen   String   @default("always") // always | attending | declined
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  answers    Answer[]
 
   @@index([campaignId, order])
 }
 
 // Invitee's answer to a question. One per (response, question).
 model Answer {
-  id          String             @id @default(cuid())
-  responseId  String
-  response    Response           @relation(fields: [responseId], references: [id], onDelete: Cascade)
-  questionId  String
-  question    CampaignQuestion   @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  value       String             // single string for everything; multi-select → newline-joined
+  id         String           @id @default(cuid())
+  responseId String
+  response   Response         @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  questionId String
+  question   CampaignQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  value      String // single string for everything; multi-select → newline-joined
 
   @@unique([responseId, questionId])
   @@index([questionId])
@@ -105,30 +105,30 @@ model Answer {
 // Attachment shown on the RSVP page + linked in email/SMS. URL-only for now —
 // hosting lives with the tenant (S3, gov doc server, whatever).
 model CampaignAttachment {
-  id          String   @id @default(cuid())
-  campaignId  String
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  order       Int      @default(0)
-  label       String
-  url         String
-  kind        String   @default("file") // file | map | agenda | parking
-  createdAt   DateTime @default(now())
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order      Int      @default(0)
+  label      String
+  url        String
+  kind       String   @default("file") // file | map | agenda | parking
+  createdAt  DateTime @default(now())
 
   @@index([campaignId, order])
 }
 
 // Optional date alternatives — when populated, invitee picks one on RSVP.
 model EventOption {
-  id          String    @id @default(cuid())
-  campaignId  String
-  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  order       Int       @default(0)
-  label       String?
-  startsAt    DateTime
-  endsAt      DateTime?
-  venue       String?
-  createdAt   DateTime  @default(now())
-  responses   Response[]
+  id         String     @id @default(cuid())
+  campaignId String
+  campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  order      Int        @default(0)
+  label      String?
+  startsAt   DateTime
+  endsAt     DateTime?
+  venue      String?
+  createdAt  DateTime   @default(now())
+  responses  Response[]
 
   @@index([campaignId, order])
 }
@@ -141,16 +141,16 @@ model CampaignStage {
   id            String    @id @default(cuid())
   campaignId    String
   campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  kind          String    // invite | reminder | last_call | thanks | custom
+  kind          String // invite | reminder | last_call | thanks | custom
   name          String?
   order         Int       @default(0)
   scheduledFor  DateTime
   channels      String    @default("email,sms") // comma-sep subset of [email, sms]
-  audience      String    @default("all")       // all | non_responders | attending | declined
+  audience      String    @default("all") // all | non_responders | attending | declined
   subjectEmail  String?
   templateEmail String?
   templateSms   String?
-  status        String    @default("pending")   // pending | running | completed | failed | skipped
+  status        String    @default("pending") // pending | running | completed | failed | skipped
   startedAt     DateTime?
   completedAt   DateTime?
   sentCount     Int       @default(0)
@@ -166,26 +166,26 @@ model CampaignStage {
 
 // An Invitee is a person. Phone/email are normalized and unique per campaign.
 model Invitee {
-  id             String      @id @default(cuid())
-  campaignId     String
-  campaign       Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  contactId      String?
-  contact        Contact?    @relation(fields: [contactId], references: [id], onDelete: SetNull)
-  fullName       String
-  title          String?     // honorific / rank
-  organization   String?
-  email          String?     // normalized lowercase
-  phoneE164      String?     // +9665XXXXXXXX
-  locale         String?     // overrides campaign locale
-  tags           String?     // comma-separated tags
-  rsvpToken      String      @unique
-  guestsAllowed  Int         @default(0)
-  notes          String?
-  dedupKey       String      // hash(email|phoneE164)
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-  invitations    Invitation[]
-  response       Response?
+  id              String           @id @default(cuid())
+  campaignId      String
+  campaign        Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId       String?
+  contact         Contact?         @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  fullName        String
+  title           String? // honorific / rank
+  organization    String?
+  email           String? // normalized lowercase
+  phoneE164       String? // +9665XXXXXXXX
+  locale          String? // overrides campaign locale
+  tags            String? // comma-separated tags
+  rsvpToken       String           @unique
+  guestsAllowed   Int              @default(0)
+  notes           String?
+  dedupKey        String // hash(email|phoneE164)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  invitations     Invitation[]
+  response        Response?
   inboundMessages InboundMessage[]
 
   @@unique([campaignId, dedupKey])
@@ -201,11 +201,11 @@ model Invitation {
   campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   inviteeId   String
   invitee     Invitee   @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
-  channel     String    // "email" | "sms"
+  channel     String // "email" | "sms"
   status      String    @default("queued") // queued | sent | delivered | failed | bounced
-  providerId  String?   // id returned by the upstream API
+  providerId  String? // id returned by the upstream API
   error       String?
-  payload     String?   // rendered body snapshot
+  payload     String? // rendered body snapshot
   sentAt      DateTime?
   deliveredAt DateTime?
   createdAt   DateTime  @default(now())
@@ -219,23 +219,23 @@ model Invitation {
 
 // A Response captures the invitee's RSVP answer. One per invitee.
 model Response {
-  id             String       @id @default(cuid())
-  campaignId     String
-  campaign       Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  inviteeId      String       @unique
-  invitee        Invitee      @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
-  attending      Boolean
-  guestsCount    Int          @default(0)
-  guestNames     String?      // newline-joined list of plus-one names
-  message        String?
-  ip             String?
-  userAgent      String?
-  respondedAt    DateTime     @default(now())
-  eventOptionId  String?
-  eventOption    EventOption? @relation(fields: [eventOptionId], references: [id], onDelete: SetNull)
-  answers        Answer[]
-  checkedInAt    DateTime?
-  checkedInBy    String?      // actor user id
+  id            String       @id @default(cuid())
+  campaignId    String
+  campaign      Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  inviteeId     String       @unique
+  invitee       Invitee      @relation(fields: [inviteeId], references: [id], onDelete: Cascade)
+  attending     Boolean
+  guestsCount   Int          @default(0)
+  guestNames    String? // newline-joined list of plus-one names
+  message       String?
+  ip            String?
+  userAgent     String?
+  respondedAt   DateTime     @default(now())
+  eventOptionId String?
+  eventOption   EventOption? @relation(fields: [eventOptionId], references: [id], onDelete: SetNull)
+  answers       Answer[]
+  checkedInAt   DateTime?
+  checkedInBy   String? // actor user id
 
   @@index([campaignId, attending])
   @@index([checkedInAt])
@@ -243,14 +243,14 @@ model Response {
 
 // Event log — every significant action, for audit/tracing.
 model EventLog {
-  id         String   @id @default(cuid())
-  kind       String   // invite.sent, invite.delivered, rsvp.submitted, import.completed, ...
-  refType    String?  // campaign | invitee | invitation | stage | user
-  refId      String?
-  actorId    String?  // user who performed the action; null for system / public flows
-  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  data       String?  // JSON blob
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  kind      String // invite.sent, invite.delivered, rsvp.submitted, import.completed, ...
+  refType   String? // campaign | invitee | invitation | stage | user
+  refId     String?
+  actorId   String? // user who performed the action; null for system / public flows
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  data      String? // JSON blob
+  createdAt DateTime @default(now())
 
   @@index([kind, createdAt])
   @@index([actorId, createdAt])
@@ -265,26 +265,26 @@ model EventLog {
 // still carry campaign-specific overrides (guest count, per-campaign
 // notes).
 model Contact {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   fullName        String
   title           String?
   organization    String?
   email           String?
   phoneE164       String?
-  preferredLocale String?  // en | ar
-  vipTier         String   @default("standard") // royal | minister | vip | standard
+  preferredLocale String? // en | ar
+  vipTier         String    @default("standard") // royal | minister | vip | standard
   tags            String?
   dietary         String?
   dress           String?
   securityNotes   String?
   notes           String?
-  dedupKey        String   @unique
+  dedupKey        String    @unique
   archivedAt      DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
   createdBy       String?
 
-  invitees        Invitee[]
+  invitees Invitee[]
 
   @@index([vipTier])
   @@index([fullName])
@@ -307,7 +307,7 @@ model FileUpload {
   uploadedBy  String?
   createdAt   DateTime @default(now())
 
-  ingests     FileIngest[]
+  ingests FileIngest[]
 
   @@index([createdAt])
 }
@@ -346,7 +346,7 @@ model SendApproval {
   id             String    @id @default(cuid())
   campaignId     String
   campaign       Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  channel        String    // email | sms | both
+  channel        String // email | sms | both
   recipientCount Int
   requestedBy    String
   note           String?
@@ -367,17 +367,17 @@ model SendApproval {
 // them filter by kind ("national-day", "ramadan"). Locale-aware: a
 // template is either en or ar.
 model Template {
-  id          String   @id @default(cuid())
-  name        String
-  kind        String   // email | sms
-  locale      String   @default("en") // en | ar
-  subject     String?  // email only
-  body        String
-  tags        String?
-  archivedAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  createdBy   String?
+  id         String    @id @default(cuid())
+  name       String
+  kind       String // email | sms
+  locale     String    @default("en") // en | ar
+  subject    String? // email only
+  body       String
+  tags       String?
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  createdBy  String?
 
   @@index([kind, archivedAt])
   @@index([locale])
@@ -391,22 +391,22 @@ model Template {
 // auto), and either apply the response automatically or route to the
 // needs-review queue.
 model InboundMessage {
-  id           String   @id @default(cuid())
-  channel      String   // email | sms
-  providerId   String?  // message-id or twilio SID
-  fromAddress  String
-  toAddress    String?
-  subject      String?
-  body         String
-  rawHeaders   String?
-  token        String?
-  inviteeId    String?
-  invitee      Invitee? @relation(fields: [inviteeId], references: [id], onDelete: SetNull)
-  intent       String   @default("unknown") // attending | declined | stop | autoreply | unknown
-  status       String   @default("new")     // new | processed | needs_review | ignored
-  note         String?
-  processedAt  DateTime?
-  createdAt    DateTime @default(now())
+  id          String    @id @default(cuid())
+  channel     String // email | sms
+  providerId  String? // message-id or twilio SID
+  fromAddress String
+  toAddress   String?
+  subject     String?
+  body        String
+  rawHeaders  String?
+  token       String?
+  inviteeId   String?
+  invitee     Invitee?  @relation(fields: [inviteeId], references: [id], onDelete: SetNull)
+  intent      String    @default("unknown") // attending | declined | stop | autoreply | unknown
+  status      String    @default("new") // new | processed | needs_review | ignored
+  note        String?
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
 
   @@index([status, createdAt])
   @@index([inviteeId])
@@ -432,18 +432,19 @@ model Unsubscribe {
 // campaign can be office-wide (teamId = null) or scoped to a team.
 // Membership is many-to-many; users can belong to multiple teams.
 model Team {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   name        String
-  slug        String   @unique
+  slug        String    @unique
   color       String?
   description String?
   archivedAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  memberships    TeamMembership[]
-  campaigns      Campaign[]
-  oauthAccounts  OAuthAccount[]
+  memberships   TeamMembership[]
+  campaigns     Campaign[]
+  oauthAccounts OAuthAccount[]
+  memories      Memory[]
 
   @@index([slug])
 }
@@ -471,15 +472,19 @@ model TeamMembership {
 // individual tool calls is re-resolved server-side on every request,
 // never trusted from the model's output.
 model ChatSession {
-  id         String        @id @default(cuid())
-  userId     String
-  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title      String?
-  archivedAt DateTime?
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
-  messages   ChatMessage[]
-  widgets    ChatWidget[]
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title           String?
+  archivedAt      DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  messages        ChatMessage[]
+  widgets         ChatWidget[]
+  // Memories whose `sourceSessionId` points at this session.
+  // SetNull on the FK so archiving / deleting a session leaves
+  // team memories intact — they just lose the back-pointer.
+  sourcedMemories Memory[]
 
   @@index([userId, updatedAt])
   @@index([userId, archivedAt])
@@ -498,16 +503,16 @@ model ChatSession {
 // Default false is a safe no-op for user/assistant rows and for
 // tool rows that completed successfully.
 model ChatMessage {
-  id               String      @id @default(cuid())
-  sessionId        String
-  session          ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role             String      // user | assistant | tool
-  content          String      @default("")
-  toolName         String?
-  toolInput        String?     // JSON
-  toolOutput       String?     // JSON
-  renderDirective  String?     // JSON
-  isError          Boolean     @default(false)
+  id              String      @id @default(cuid())
+  sessionId       String
+  session         ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role            String // user | assistant | tool
+  content         String      @default("")
+  toolName        String?
+  toolInput       String? // JSON
+  toolOutput      String? // JSON
+  renderDirective String? // JSON
+  isError         Boolean     @default(false)
   // Single-use anchor for destructive confirmations (Push 7 fix).
   // When /api/chat/confirm/[messageId] atomically claims a
   // propose_send tool row for dispatch, this timestamp is set via
@@ -520,15 +525,19 @@ model ChatMessage {
   // route releases the claim so the operator can retry without
   // hitting a stale already_confirmed. Nullable because only tool
   // rows with toolName=propose_send ever set it.
-  confirmedAt      DateTime?
-  createdAt        DateTime    @default(now())
+  confirmedAt     DateTime?
+  createdAt       DateTime    @default(now())
 
   // Widgets whose `sourceMessageId` points at this row. SetNull on
   // the FK so deleting a message doesn't cascade through the
   // workspace — the widget survives with a dangling source, which
   // is the operator-friendly behavior (a stale tool invocation
   // shouldn't wipe the dashboard state built from it).
-  sourcedWidgets   ChatWidget[]
+  sourcedWidgets  ChatWidget[]
+  // Memories whose `sourceMessageId` points at this row. Same
+  // SetNull posture as sourcedWidgets — a deleted tool row
+  // shouldn't wipe the knowledge it seeded.
+  sourcedMemories Memory[]
 
   @@index([sessionId, createdAt])
 }
@@ -584,22 +593,22 @@ model ChatMessage {
 // the widget survives a deleted message; useful for the client UI
 // to link back to the originating turn without blocking DELETE.
 model ChatWidget {
-  id               String       @id @default(cuid())
-  sessionId        String
-  session          ChatSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  widgetKey        String
-  kind             String
-  slot             String
+  id              String       @id @default(cuid())
+  sessionId       String
+  session         ChatSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  widgetKey       String
+  kind            String
+  slot            String
   // JSON payload matching the kind's declared props shape. Always
   // passed through `validateWidget(...)` before write AND again on
   // read to defend against schema drift.
-  props            String
-  order            Int          @default(0)
+  props           String
+  order           Int          @default(0)
   // Optional link to the tool message that produced this widget.
-  sourceMessageId  String?
-  sourceMessage    ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  sourceMessageId String?
+  sourceMessage   ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   // Upsert contract: (sessionId, widgetKey) is the stable identity
   // callers target. A second write to the same key UPDATES in place;
@@ -610,28 +619,111 @@ model ChatWidget {
   @@index([sessionId, slot, order])
 }
 
+// --- Durable memory -------------------------------------------
+//
+// A Memory is a short piece of text the assistant has been told to
+// remember across sessions within a team. P16-A ships the DATA
+// CONTRACT only — no tools, no prompt injection, no recall, no UI.
+// Later slices in the P16 tranche layer on write policy (P16-B),
+// retrieval/ranking policy (P16-C), /api/chat recall injection
+// (P16-D), and an operator-facing memory audit UI (P16-E).
+//
+// Tenant scope: `teamId` is the hard boundary. Every read path
+// MUST filter by teamId — the code never returns a memory outside
+// the caller's team, even for admins. The P16-A
+// `buildMemoryListQuery()` helper enforces this at the only read
+// seam, so there is exactly one place where cross-team leakage
+// would have to be introduced.
+//
+// Provenance is pinned into the schema NOW (not layered on later)
+// so future slices build on a stable shape instead of reshaping
+// rows. Three provenance pointers, all nullable:
+//
+//   - `sourceSessionId` — the ChatSession a memory was derived
+//     from. Nullable because memories may be created out-of-band
+//     (e.g. a future admin form, file-ingest batch, or a seed).
+//   - `sourceMessageId` — the exact ChatMessage row that produced
+//     the memory. Useful for "where did the assistant learn this?"
+//     audits once the UI lands.
+//   - `createdByUserId` — the human who authorized the memory.
+//     Matters for consent + audit: an operator should be able to
+//     distinguish "memories I created" from "memories the assistant
+//     recorded autonomously after a tool run". Nullable so an
+//     automated write path (e.g. file-ingest background job with no
+//     interactive user) can still store memories with a null author.
+//
+// All three use `onDelete: SetNull` so deleting a session /
+// message / user doesn't cascade through memory rows — the memory
+// survives with a dangling provenance pointer, same posture as
+// `ChatWidget.sourceMessageId`. `teamId` stays `Cascade` because a
+// memory has no meaning outside its tenant.
+//
+// `kind` is a string discriminator (open-set, same pattern as
+// `ChatWidget.kind`). P16-A documents "fact" as the default; P16-B
+// will pin the validator. Adding new kinds later is a validator
+// change, not a migration.
+//
+// `body` is a free-text snippet. No length bound in the schema
+// (Postgres TEXT is unbounded). Application-level cap lives in
+// the P16-A memory policy (default 1024 chars) and will be
+// enforced by the P16-B write seam — not by the DB.
+model Memory {
+  id     String @id @default(cuid())
+  teamId String
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  kind String @default("fact")
+  body String
+
+  sourceSessionId String?
+  sourceSession   ChatSession? @relation(fields: [sourceSessionId], references: [id], onDelete: SetNull)
+
+  sourceMessageId String?
+  sourceMessage   ChatMessage? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+
+  createdByUserId String?
+  createdByUser   User?   @relation("MemoryCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Hot query path: "give me the last N memories for this team,
+  // most-recent-first". The compound (teamId, updatedAt) index
+  // keeps it O(log n) at any tenant size.
+  @@index([teamId, updatedAt])
+  // Kind-scoped lookups (e.g. "all preferences for team X") will
+  // come in P16-C's retrieval slice. Indexed now so the later slice
+  // doesn't need a migration.
+  @@index([teamId, kind])
+}
+
 // --- Identity --------------------------------------------------
 
 // Admin users. One row per human. `passwordHash` is nullable for SSO-only
 // users; `role` drives every capability check in lib/auth.ts.
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  passwordHash String?
-  mustChangePassword Boolean @default(false)
-  totpSecret   String?
-  totpConfirmedAt DateTime?
-  fullName     String?
-  role         String    @default("viewer") // admin | editor | viewer
-  active       Boolean   @default(true)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  lastLoginAt  DateTime?
-  sessions     Session[]
-  eventLog     EventLog[]
-  teams        TeamMembership[]
-  chatSessions ChatSession[]
-  oauthAccounts OAuthAccount[] @relation("OAuthConnectedBy")
+  id                 String           @id @default(cuid())
+  email              String           @unique
+  passwordHash       String?
+  mustChangePassword Boolean          @default(false)
+  totpSecret         String?
+  totpConfirmedAt    DateTime?
+  fullName           String?
+  role               String           @default("viewer") // admin | editor | viewer
+  active             Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  lastLoginAt        DateTime?
+  sessions           Session[]
+  eventLog           EventLog[]
+  teams              TeamMembership[]
+  chatSessions       ChatSession[]
+  oauthAccounts      OAuthAccount[]   @relation("OAuthConnectedBy")
+  // Memories authored by this user. Named relation so a future
+  // second user-pointer on Memory (e.g. an "assigned_to" slot)
+  // can coexist without a schema rewrite, mirroring the
+  // OAuthConnectedBy pattern above.
+  authoredMemories   Memory[]         @relation("MemoryCreatedBy")
 
   @@index([email])
 }
@@ -639,13 +731,13 @@ model User {
 // Server-side session. The cookie carries the id + HMAC; this row is the
 // authority (allows revocation + audit). Expired rows are pruned lazily.
 model Session {
-  id         String   @id @default(cuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt  DateTime
-  ip         String?
-  userAgent  String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
 
   @@index([userId])
   @@index([expiresAt])
@@ -674,14 +766,14 @@ model Session {
 // revocation flows that want to notify the granter.
 model OAuthAccount {
   id                String   @id @default(cuid())
-  provider          String   // "google" — open-set for future providers
+  provider          String // "google" — open-set for future providers
   teamId            String?
   team              Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  googleEmail       String   // lowercased address from the userinfo response
-  accessTokenEnc    String   // AES-256-GCM envelope — see src/lib/secrets.ts
-  refreshTokenEnc   String   // AES-256-GCM envelope
+  googleEmail       String // lowercased address from the userinfo response
+  accessTokenEnc    String // AES-256-GCM envelope — see src/lib/secrets.ts
+  refreshTokenEnc   String // AES-256-GCM envelope
   tokenExpiresAt    DateTime
-  scopes            String   // space-separated granted scopes
+  scopes            String // space-separated granted scopes
   connectedByUserId String
   connectedBy       User     @relation("OAuthConnectedBy", fields: [connectedByUserId], references: [id])
   createdAt         DateTime @default(now())
