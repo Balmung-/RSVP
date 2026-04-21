@@ -9,6 +9,7 @@ import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
 import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
 import { safeBrandUrl } from "@/lib/attachments";
+import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +48,22 @@ async function updateCampaign(id: string, formData: FormData) {
     }
   }
 
+  // P17-D.1: mirror createCampaign's WhatsApp-campaign parse + FK
+  // existence check. Same silent-drop-on-dangling-id posture so editing
+  // a campaign that referenced an upload which has since been deleted
+  // doesn't 500 — instead the Campaign row's FK is nulled on save and
+  // the `no_whatsapp_document` blocker shows the gap on the next
+  // propose_send.
+  const wa = parseWhatsAppCampaignFields(formData);
+  let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
+  if (whatsappDocumentUploadId !== null) {
+    const exists = await prisma.fileUpload.findUnique({
+      where: { id: whatsappDocumentUploadId },
+      select: { id: true },
+    });
+    if (!exists) whatsappDocumentUploadId = null;
+  }
+
   await prisma.campaign.update({
     where: { id },
     data: {
@@ -59,6 +76,10 @@ async function updateCampaign(id: string, formData: FormData) {
       subjectEmail: String(formData.get("subjectEmail") ?? "").trim().slice(0, 300) || null,
       templateEmail: String(formData.get("templateEmail") ?? "").trim().slice(0, 5000) || null,
       templateSms: String(formData.get("templateSms") ?? "").trim().slice(0, 500) || null,
+      templateWhatsAppName: wa.templateWhatsAppName,
+      templateWhatsAppLanguage: wa.templateWhatsAppLanguage,
+      templateWhatsAppVariables: wa.templateWhatsAppVariables,
+      whatsappDocumentUploadId,
       brandColor,
       brandLogoUrl: safeBrandUrl(String(formData.get("brandLogoUrl") ?? "")),
       brandHeroUrl: safeBrandUrl(String(formData.get("brandHeroUrl") ?? "")),

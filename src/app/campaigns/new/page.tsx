@@ -10,6 +10,7 @@ import { parseLocalInput } from "@/lib/time";
 import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
 import { safeBrandUrl } from "@/lib/attachments";
+import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,25 @@ async function createCampaign(formData: FormData) {
       teamId = allowed.has(teamIdRaw) ? teamIdRaw : null;
     }
   }
+
+  // P17-D.1: read the four WhatsApp-campaign fields (template name /
+  // language / variables + PDF upload FK) off the form. Parser is
+  // pure + DB-free; the FK existence check happens here so the dangling-
+  // upload-id case degrades to a silent null rather than tripping
+  // Prisma's FK constraint. Matches the propose_send / send_campaign
+  // convention of doing existence lookups in the handler, not the
+  // validator. See `src/lib/campaign-whatsapp-form.ts` for the full
+  // design-calls block.
+  const wa = parseWhatsAppCampaignFields(formData);
+  let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
+  if (whatsappDocumentUploadId !== null) {
+    const exists = await prisma.fileUpload.findUnique({
+      where: { id: whatsappDocumentUploadId },
+      select: { id: true },
+    });
+    if (!exists) whatsappDocumentUploadId = null;
+  }
+
   const c = await prisma.campaign.create({
     data: {
       name,
@@ -48,6 +68,10 @@ async function createCampaign(formData: FormData) {
       subjectEmail: String(formData.get("subjectEmail") ?? "").trim().slice(0, 300) || null,
       templateEmail: String(formData.get("templateEmail") ?? "").trim().slice(0, 5000) || null,
       templateSms: String(formData.get("templateSms") ?? "").trim().slice(0, 500) || null,
+      templateWhatsAppName: wa.templateWhatsAppName,
+      templateWhatsAppLanguage: wa.templateWhatsAppLanguage,
+      templateWhatsAppVariables: wa.templateWhatsAppVariables,
+      whatsappDocumentUploadId,
       brandColor,
       brandLogoUrl: safeBrandUrl(String(formData.get("brandLogoUrl") ?? "")),
       brandHeroUrl: safeBrandUrl(String(formData.get("brandHeroUrl") ?? "")),
