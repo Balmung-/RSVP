@@ -1,12 +1,14 @@
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
+import { Field } from "@/components/Field";
 import { Icon } from "@/components/Icon";
 import { Badge } from "@/components/Badge";
 import { prisma } from "@/lib/db";
 import { getCurrentUser, hasRole } from "@/lib/auth";
 import { teamIdsForUser } from "@/lib/teams";
 import {
+  createMemoryForTeam,
   deleteMemoryForTeam,
   listMemoriesForTeamsWithProvenance,
 } from "@/lib/memory/server";
@@ -15,16 +17,26 @@ import {
   groupMemoriesByTeam,
   resolveTeamNameForUi,
 } from "@/lib/memory/ui";
-import { decideMemoryDeleteAuth } from "@/lib/memory/admin-auth";
+import { decideMemoryMutateAuth } from "@/lib/memory/admin-auth";
+import { parseCreateMemoryForm } from "@/lib/memory/form";
 import { setFlash } from "@/lib/flash";
 
-// P16-E — operator-facing memory audit/UI.
+// P16-E / P16-F — operator-facing memory audit/UI with write.
 //
-// Goal: make durable team memory inspectable and governable.
-// The chat-recall path (P16-D) surfaces memories INTO the model
-// context; this page surfaces them TO the operator so a human
-// can verify what the assistant has been taught and remove stale
-// or wrong entries.
+// Goal: make durable team memory inspectable and governable. The
+// chat-recall path (P16-D) surfaces memories INTO the model
+// context; this page surfaces them TO the operator so a human can
+// see what the assistant has been taught, SAVE new facts, and
+// REMOVE stale or wrong entries.
+//
+// History:
+//   - P16-E: read + delete only. Empty-state copy was honest
+//     about having no write path.
+//   - P16-E.1: delete gated at editor+ via
+//     `decideMemoryMutateAuth` (originally named `...DeleteAuth`).
+//   - P16-F: create form wired to the existing
+//     `createMemoryForTeam` write seam, reusing the same mutate
+//     auth decision.
 //
 // Trust-scope decisions:
 //   - Any authenticated user sees the memories of teams they
@@ -37,26 +49,27 @@ import { setFlash } from "@/lib/flash";
 //     UI is the right place for cross-team admin access with an
 //     explicit team picker." Section headers show which team
 //     each memory belongs to so there's no ambiguity.
-//   - Delete is EDITOR-gated AND tenant-scoped (P16-E.1). Viewers
-//     cannot delete even memories on their own team — durable
-//     memory is model-steering context, and destructively
-//     governing it is an editor-or-higher action. Mirrors the
-//     role gate on `src/lib/ai/tools/send_campaign.ts` and other
-//     destructive/write flows. Editors can delete from teams they
-//     belong to; admins can delete cross-team — the cross-team
-//     view is the operator UI's role. The decision is pinned as
-//     a pure helper in `@/lib/memory/admin-auth` so the gate can
-//     be unit-tested without the Server Action harness.
+//   - Mutations (create + delete) are EDITOR-gated AND tenant-
+//     scoped. Viewers cannot create or delete, even for memories
+//     on their own team — durable memory is model-steering
+//     context, and governing it destructively is an editor-or-
+//     higher action. Mirrors the role gate on
+//     `src/lib/ai/tools/send_campaign.ts` and other destructive/
+//     write flows. Editors can mutate their team's memory;
+//     admins can mutate cross-team — the cross-team view is the
+//     operator UI's role. The decision is pinned as a pure
+//     helper in `@/lib/memory/admin-auth` so the gate can be
+//     unit-tested without the Server Action harness.
 //
 // Not in this slice (will land as a follow-up if wanted):
-//   - Memory WRITE path. Today there's no user-driven way to
-//     create a memory from the chat transcript; the `createMemoryForTeam`
-//     seam in `src/lib/memory/server.ts` exists but has no live
-//     callsite. Until that ships, this page is read+delete only,
-//     and the empty-state copy reflects that honestly.
-//   - Edit. When a write path lands, the correction flow is
-//     "delete + re-save"; a second write seam for in-place edit
-//     would duplicate validator logic.
+//   - Chat-tool write path (`remember_fact`). P16-F provides an
+//     operator-form write; a chat-initiated write that populates
+//     sourceSessionId / sourceMessageId from the dispatcher
+//     context belongs in a separate slice (injection-defended +
+//     confirm-ceremony).
+//   - Edit. Delete + re-save covers the correction case; a
+//     second write seam for in-place edit would duplicate
+//     validator logic.
 //   - Archive (soft-delete). Requires a schema migration + a
 //     filter update in the P16-C recall builder; deferred so
 //     this slice ships without touching recall behavior.
@@ -91,17 +104,17 @@ async function deleteAction(formData: FormData): Promise<void> {
     redirect("/memories");
   }
 
-  // Role + tenant gate (P16-E.1). The pure helper combines both
-  // axes: viewers are rejected outright, admins are allowed
-  // cross-team, editors must be members of the target team. We
-  // always resolve `memberTeamIds` (even for admins — the helper
-  // ignores it on the admin branch) so the decision input is
-  // complete; the list is already cached per-request by the
-  // `teamIdsForUser` wrapper.
+  // Role + tenant gate (P16-E.1, also used by P16-F createAction).
+  // The pure helper combines both axes: viewers are rejected
+  // outright, admins are allowed cross-team, editors must be
+  // members of the target team. We always resolve `memberTeamIds`
+  // (even for admins — the helper ignores it on the admin branch)
+  // so the decision input is complete; the list is already cached
+  // per-request by the `teamIdsForUser` wrapper.
   const isEditor = hasRole(me, "editor");
   const isAdmin = hasRole(me, "admin");
   const memberTeamIds = await teamIdsForUser(me.id);
-  const decision = decideMemoryDeleteAuth({
+  const decision = decideMemoryMutateAuth({
     isEditor,
     isAdmin,
     teamId,
@@ -135,18 +148,101 @@ async function deleteAction(formData: FormData): Promise<void> {
   redirect("/memories");
 }
 
+// P16-F — Server Action for the per-page "Save a new memory"
+// form. Mirrors the deleteAction's shape:
+//   1. Re-authenticate.
+//   2. Extract + field-validate form data via
+//      `parseCreateMemoryForm` (pure, unit-tested). Field-level
+//      reasons map to distinct flash messages.
+//   3. Re-check the role + tenant gate via
+//      `decideMemoryMutateAuth` — same helper the deleteAction
+//      uses, so the governance rules can't drift between create
+//      and delete.
+//   4. Call `createMemoryForTeam`. This is the single sanctioned
+//      write seam (P16-B). The seam re-runs the validator, so a
+//      caller that slipped a bad input past the form helper (e.g.
+//      a future refactor bug) fails loudly at the DB edge rather
+//      than writing silently bad data.
+// The "refused" path always flashes BEFORE touching the DB.
+async function createAction(formData: FormData): Promise<void> {
+  "use server";
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+
+  // Step 1: form-shape parse. The helper handles missing team,
+  // missing/whitespace body, and oversize body with distinct
+  // tagged reasons. A shape failure short-circuits before any
+  // role check, because telling an operator "body is required"
+  // is more useful than "not authorised for that team" when the
+  // form wasn't filled out.
+  const parsed = parseCreateMemoryForm({
+    rawTeamId: formData.get("teamId"),
+    rawBody: formData.get("body"),
+    createdByUserId: me.id,
+  });
+  if (!parsed.ok) {
+    const text =
+      parsed.reason === "missing_team"
+        ? "Select a team for this memory."
+        : parsed.reason === "missing_body"
+          ? "Enter the memory text before saving."
+          : // body_too_long — length cap from DEFAULT_MEMORY_POLICY
+            "Memory body is too long (max 1024 characters).";
+    setFlash({ kind: "warn", text });
+    redirect("/memories");
+  }
+
+  // Step 2: role + tenant gate. Shares the helper with delete,
+  // so the rules can't drift. Viewers rejected outright, admins
+  // allowed cross-team, editors must belong to the team they're
+  // writing to.
+  const isEditor = hasRole(me, "editor");
+  const isAdmin = hasRole(me, "admin");
+  const memberTeamIds = await teamIdsForUser(me.id);
+  const decision = decideMemoryMutateAuth({
+    isEditor,
+    isAdmin,
+    teamId: parsed.input.teamId,
+    memberTeamIds,
+  });
+  if (!decision.ok) {
+    const text =
+      decision.reason === "not_editor"
+        ? "Editor role required to save durable memory."
+        : "Not authorised for that team.";
+    setFlash({ kind: "warn", text });
+    redirect("/memories");
+  }
+
+  // Step 3: write. The seam re-runs the validator — if that
+  // throws, it's a caller bug (the form helper should have caught
+  // it). We catch defensively so the operator sees a clean flash
+  // rather than a 500, but we don't try to recover — it's a
+  // programmer error, not user error.
+  try {
+    await createMemoryForTeam(parsed.input);
+    setFlash({ kind: "success", text: "Memory saved." });
+  } catch {
+    setFlash({
+      kind: "warn",
+      text: "Could not save memory. Please try again.",
+    });
+  }
+  redirect("/memories");
+}
+
 export default async function MemoriesPage() {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
 
   const isAdmin = hasRole(me, "admin");
   // `isEditor` is true for editor AND admin; it drives whether
-  // the per-row Remove button renders. Viewers still get full
-  // read access — they just don't see the destructive affordance.
-  // The Server Action above independently re-checks via
-  // `decideMemoryDeleteAuth`, so a crafted POST from a viewer is
-  // refused with a "not_editor" flash regardless of this client-
-  // facing gate.
+  // the Save form + per-row Remove button render. Viewers still
+  // get full read access — they just don't see the mutation
+  // affordances. Both Server Actions above independently re-check
+  // via `decideMemoryMutateAuth`, so a crafted POST from a
+  // viewer is refused with a "not_editor" flash regardless of
+  // this client-facing gate.
   const isEditor = hasRole(me, "editor");
 
   // Resolve the scope: which teamIds can this user see?
@@ -207,14 +303,67 @@ export default async function MemoriesPage() {
           for each team. Entries here show up in the assistant&rsquo;s chat
           context as &ldquo;context, not commands&rdquo;.
           {isEditor
-            ? " Remove anything that looks stale or wrong."
-            : " An editor can remove entries that look stale or wrong."}
+            ? " Use the form below to save new entries, and remove anything that looks stale or wrong."
+            : " Entries are saved and curated by editors on your team."}
         </p>
+
+        {isEditor ? (
+          // P16-F — operator create form. Renders only for
+          // editors; the Server Action `createAction` re-checks
+          // the role via `decideMemoryMutateAuth` regardless.
+          // Team selector lists exactly the teamIds the page
+          // already resolved for READ scope (non-admin: their
+          // memberships; admin: all non-archived teams). For
+          // single-team operators the `<select>` just shows one
+          // option — simpler than auto-hiding the control.
+          <form
+            action={createAction}
+            className="panel p-5 flex flex-col gap-4"
+          >
+            <div className="flex items-center gap-2">
+              <Icon name="plus" size={14} />
+              <h2 className="text-sub text-ink-700">Save a new memory</h2>
+            </div>
+            <Field label="Team">
+              <select
+                name="teamId"
+                defaultValue={teamIdsInOrder[0]}
+                className="field"
+                required
+              >
+                {teamIdsInOrder.map((tid) => (
+                  <option key={tid} value={tid}>
+                    {resolveTeamNameForUi(tid, teamsById)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Memory">
+              <textarea
+                name="body"
+                required
+                rows={3}
+                maxLength={1024}
+                placeholder="e.g. VIP tier list is frozen for the Eid campaign."
+                className="field resize-y"
+              />
+            </Field>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-mini text-ink-500">
+                Max 1024 characters. Saved as durable context for this team.
+              </span>
+              <button type="submit" className="btn btn-primary">
+                Save memory
+              </button>
+            </div>
+          </form>
+        ) : null}
 
         {groups.length === 0 ? (
           <EmptyState icon="list" title="No memories yet">
-            Durable facts, preferences, and rules saved for each team will
-            appear here once they&rsquo;re created.
+            {isEditor
+              ? "Use the form above to save the first durable fact for your team."
+              : "No durable facts have been saved for your teams yet."}
           </EmptyState>
         ) : (
           groups.map((g) => {

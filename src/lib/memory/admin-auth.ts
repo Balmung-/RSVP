@@ -1,5 +1,17 @@
-// P16-E.1 — pure authorisation helper for the operator memory
-// delete action.
+// P16-E.1 / P16-F — pure authorisation helper for the operator
+// memory mutation actions (create, delete, and future in-place
+// edits).
+//
+// Originally introduced as `decideMemoryDeleteAuth` in P16-E.1;
+// P16-F renames it to `decideMemoryMutateAuth` because the
+// decision tree is identical for any write-side mutation. The
+// rename is intentional: a single helper means a future change
+// to the governance rules (e.g. stricter role, extra axis) lands
+// in one place and can't silently drift between create and
+// delete. If create and delete ever need to diverge (e.g. admin-
+// only hard-delete vs editor-wide create), that split lives in
+// dedicated `decideMemory{Action}Auth` wrappers delegating to
+// the same primitives — not by forking this file.
 //
 // Why a separate pure helper (not just a hasRole check at the
 // callsite):
@@ -7,11 +19,11 @@
 //     distinct reject reasons ("not_editor" vs "not_member"). A
 //     pure helper pins the decision tree in one place with unit
 //     tests for each branch, rather than interleaving role + team
-//     logic inline in the Server Action.
-//   - The tenant-safety invariant — "delete requires editor+ AND
-//     (admin OR team-member)" — is a single-line assertion in the
-//     helper, which is easier to audit than tracing two nested
-//     `if` branches in the page.
+//     logic inline in each Server Action.
+//   - The tenant-safety invariant — "mutation requires editor+
+//     AND (admin OR team-member)" — is a single-line assertion
+//     in the helper, which is easier to audit than tracing two
+//     nested `if` branches in each page.
 //   - Mirrors the `admin-query.ts` pattern from the P16-E slice:
 //     shape/policy in a pure module, DB/IO at the edge.
 //
@@ -25,44 +37,45 @@
 //
 // Decision tree:
 //   1. If !isEditor → reject "not_editor". Viewers must not
-//      destructively edit governance data even if they can see
-//      it. This is the load-bearing check that P16-E.1 introduces
-//      — the previous slice permitted any team member to delete.
-//   2. Else if isAdmin → allow (cross-team delete is the
+//      destructively govern durable memory even if they can see
+//      it. This is the load-bearing check that P16-E.1 introduced
+//      — the original P16-E slice permitted any team member to
+//      delete, and now ALL mutations (delete + create) share the
+//      same gate.
+//   2. Else if isAdmin → allow (cross-team mutation is the
 //      operator UI's raison d'être; the P16-E page already grants
-//      admins cross-team READ, and the delete parity follows).
+//      admins cross-team READ, and mutation parity follows).
 //   3. Else (editor, not admin) → must be a member of `teamId`.
 //      - member → allow.
 //      - not member → reject "not_member".
 //
 // Non-invariants:
-//   - This helper does NOT check `id`. Whether the memory row
-//     actually exists under that (id, teamId) pair is the DB's
-//     job — `deleteMany` returns count 0 for mismatched pairs,
-//     which the page surfaces as "already removed". Returning
-//     "allow" here does NOT promise the row will be found.
+//   - This helper does NOT check `id` (delete) or `body`
+//     (create). Row existence and input validity are the DB /
+//     validator's job. Returning "allow" here does NOT promise
+//     the mutation will succeed.
 //   - Cross-team admin writes are intentional, not oversight.
 
-export type MemoryDeleteAuthInput = {
+export type MemoryMutateAuthInput = {
   isEditor: boolean;
   isAdmin: boolean;
   teamId: string;
   memberTeamIds: readonly string[];
 };
 
-export type MemoryDeleteAuthDecision =
+export type MemoryMutateAuthDecision =
   | { ok: true }
   | { ok: false; reason: "not_editor" | "not_member" };
 
-export function decideMemoryDeleteAuth(
-  input: MemoryDeleteAuthInput,
-): MemoryDeleteAuthDecision {
+export function decideMemoryMutateAuth(
+  input: MemoryMutateAuthInput,
+): MemoryMutateAuthDecision {
   // Defensive: a missing / malformed input object is treated as a
   // rejected viewer rather than a throw. The Server Action
-  // callsite has its own form-data validation with flash messages
-  // for the missing-id/teamId cases; this layer exists purely to
-  // gate role + membership, and an object-shape bug should NOT
-  // silently allow a delete.
+  // callsites have their own form-data validation with flash
+  // messages for the missing-field cases; this layer exists
+  // purely to gate role + membership, and an object-shape bug
+  // should NOT silently allow a mutation.
   if (!input || typeof input !== "object") {
     return { ok: false, reason: "not_editor" };
   }
