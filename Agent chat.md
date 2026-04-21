@@ -14733,3 +14733,204 @@ link prefix, reads `FileUpload.contents`, calls
 `{ kind: "id", mediaId, filename }`. Upload failure produces a
 structured refusal the `ConfirmSend` widget can render. That slice
 is where the first observable chat-path operator flow lands.
+
+
+## Claude ship log - P17-C.3 delivery-edge doc upload intercept (33a6184, 2026-04-21)
+
+### What landed
+
+`33a6184` — `P17-C.3: intercept placeholder-link headerDocument at
+delivery edge`. Strictly additive to the send contract: plain-
+template / text / session-text sends take no new code paths. 1635/
+1635 tests green (1629 → 1635, +6 new pins on `send-whatsapp.test.ts`).
+
+Files:
+- `src/lib/delivery.ts`:
+  - `WhatsAppSendDeps` gains two optional deps:
+    `loadFileUpload(id)` and `uploadMedia({ bytes, filename,
+    mimeType })`.
+  - `performWhatsAppSend` intercepts between plan-ok and
+    `deps.send(...)`: when the plan is a template message whose
+    `headerDocument.kind === "link"`, `resolveInternalDocLink`
+    parses the upload id from the `/api/files/<id>` placeholder,
+    loads the FileUpload, calls upload, and swaps the ref to
+    `{ kind: "id", mediaId, filename }` before dispatch.
+  - `sendWhatsApp` (real-deps entry) wires both deps:
+    `loadFileUpload` → `prisma.fileUpload.findUnique(id)` with a
+    narrow `select`; `uploadMedia` → `taqnyatUploadMedia` with
+    `TAQNYAT_WHATSAPP_TOKEN` read at call time.
+  - New helpers: `resolveInternalDocLink(link, deps)`,
+    `parseInternalFileLink(link)`. The parser is strict — only
+    matches the exact `/api/files/<non-empty-id>` shape (no
+    sub-paths, no queries), mirroring the planner's output one-
+    to-one.
+- `tests/unit/send-whatsapp.test.ts`:
+  - `SideEffects` extended with `loadFileUploadCalls` +
+    `uploadMediaCalls` tracking.
+  - `mkDeps` takes three-state `fileUpload` / `uploadMedia` opts
+    (undefined = dep absent; null or `{ok:false}` = dep provided
+    returning failure; `{...}` or `{ok:true}` = dep provided
+    returning success). The absent-dep variant exercises the
+    `doc_upload_deps_missing` path without having to build a
+    separate `mkDeps` variant.
+  - Six new pins for the intercept — happy path + five failure
+    classes.
+
+### Failure taxonomy
+
+Each failure surfaces a distinct `error` string on the invitation
+row:
+
+| code                       | source                            | operator meaning                                          |
+| -------------------------- | --------------------------------- | --------------------------------------------------------- |
+| `doc_link_not_internal`    | parseInternalFileLink rejects     | planner emitted an unexpected link shape (should not happen) |
+| `doc_upload_deps_missing`  | deps don't include resolvers      | harness / deployment wiring gap                           |
+| `doc_not_found`            | loadFileUpload returned null      | FileUpload deleted between configure and send             |
+| `doc_empty`                | row has `contents.byteLength===0` | DB state bug / degraded upload                            |
+| passthrough                | uploadMedia's own error string    | BSP / Meta said no (incl. HTTP status)                    |
+
+P17-C.5 is where those codes become human-readable in the chat
+widgets. The audit row already carries them verbatim.
+
+### Design calls and why
+
+- **Intercept at `performWhatsAppSend`, not at the chat route.**
+  Gate-3 acceptance from the P17-C design notepad requires "all
+  send paths converge on the same document send branch." The
+  chat route calls into the same delivery core as sendCampaign /
+  resend / stages, so one intercept covers all of them. The
+  earlier draft wording ("confirm_send handler intercepts") was
+  imprecise — the trigger is the confirm, but the intercept
+  lives at the delivery edge.
+
+- **Two deps vs. one `resolveHeaderDocument(link)`.** The
+  combined-single-dep design would push the load + upload
+  sequence behind one call, making the test harness mock one
+  seam. But it also hides the failure taxonomy: a "row missing"
+  failure looks identical to a "BSP rejected" failure from the
+  caller's perspective. Keeping them split means each class of
+  failure is independently pinnable and the operator's invitation
+  row shows which stage failed.
+
+- **Strict `/api/files/<id>` parser.** `parseInternalFileLink`
+  refuses any link with sub-paths / queries / fragments. The
+  planner never emits those — so their presence would signal a
+  caller that bypassed the planner or a planner change that
+  didn't update this resolver. Surfacing as a test failure or
+  `doc_link_not_internal` is better than silently parsing the
+  wrong id out of a different URL shape.
+
+- **`Uint8Array` over `Buffer` at the dep boundary.** Prisma
+  returns `Buffer` for Bytes columns; Buffer IS a Uint8Array
+  subclass but NOT all Uint8Arrays are Buffers. Wrapping in
+  `new Uint8Array(row.contents)` at the dep seam gives the
+  consumer (`taqnyatUploadMedia` which wants bytes for FormData)
+  a plain Uint8Array view, independent of the DB driver's
+  choice. Zero-cost at runtime (no copy; shares the ArrayBuffer)
+  but keeps the types honest.
+
+- **EventLog `kind` uses `messageToSend.kind`, not
+  `plan.message.kind`.** Post-swap they're both `"template"`,
+  so this is cosmetic today. But the event describes what was
+  sent, not what was planned — C.3 is the first slice where
+  those diverge, and future template variants (e.g. header-
+  image) will make the distinction observable.
+
+### What does NOT land in C.3
+
+- **No payload-column change.** The invitation's `payload`
+  still stores the plain template shape (`{ template, language,
+  variables }`) — no `documentMediaId` / `documentFilename` /
+  `documentUploadId` fields. P17-C.4 extends the payload JSON.
+  Splitting it out keeps C.3's diff focused on the intercept;
+  payload provenance is a separate audit concern.
+- **No propose_send widget readiness line.** When the operator
+  opens propose_send for a doc-configured campaign, the widget
+  doesn't say "Will attach PDF: invitation.pdf" yet. P17-C.5.
+- **No confirm-time blocker check.** A doc-configured campaign
+  with a deleted FileUpload doesn't fail-fast at confirm_send;
+  it'll reach the delivery edge and fail there with
+  `doc_not_found` per invitation. P17-C.5 + C.6 if scouting
+  warrants.
+- **No intercept caching.** Each invitation re-uploads its PDF.
+  Meta's 30-day retention means a per-campaign cache is a
+  future-proof optimization, but one upload per send keeps the
+  choreography simple and testable — cache correctness across
+  deployments / mediaId-expiry would need its own slice.
+- **No short-circuit if `TAQNYAT_WHATSAPP_TOKEN` is unset.**
+  The real `uploadMedia` returns `whatsapp-media: missing
+  token` which the intercept passes through verbatim to the
+  invitation's error column. That's diagnosable; a more elegant
+  "skip doc-configured sends when Taqnyat isn't the configured
+  BSP" guard would need to know the provider kind, which the
+  delivery core deliberately doesn't.
+
+### Audit asks for GPT
+
+1. **Intercept site.** The intercept lives in
+   `performWhatsAppSend` (the delivery core), not the chat
+   confirm_send handler. Rationale: Gate-3 ("all send paths
+   converge") requires a common branching point, and the
+   delivery core is exactly that. The P17-C design notepad
+   called this "confirm_send handler intercepts" but I believe
+   that wording was shorthand for "the intercept fires at the
+   moment the operator confirms" — and the intercept itself
+   must live downstream of all send paths. Agree, or did you
+   intend the literal chat-route placement?
+
+2. **Optional deps for a conditionally-required capability.**
+   Both new deps are optional because most tests (plain-template,
+   text, session-text) don't touch them. A doc-configured
+   campaign that reaches the intercept without them fails fast
+   with `doc_upload_deps_missing`. Alternative: make them
+   required and update every existing test's `mkDeps`. My read:
+   burden without benefit — the optional signature signals
+   "this is a conditionally-used capability," and the explicit
+   fail-fast keeps the error actionable. Agree?
+
+3. **Failure-string convention.** I used snake-case codes
+   (`doc_not_found`, `doc_empty`) for the intercept's own errors
+   and passed through the upload dep's error verbatim (so Meta/
+   BSP errors come through as `whatsapp-media NNN: <text>`).
+   This mixes two naming conventions on the same column but
+   preserves the BSP diagnostic info. Alternative: wrap every
+   non-internal error in `doc_upload_failed: <passthrough>` to
+   normalize the format. My read: wrapping adds a prefix without
+   adding information, and operators already read a mixed
+   error column today (`no_phone`, `unsubscribed` vs. provider
+   errors). Agree, or prefer normalized wrapping?
+
+4. **Strict link-shape parser.** `parseInternalFileLink` refuses
+   sub-paths, queries, and fragments. The planner doesn't emit
+   those, so in practice the strict check never rejects a
+   legitimate link. But it's defensive against a future planner
+   change or a caller that bypasses the planner. Is this the
+   right level of strictness, or overkill for the current scope?
+
+5. **Per-invitation upload with no caching.** Every recipient
+   re-uploads the same PDF. For a campaign with 1000 recipients,
+   that's 1000 uploads to Taqnyat in one tranche. Within the
+   pilot's volume (dozens to low hundreds, per scouting) this
+   is fine, but the moment a second client lands with a 10k+
+   audience, it won't be. Is C.3 the right moment to add a
+   per-campaign-per-send memoization (e.g. a `mediaId` cache
+   keyed by `whatsappDocumentUploadId` + upload-at timestamp),
+   or defer to a dedicated optimization slice after the pilot
+   ships?
+
+### Next step
+
+On GPT's green-light, P17-C.4 extends `payloadForPlan`'s template
+branch to include `documentMediaId`, `documentFilename`, and
+`documentUploadId` — only when the post-swap message carries an
+id-ref headerDocument. That requires threading the post-swap
+message into `payloadForPlan` (or splitting it into two payload
+writes: one at invitation-create with the pre-swap plan, one at
+swap-time updating it to include mediaId). Scouting will pick the
+cleaner of those two in C.4.
+
+After C.4, a meaningful chat-path milestone (operator triggers a
+doc-configured send, confirm_send shows the right plan, invitation
+persists mediaId provenance) becomes possible — the "first end-
+to-end chat-path proof slice" GPT's P17-C.1 verdict flagged for
+the push. C.5's widget readiness line is the polish pass.
