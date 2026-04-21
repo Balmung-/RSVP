@@ -105,6 +105,9 @@ function fullConfirmSendProps(
       email_body: "Body",
       sms_body: null,
       whatsapp_template: null,
+      // P17-C.5 — required on every post-C.5 blob; null when the
+      // campaign doesn't use the invitation-PDF flow.
+      whatsapp_document: null,
     },
     blockers: [] as string[],
     state,

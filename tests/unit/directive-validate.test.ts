@@ -523,6 +523,7 @@ test("validateDirective: confirm_send — valid shape round-trips", () => {
         email_body: "Body...",
         sms_body: null,
         whatsapp_template: null,
+        whatsapp_document: null,
       },
       blockers: [],
     },
@@ -555,6 +556,7 @@ test("validateDirective: confirm_send — rejects unknown channel", () => {
         email_body: null,
         sms_body: null,
         whatsapp_template: null,
+        whatsapp_document: null,
       },
       blockers: [],
     },
@@ -589,6 +591,7 @@ test("validateDirective: confirm_send — rejects non-string-array blockers", ()
         email_body: "b",
         sms_body: null,
         whatsapp_template: null,
+        whatsapp_document: null,
       },
       blockers: [{ code: "no_invitees" }] as unknown as string[],
     },
@@ -620,6 +623,7 @@ test("validateDirective: confirm_send — rejects incomplete by_channel breakdow
         email_body: null,
         sms_body: null,
         whatsapp_template: null,
+        whatsapp_document: null,
       },
       blockers: [],
     },
@@ -659,6 +663,7 @@ function baseConfirmSendDirective() {
         email_body: "b",
         sms_body: "s",
         whatsapp_template: { name: "rsvp_v1", language: "ar" },
+        whatsapp_document: null as { filename: string } | null,
       },
       blockers: [],
     },
@@ -714,5 +719,45 @@ test("validateDirective: confirm_send — rejects whatsapp_template non-object",
   const d = baseConfirmSendDirective();
   (d.props.template_preview as Record<string, unknown>).whatsapp_template =
     "rsvp_v1:ar";
+  assert.equal(validateDirective(d), null);
+});
+
+// ---- P17-C.5: whatsapp_document mirror pins ----
+//
+// Mirror of the widget-validate whatsapp_document pin suite. Same
+// invariants, different validator module — if the two drift, one
+// suite catches the missed update on the other.
+
+test("validateDirective: confirm_send — accepts whatsapp_document with filename", () => {
+  const d = baseConfirmSendDirective();
+  d.props.template_preview.whatsapp_document = { filename: "invitation.pdf" };
+  assert.ok(validateDirective(d));
+});
+
+test("validateDirective: confirm_send — rejects missing template_preview.whatsapp_document", () => {
+  const d = baseConfirmSendDirective();
+  const tp = d.props.template_preview as Record<string, unknown>;
+  delete tp.whatsapp_document;
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_document missing filename", () => {
+  const d = baseConfirmSendDirective();
+  (d.props.template_preview as Record<string, unknown>).whatsapp_document = {};
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_document empty filename", () => {
+  const d = baseConfirmSendDirective();
+  d.props.template_preview.whatsapp_document = { filename: "" };
+  assert.equal(validateDirective(d), null);
+});
+
+test("validateDirective: confirm_send — rejects whatsapp_document non-object", () => {
+  // Same rationale as the whatsapp_template non-object pin. A bare
+  // string or number shouldn't slip past the shape guard.
+  const d = baseConfirmSendDirective();
+  (d.props.template_preview as Record<string, unknown>).whatsapp_document =
+    "invitation.pdf";
   assert.equal(validateDirective(d), null);
 });

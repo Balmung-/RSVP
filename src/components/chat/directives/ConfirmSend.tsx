@@ -89,6 +89,19 @@ export type ConfirmSendProps = {
     // when WhatsApp is configured. Null when either field is missing
     // (matches the `no_whatsapp_template` blocker predicate).
     whatsapp_template: { name: string; language: string } | null;
+    // P17-C.5 — WhatsApp invitation PDF readiness. Populated when the
+    // campaign is wired for the doc-header path (both template fields
+    // AND a FileUpload id) AND that FileUpload row still exists. Null
+    // otherwise — either because the campaign doesn't use the
+    // doc-header path (no file expected) OR because the upload row was
+    // deleted (in which case the `no_whatsapp_document` blocker is
+    // already in the list, and hiding the readiness line keeps the
+    // operator's eye on the blocker instead of half-rendering a
+    // reassuring label). The filename is the one the operator uploaded
+    // — Meta doesn't attach filename metadata to the message, but
+    // showing it on the card lets the operator sanity-check the right
+    // file is bound before clicking send.
+    whatsapp_document: { filename: string } | null;
   };
   blockers: string[];
   // W5 — persisted state of the confirm flow. See `CONFIRM_STATES`
@@ -134,6 +147,15 @@ const BLOCKER_LABEL: Record<string, string> = {
     "WhatsApp template is not fully configured (both name and language are required)",
   template_vars_malformed:
     "WhatsApp template variables are not a valid JSON string array",
+  // P17-C.5 — doc-header FK is dangling. Fires when the campaign has
+  // a `whatsappDocumentUploadId` AND the WhatsApp template fields set
+  // (per `campaignWantsWhatsAppDocument`) but the referenced FileUpload
+  // row no longer exists. The operator's edit page has the re-upload
+  // control; linking the operator to it from the chat card would close
+  // the loop faster, but for now the actionable guidance is in the
+  // copy below.
+  no_whatsapp_document:
+    "WhatsApp invitation PDF is missing — the attached file was deleted. Re-upload on the campaign edit page before sending.",
 };
 
 function formatBlocker(raw: string): string {
@@ -517,7 +539,8 @@ export function ConfirmSend({
       {(props.template_preview.subject_email ||
         props.template_preview.email_body ||
         props.template_preview.sms_body ||
-        props.template_preview.whatsapp_template) && (
+        props.template_preview.whatsapp_template ||
+        props.template_preview.whatsapp_document) && (
         <div className="px-3 py-2 border-t border-amber-100 bg-white text-xs space-y-1">
           {props.template_preview.subject_email && (
             <div>
@@ -553,6 +576,20 @@ export function ConfirmSend({
               <span className="text-slate-400">
                 {" "}
                 ({props.template_preview.whatsapp_template.language})
+              </span>
+            </div>
+          )}
+          {/* P17-C.5 — WhatsApp PDF readiness line. Rendered as a
+              dedicated row immediately under the template identity
+              because the PDF is an attachment on THAT template (not an
+              alternative artifact). The filename is rendered in the
+              slate tone rather than font-mono — it's a user-facing
+              filename (operator-chosen), not an identifier. */}
+          {props.template_preview.whatsapp_document && (
+            <div className="text-slate-600">
+              <span className="text-slate-500">Will attach PDF: </span>
+              <span className="text-slate-900">
+                {props.template_preview.whatsapp_document.filename}
               </span>
             </div>
           )}

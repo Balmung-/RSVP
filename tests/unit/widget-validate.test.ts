@@ -505,6 +505,9 @@ test("validateWidget: confirm_send minimum shape (ready) passes", () => {
         email_body: "Body...",
         sms_body: null,
         whatsapp_template: null,
+        // P17-C.5 — required on every post-C.5 blob; null when the
+        // campaign doesn't use the invitation-PDF flow.
+        whatsapp_document: null,
       },
       blockers: [],
       state: "ready",
@@ -683,6 +686,13 @@ function buildConfirmSend(extra: Record<string, unknown>) {
         // P13-D.2 — whatsapp_template is required on every blob (null
         // when unconfigured or channel set doesn't include WhatsApp).
         whatsapp_template: null,
+        // P17-C.5 — whatsapp_document is required on every blob (null
+        // when the campaign doesn't use the invitation-PDF flow OR the
+        // referenced FileUpload row is missing). Same fail-closed
+        // discipline as whatsapp_template: rejecting a pre-C.5 blob
+        // that omits the field flags schema drift instead of silently
+        // rendering a half-populated preview.
+        whatsapp_document: null,
       },
       blockers: [],
       ...extra,
@@ -912,7 +922,9 @@ test("validateWidget: confirm_send — rejects by_channel.whatsapp with missing 
 test("validateWidget: confirm_send — rejects missing template_preview.whatsapp_template", () => {
   // Same reasoning as by_channel.whatsapp — the field has to be present
   // (even as null) so the renderer's conditional is a simple truthy
-  // check rather than an "undefined vs null" discriminator.
+  // check rather than an "undefined vs null" discriminator. The
+  // `whatsapp_document: null` pins the other required field so the
+  // rejection is scoped to the absent whatsapp_template.
   assert.equal(
     validateWidget(
       buildConfirmSend({
@@ -920,6 +932,7 @@ test("validateWidget: confirm_send — rejects missing template_preview.whatsapp
           subject_email: null,
           email_body: null,
           sms_body: null,
+          whatsapp_document: null,
         },
       }),
     ),
@@ -937,6 +950,7 @@ test("validateWidget: confirm_send — accepts whatsapp_template with name + lan
           email_body: null,
           sms_body: null,
           whatsapp_template: { name: "rsvp_invitation_v1", language: "ar" },
+          whatsapp_document: null,
         },
       }),
     ),
@@ -954,6 +968,7 @@ test("validateWidget: confirm_send — rejects whatsapp_template missing languag
           email_body: null,
           sms_body: null,
           whatsapp_template: { name: "rsvp_invitation_v1" },
+          whatsapp_document: null,
         },
       }),
     ),
@@ -973,6 +988,112 @@ test("validateWidget: confirm_send — rejects whatsapp_template with empty stri
           email_body: null,
           sms_body: null,
           whatsapp_template: { name: "", language: "ar" },
+          whatsapp_document: null,
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+// ---- P17-C.5: whatsapp_document readiness label ----
+//
+// `whatsapp_document` is the invitation-PDF readiness label. Populated
+// when a campaign is wired for the doc-header path AND the FileUpload
+// row resolves. Null otherwise. Required on every blob so a pre-C.5
+// payload is rejected as drift rather than silently rendering a card
+// that hides an attachment the operator would have expected to see.
+
+test("validateWidget: confirm_send — rejects missing template_preview.whatsapp_document", () => {
+  // Mirror of the whatsapp_template missing-field test. Omitting the
+  // field must fail closed so the renderer's conditional never has to
+  // discriminate between "undefined" and "null" — the former means
+  // schema drift, the latter means "no PDF attached".
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: null,
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — accepts whatsapp_document with filename", () => {
+  assert.ok(
+    validateWidget(
+      buildConfirmSend({
+        state: "ready",
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: null,
+          whatsapp_document: { filename: "invitation.pdf" },
+        },
+      }),
+    ),
+  );
+});
+
+test("validateWidget: confirm_send — rejects whatsapp_document missing filename", () => {
+  // A label object without the one field it carries is drift — the
+  // renderer's "Will attach PDF: <filename>" line would render as
+  // "Will attach PDF: undefined". Reject to keep the preview honest.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: null,
+          whatsapp_document: {},
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects whatsapp_document with empty filename", () => {
+  // Same rationale as the whatsapp_template empty-string test — the
+  // upload pipeline requires a non-empty filename, and rendering an
+  // empty string would produce a visibly broken card.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: null,
+          whatsapp_document: { filename: "" },
+        },
+      }),
+    ),
+    null,
+  );
+});
+
+test("validateWidget: confirm_send — rejects whatsapp_document with non-string filename", () => {
+  // Type-confusion guard — a number or nested object in `filename`
+  // would print a garbage readiness line at best and leak arbitrary
+  // JSON into the UI at worst.
+  assert.equal(
+    validateWidget(
+      buildConfirmSend({
+        template_preview: {
+          subject_email: null,
+          email_body: null,
+          sms_body: null,
+          whatsapp_template: null,
+          whatsapp_document: { filename: 42 },
         },
       }),
     ),

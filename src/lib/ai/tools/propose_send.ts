@@ -5,6 +5,7 @@ import { confirmSendWidgetKey } from "../widgetKeys";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
 import { deriveProposeSendPreview } from "./propose-send-preview";
+import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
 
 // Previews what `sendCampaign` WOULD do, without doing it. The
 // model calls this to resolve an audience + template + count
@@ -159,6 +160,13 @@ export const proposeSendTool: ToolDef<Input> = {
         templateWhatsAppName: true,
         templateWhatsAppLanguage: true,
         templateWhatsAppVariables: true,
+        // P17-C.5 — doc-header FK. Used to check both "is a PDF
+        // attached to this campaign?" (for the Will-attach-PDF
+        // readiness line) and "does that FileUpload row still exist?"
+        // (via `campaignWantsWhatsAppDocument` + a follow-up Prisma
+        // lookup, feeding `computeBlockers`' `no_whatsapp_document`
+        // gate).
+        whatsappDocumentUploadId: true,
         teamId: true,
       },
     });
@@ -175,11 +183,47 @@ export const proposeSendTool: ToolDef<Input> = {
     // time — single source of truth for both surfaces.
     const audience = await loadAudience(campaign.id);
 
+    // P17-C.5 — FileUpload lookup for the doc-header preview +
+    // blocker. Only runs when `campaignWantsWhatsAppDocument` returns
+    // true (campaign has both template fields AND an upload id set).
+    // Selects `filename` only — the widget needs the filename for the
+    // "Will attach PDF: <name>" readiness line; bytes stay on disk
+    // until the actual delivery-edge upload (P17-C.3). A null return
+    // (FileUpload deleted since the campaign was configured) feeds
+    // the `no_whatsapp_document` blocker through `computeBlockers`
+    // below, so the operator sees the problem in ConfirmSend rather
+    // than hitting a wall of `doc_not_found` per-invitation failures.
+    let docUpload: { filename: string } | null = null;
+    let docConfigured = false;
+    if (
+      campaignWantsWhatsAppDocument({
+        whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
+        templateWhatsAppName: campaign.templateWhatsAppName,
+        templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+      })
+    ) {
+      docConfigured = true;
+      docUpload = await prisma.fileUpload.findUnique({
+        // The `!` is safe: the predicate above returned true only
+        // when `whatsappDocumentUploadId` is non-null non-empty.
+        where: { id: campaign.whatsappDocumentUploadId! },
+        select: { filename: true },
+      });
+    }
+
     // Blockers via the shared helper — same codes send_campaign
     // enforces at confirm time, same ordering the directive
     // renders. If a new blocker type is added to the helper,
     // both the preview UI here and the server-side guard in
     // send_campaign pick it up automatically.
+    //
+    // `docUploadExists` is explicitly boolean when the campaign
+    // wants a doc; undefined otherwise. The computeBlockers gate
+    // treats undefined as "opted out" (no blocker), so a campaign
+    // that doesn't use the doc-header path never even evaluates
+    // the check. A campaign that DOES want the doc but whose
+    // FileUpload row is missing (`docUpload === null`) surfaces
+    // `no_whatsapp_document`.
     const blockers = computeBlockers({
       campaign: {
         status: campaign.status,
@@ -188,10 +232,12 @@ export const proposeSendTool: ToolDef<Input> = {
         templateWhatsAppName: campaign.templateWhatsAppName,
         templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
         templateWhatsAppVariables: campaign.templateWhatsAppVariables,
+        whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
       },
       audience,
       channel,
       onlyUnsent,
+      docUploadExists: docConfigured ? docUpload !== null : undefined,
     });
 
     // P14-E — the four post-audience-load derivations (per-channel
@@ -240,6 +286,21 @@ export const proposeSendTool: ToolDef<Input> = {
           }
         : null;
 
+    // P17-C.5 — doc-header readiness label. Sibling to
+    // `whatsAppTemplateLabel` above: a compact identity object the
+    // ConfirmSend widget renders as a "Will attach PDF: <filename>"
+    // line so the operator can sanity-check the right file is
+    // attached before confirming. Null when either (a) the campaign
+    // isn't wired for the doc-header path (predicate above returned
+    // false, `docUpload` stayed null and `docConfigured` stayed
+    // false) OR (b) the campaign IS wired but the FileUpload row
+    // is missing — in the latter case, the blocker
+    // `no_whatsapp_document` will already be in the blockers list,
+    // so a null label here keeps the readiness line from rendering
+    // and the operator sees the blocker instead.
+    const whatsAppDocumentLabel =
+      docUpload !== null ? { filename: docUpload.filename } : null;
+
     const props = {
       campaign_id: campaign.id,
       name: campaign.name,
@@ -257,6 +318,7 @@ export const proposeSendTool: ToolDef<Input> = {
         email_body: clip(campaign.templateEmail, BODY_PREVIEW_CHARS),
         sms_body: clip(campaign.templateSms, BODY_PREVIEW_CHARS),
         whatsapp_template: whatsAppTemplateLabel,
+        whatsapp_document: whatsAppDocumentLabel,
       },
       blockers,
       state: preview.state,

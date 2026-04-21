@@ -282,6 +282,18 @@ function validateWhatsAppTemplateLabel(v: unknown): boolean {
   return true;
 }
 
+// P17-C.5 — mirrors `validateWhatsAppDocumentLabel` in
+// widget-validate.ts. The directive + widget validators are kept
+// structurally identical but not shared (see the file-top
+// "independent validators" constraint); extending one without the
+// other is the kind of drift these mirrored tests catch on review.
+function validateWhatsAppDocumentLabel(v: unknown): boolean {
+  if (v === null) return true;
+  if (!isPlainObject(v)) return false;
+  if (!isNonEmptyString(v.filename)) return false;
+  return true;
+}
+
 function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isNonEmptyString(p.campaign_id)) return false;
   if (!isString(p.name)) return false;
@@ -306,6 +318,14 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isStringOrNull(p.template_preview.sms_body)) return false;
   // P13-D.2 — WhatsApp template identity. Null when not configured.
   if (!validateWhatsAppTemplateLabel(p.template_preview.whatsapp_template)) {
+    return false;
+  }
+  // P17-C.5 — WhatsApp PDF readiness label. Null when the campaign
+  // doesn't use the doc-header path OR the FileUpload is missing.
+  // Required on every directive payload so pre-C.5 rehydrations fail
+  // closed rather than silently rendering a card without the
+  // attachment row.
+  if (!validateWhatsAppDocumentLabel(p.template_preview.whatsapp_document)) {
     return false;
   }
   if (!isStringArray(p.blockers)) return false;

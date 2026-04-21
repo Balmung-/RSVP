@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { channelSetFor, type SendCampaignChannel } from "@/lib/campaigns";
+import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
 
 // Shared blocker truth for the propose_send → ConfirmSend →
 // send_campaign path.
@@ -64,6 +65,15 @@ export type CampaignForBlockers = {
   // here so the operator sees the problem in the ConfirmSend card
   // instead of after clicking.
   templateWhatsAppVariables: string | null;
+  // P17-C.5 — FK to the FileUpload row carrying the invitation PDF.
+  // Used in combination with templateWhatsAppName + templateWhatsAppLanguage
+  // by `campaignWantsWhatsAppDocument` (gate predicate) to decide
+  // whether the doc-header path is active. When a campaign wants the
+  // doc but the row is missing (deleted since configuration), the
+  // blocker layer emits `no_whatsapp_document` so the operator fixes
+  // the config rather than hitting a per-invitation `doc_not_found`
+  // failure at the delivery edge.
+  whatsappDocumentUploadId: string | null;
 };
 
 // Narrow invitee shape. `invitations` is an array of
@@ -210,8 +220,26 @@ export function computeBlockers(args: {
   audience: Audience;
   channel: Channel;
   onlyUnsent: boolean;
+  // P17-C.5 — caller-provided answer to "does the FileUpload row
+  // referenced by `campaign.whatsappDocumentUploadId` still exist?"
+  // Optional because:
+  //   - Callers that don't care about the doc path (every pre-P17-C
+  //     caller, and anything on a channel that doesn't include
+  //     WhatsApp) can pass nothing and the doc blocker won't fire.
+  //   - Callers that DO care (propose_send, send_campaign) do the
+  //     Prisma lookup themselves and pass the boolean here. Keeps
+  //     this helper pure — no DB access inside the blocker logic.
+  //
+  // When `docUploadExists === false` AND the campaign wants a doc
+  // (per `campaignWantsWhatsAppDocument`) AND the channel set
+  // includes WhatsApp, emit `no_whatsapp_document`. Any other
+  // combination skips the check. Undefined is treated as "caller
+  // opted out of the check" — not "doc is missing" — so a
+  // misconfigured campaign whose caller forgot to pass the flag
+  // doesn't get a false-positive blocker.
+  docUploadExists?: boolean;
 }): string[] {
-  const { campaign, audience, channel, onlyUnsent } = args;
+  const { campaign, audience, channel, onlyUnsent, docUploadExists } = args;
   const chans = channelSetFor(channel);
   const wantsEmail = chans.has("email");
   const wantsSms = chans.has("sms");
@@ -274,6 +302,37 @@ export function computeBlockers(args: {
     !isParsableWhatsAppVars(campaign.templateWhatsAppVariables)
   ) {
     blockers.push("template_vars_malformed");
+  }
+  // P17-C.5 — doc-header readiness blocker. Gated on ALL of:
+  //
+  //   1. channel set includes WhatsApp — on an email-only send the
+  //      doc never attaches, so a missing FileUpload is not a
+  //      blocker (the operator can always reconfigure later without
+  //      gating today's email send).
+  //   2. `campaignWantsWhatsAppDocument(...)` returns true — i.e.
+  //      the campaign has both a template and a doc upload id
+  //      configured. Same predicate the planner uses in Rule 1's
+  //      doc branch; keeping both on one gate means blocker and
+  //      delivery stay consistent.
+  //   3. `docUploadExists === false` (strict — undefined or true
+  //      skips the blocker). Only emit when the caller has
+  //      explicitly confirmed the row is missing.
+  //
+  // Explicit non-goals: the blocker does NOT check content-type or
+  // byte length of the FileUpload. Those are delivery-edge concerns
+  // (C.3's `doc_empty` guard + Taqnyat's own MIME validation). This
+  // is a preflight "does the reference still resolve?" check, not a
+  // deep validation.
+  if (
+    wantsWhatsApp &&
+    campaignWantsWhatsAppDocument({
+      whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
+      templateWhatsAppName: campaign.templateWhatsAppName,
+      templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+    }) &&
+    docUploadExists === false
+  ) {
+    blockers.push("no_whatsapp_document");
   }
   return blockers;
 }

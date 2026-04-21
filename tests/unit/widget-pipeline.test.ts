@@ -373,6 +373,9 @@ test("pipeline: confirm_send writer and confirm-route reader land on the SAME ro
       email_body: "Body",
       sms_body: null,
       whatsapp_template: null,
+      // P17-C.5 — required on every post-C.5 blob; null when the
+      // campaign doesn't use the invitation-PDF flow.
+      whatsapp_document: null,
     },
     blockers: [],
     state: "ready" as const,

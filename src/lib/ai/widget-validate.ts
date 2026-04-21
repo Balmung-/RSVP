@@ -409,6 +409,26 @@ function validateWhatsAppTemplateLabel(v: unknown): boolean {
   return true;
 }
 
+// P17-C.5 — WhatsApp invitation PDF readiness label. Populated when
+// the campaign is wired for the doc-header path AND the FileUpload
+// row resolves; the widget renders the filename as the
+// "Will attach PDF: <filename>" readiness line. Sibling to
+// `validateWhatsAppTemplateLabel` — same null-or-shape discipline,
+// and keeping the two validators split documents the two distinct
+// preview slots (template identity vs. attachment filename) even
+// though their checks collapse to the same pattern.
+//
+// `filename` is non-empty: the ingest pipeline on `/api/files/upload`
+// requires a filename (no server-generated blank default), so a
+// present-but-empty filename here would indicate drift between the
+// upload path and the propose_send handler.
+function validateWhatsAppDocumentLabel(v: unknown): boolean {
+  if (v === null) return true;
+  if (!isPlainObject(v)) return false;
+  if (!isNonEmptyString(v.filename)) return false;
+  return true;
+}
+
 function validateConfirmSend(p: Record<string, unknown>): boolean {
   if (!isNonEmptyString(p.campaign_id)) return false;
   if (!isString(p.name)) return false;
@@ -437,6 +457,17 @@ function validateConfirmSend(p: Record<string, unknown>): boolean {
   // P13-D.2 — WhatsApp template identity. Shape: `{name, language} | null`.
   // See `validateWhatsAppTemplateLabel` for the predicate rationale.
   if (!validateWhatsAppTemplateLabel(p.template_preview.whatsapp_template)) {
+    return false;
+  }
+  // P17-C.5 — WhatsApp PDF readiness label. Shape: `{filename} | null`.
+  // Required (not optional) so a pre-C.5 blob that omits the field is
+  // rejected as drift, mirroring how `whatsapp_template` was handled in
+  // D.2. The renderer branches on null (no readiness line) vs. a
+  // populated label (renders "Will attach PDF: <filename>"), so
+  // accepting an undefined field here would make a reload ambiguous
+  // between "no doc-header configured" and "doc-header configured but
+  // this blob is pre-C.5".
+  if (!validateWhatsAppDocumentLabel(p.template_preview.whatsapp_document)) {
     return false;
   }
   if (!isStringArray(p.blockers)) return false;

@@ -50,6 +50,13 @@ function mkCampaign(
     // this reflects the realistic production default. Tests that
     // exercise the malformed-vars path override it explicitly.
     templateWhatsAppVariables: null,
+    // P17-C.5 — `whatsappDocumentUploadId` is required on
+    // `CampaignForBlockers` (the blocker layer reads it to decide
+    // whether the doc-header gate is active). Default to `null` —
+    // a campaign that doesn't use the invitation-PDF flow has no
+    // upload id and the gate short-circuits harmlessly. Tests that
+    // exercise `no_whatsapp_document` override with a string id.
+    whatsappDocumentUploadId: null,
     ...overrides,
   };
 }
@@ -464,4 +471,166 @@ test("blocker emission order stable: status → audience → templates (email, s
     "no_sms_template",
     "no_whatsapp_template",
   ]);
+});
+
+// ---- no_whatsapp_document (P17-C.5) ------------------------------
+//
+// The fourth WhatsApp blocker — fires when the campaign is wired
+// for the doc-header path (both template fields AND a FileUpload id)
+// but the referenced row has since been deleted. The caller
+// (propose_send / send_campaign) does the Prisma lookup and passes
+// the boolean through as `docUploadExists`. The helper treats
+// `undefined` as "caller opted out", so pre-C.5 callers continue to
+// pass no flag and see no new blockers.
+//
+// Gating matrix — the blocker fires only when ALL of these are true:
+//   1. channel set includes WhatsApp (wantsWhatsApp)
+//   2. campaign has template fields AND an upload id
+//      (campaignWantsWhatsAppDocument === true)
+//   3. docUploadExists === false (strict)
+
+test("no_whatsapp_document: all gates open → blocker fires", () => {
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.ok(blockers.includes("no_whatsapp_document"));
+});
+
+test("no_whatsapp_document: docUploadExists=true → no blocker", () => {
+  // The happy path — the referenced row still exists. The doc-header
+  // path will attach at the delivery edge; preflight says nothing.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: true,
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: docUploadExists=undefined → no blocker", () => {
+  // Opt-out semantic — caller didn't perform the lookup. The helper
+  // must not synthesize a blocker on absence of evidence. This is
+  // how pre-C.5 callers continue to behave when we later land this
+  // helper in a broader codebase without touching every call site.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    // docUploadExists intentionally omitted
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: channel=email → no blocker even if doc missing", () => {
+  // Channel gating. If WhatsApp isn't in the channel set, the PDF is
+  // not going to be attached — a missing FileUpload is irrelevant to
+  // the send the operator is authorizing.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "email",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: channel=both → no blocker (pre-P13 invariant)", () => {
+  // `both` is email+SMS only. Doc-header is a WhatsApp-only concept;
+  // a `both` send must not emit a WhatsApp-specific blocker even if
+  // the doc config happens to be broken.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "both",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: channel=all → blocker fires when doc missing", () => {
+  // The umbrella pulls WhatsApp in; with the campaign wired for the
+  // doc path and the row missing, the blocker surfaces the same way
+  // a scalar `whatsapp` send does.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "all",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.ok(blockers.includes("no_whatsapp_document"));
+});
+
+test("no_whatsapp_document: campaign has no upload id → no blocker", () => {
+  // Predicate short-circuit. A campaign that doesn't use the doc
+  // path (no upload id) can't be "missing" a doc. Even a stray
+  // docUploadExists=false shouldn't fire anything.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: null,
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: upload id set but template missing → no_whatsapp_template fires, doc blocker does not", () => {
+  // Predicate order — `campaignWantsWhatsAppDocument` requires BOTH
+  // template fields AND the upload id. If the template is missing,
+  // the fix is to configure it first; stacking both blockers would
+  // noise up the UI with something that auto-resolves when the
+  // template is fixed. The helper defers to `no_whatsapp_template`
+  // in that case.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      templateWhatsAppName: null,
+      whatsappDocumentUploadId: "upload-abc",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.ok(blockers.includes("no_whatsapp_template"));
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
+});
+
+test("no_whatsapp_document: empty-string upload id → no blocker (treated as unconfigured)", () => {
+  // Matches the predicate's `length === 0` guard. A cleared form
+  // field stored as an empty string is indistinguishable from
+  // "unconfigured" — same semantic, same short-circuit.
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      whatsappDocumentUploadId: "",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+    docUploadExists: false,
+  });
+  assert.equal(blockers.includes("no_whatsapp_document"), false);
 });

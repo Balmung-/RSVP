@@ -5,6 +5,7 @@ import { sendCampaign } from "@/lib/campaigns";
 import type { ToolDef, ToolResult } from "./types";
 import { loadAudience, computeBlockers } from "./send-blockers";
 import { deriveSendCampaignSummary } from "./send-campaign-summary";
+import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
 
 // The destructive companion to `propose_send`. Same input shape; the
 // difference is that this tool actually dispatches messages through
@@ -147,6 +148,14 @@ export const sendCampaignTool: ToolDef<Input> = {
         templateWhatsAppName: true,
         templateWhatsAppLanguage: true,
         templateWhatsAppVariables: true,
+        // P17-C.5 — doc-header FK. Mirrors propose_send's select:
+        // needed so the blocker re-check below can emit
+        // `no_whatsapp_document` when the campaign is wired for
+        // the doc-header path but the FileUpload row has since
+        // been deleted. Without this field the server-side re-check
+        // is blind to a dangling FK and the send would fan out to
+        // per-invitation `doc_not_found` failures.
+        whatsappDocumentUploadId: true,
       },
     });
     if (!campaign) {
@@ -213,6 +222,33 @@ export const sendCampaignTool: ToolDef<Input> = {
     // structured error code; the full list is attached so the
     // audit record / future UI can show them all.
     const audience = await loadAudience(campaign.id);
+
+    // P17-C.5 — doc-header existence re-check. Mirrors the propose_send
+    // handler's FileUpload lookup: when the campaign is wired for the
+    // doc-header path (both template fields AND an upload id), we
+    // resolve the FileUpload row and pass the boolean into
+    // `computeBlockers` so a dangling FK surfaces as
+    // `no_whatsapp_document` before we kick off the per-invitation
+    // fan-out. Same select shape — just the minimum the blocker
+    // check needs (`id` via `!= null`). `filename` isn't required here
+    // because this tool doesn't render a preview; it only enforces.
+    let docExists: boolean | undefined = undefined;
+    if (
+      campaignWantsWhatsAppDocument({
+        whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
+        templateWhatsAppName: campaign.templateWhatsAppName,
+        templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+      })
+    ) {
+      const row = await prisma.fileUpload.findUnique({
+        // Safe `!`: the predicate above returned true only when
+        // `whatsappDocumentUploadId` is non-null non-empty.
+        where: { id: campaign.whatsappDocumentUploadId! },
+        select: { id: true },
+      });
+      docExists = row !== null;
+    }
+
     const blockers = computeBlockers({
       campaign: {
         status: campaign.status,
@@ -221,10 +257,12 @@ export const sendCampaignTool: ToolDef<Input> = {
         templateWhatsAppName: campaign.templateWhatsAppName,
         templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
         templateWhatsAppVariables: campaign.templateWhatsAppVariables,
+        whatsappDocumentUploadId: campaign.whatsappDocumentUploadId,
       },
       audience,
       channel,
       onlyUnsent,
+      docUploadExists: docExists,
     });
     const nonStatusBlockers = blockers.filter(
       (b) => !b.startsWith("status_locked:"),
