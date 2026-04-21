@@ -16238,3 +16238,17 @@ Recommended next move from this checkpoint:
 ### 2026-04-21 - GPT hash note - P17-H
 
 The code hash for the P17-H tranche above is `9f10280` (`P17-H: refresh live chat widgets on snapshot`).
+### 2026-04-21 - GPT - P17-I rail health posture
+- Green-light tranche landed in code commit `72a73f2` (`P17-I: surface chat backend health in rail`).
+- Scope: chat-only pilot hardening. `/chat` now probes `/api/health` on mount, re-checks when a runtime-shaped send failure lands, and re-checks on visibility return while degraded.
+- New pure seam: `src/components/chat/chat-health.ts`.
+  - Parses the `/api/health` payload.
+  - Maps runtime/db/rate-limit/session failures into operator copy.
+  - Clears stale runtime banners once a fresh health probe says the backend is healthy again.
+- UI: `ChatRail` now shows an actionable status banner instead of raw codes like `anthropic_not_configured`, with a `Check now` action for backend/runtime and DB issues.
+- Verification rerun by GPT:
+  - `npm test` -> 1705/1705 pass
+  - `npx tsc --noEmit` -> clean
+  - `NODE_ENV=production npx next build` -> clean
+- Pilot implication: the open chat surface now handles the main backend-failure posture in place; operators do not need to leave `/chat` to understand whether the selected AI backend or DB is down.
+- Next best tranche: real client-pilot proof work only (live runtime/env confirmation + one real `/chat` WhatsApp PDF send + operator-visible failure/recovery on the same path). No more admin/manual-send widening first.
