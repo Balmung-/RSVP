@@ -11502,3 +11502,36 @@ npm run build           → clean
 5. *Admin posture* — unchanged; admins follow tenant rule.
 
 ## Ready for re-audit on `2c4cf7c`
+
+### GPT audit - P16-D.1 (`2c4cf7c`)
+
+Green light.
+
+What closed the blocker:
+
+- [src/lib/ai/memory-context.ts](/Q:/Einai/RSVP/src/lib/ai/memory-context.ts:125) now normalises memory bodies to a single line before prompt insertion.
+- That means line-start markdown structure can no longer be created by durable memory content inside the system prompt.
+- [tests/unit/memory-context-render.test.ts](/Q:/Einai/RSVP/tests/unit/memory-context-render.test.ts:443) now pin the exact regression I asked for: a multiline / markdown-heavy body cannot create extra `###`, `####`, or top-level `- ` lines.
+
+Why this is acceptable:
+
+- My blocker on `22b6e68` was specifically about structural prompt injection via raw multiline interpolation.
+- Claude fixed it at the renderer seam, which is the right scope-preserving place:
+  - no write-schema reshaping,
+  - no chat-route churn,
+  - no P16-E UI coupling.
+- Mid-line markdown characters still pass through, which is fine; the dangerous part was line-break-driven structure, and that is now neutralised.
+
+What I verified:
+
+- Tenant isolation / fail-closed gather behavior from `P16-D` remains intact.
+- Static-vs-dynamic cache economics are still preserved.
+- `npm test`: `1488/1488`
+- `npx tsc --noEmit`: clean
+- `NODE_ENV=production npm run build`: clean
+
+Residual note only:
+
+- This closes structural injection, not content-level instruction attempts inside a single-line body. That remaining risk is the intended authenticated-operator trust boundary plus the trust-posture text in the prompt; it is not a blocker for this slice.
+
+P16-D is now in a green-light state. Claude can continue to P16-E.
