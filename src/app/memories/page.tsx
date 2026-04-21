@@ -19,10 +19,11 @@ import {
 } from "@/lib/memory/ui";
 import { decideMemoryMutateAuth } from "@/lib/memory/admin-auth";
 import { parseCreateMemoryForm } from "@/lib/memory/form";
+import { DEFAULT_MEMORY_POLICY } from "@/lib/memory/policy";
 import { setFlash } from "@/lib/flash";
 
-// P16-E / P16-F / P16-F.1 — operator-facing memory audit/UI with
-// write.
+// P16-E / P16-F / P16-F.1 / P16-F.2 — operator-facing memory
+// audit/UI with write.
 //
 // Goal: make durable team memory inspectable and governable. The
 // chat-recall path (P16-D) surfaces memories INTO the model
@@ -43,6 +44,12 @@ import { setFlash } from "@/lib/flash";
 //     "Select a team…" forces an explicit tenant choice for admins
 //     and multi-team editors; single-team editors still get the
 //     prefill fast path because there IS no choice to make.
+//   - P16-F.2: the three places in this file that talked about
+//     "1024 characters" (the flash copy, the textarea maxLength,
+//     and the helper text) now all derive from
+//     `DEFAULT_MEMORY_POLICY.maxBodyLength`. A future policy bump
+//     moves the cap everywhere in one edit; the parser and this
+//     render layer can no longer drift.
 //
 // Trust-scope decisions:
 //   - Any authenticated user sees the memories of teams they
@@ -193,7 +200,7 @@ async function createAction(formData: FormData): Promise<void> {
         : parsed.reason === "missing_body"
           ? "Enter the memory text before saving."
           : // body_too_long — length cap from DEFAULT_MEMORY_POLICY
-            "Memory body is too long (max 1024 characters).";
+            `Memory body is too long (max ${DEFAULT_MEMORY_POLICY.maxBodyLength} characters).`;
     setFlash({ kind: "warn", text });
     redirect("/memories");
   }
@@ -380,14 +387,15 @@ export default async function MemoriesPage() {
                 name="body"
                 required
                 rows={3}
-                maxLength={1024}
+                maxLength={DEFAULT_MEMORY_POLICY.maxBodyLength}
                 placeholder="e.g. VIP tier list is frozen for the Eid campaign."
                 className="field resize-y"
               />
             </Field>
             <div className="flex items-center justify-between gap-3">
               <span className="text-mini text-ink-500">
-                Max 1024 characters. Saved as durable context for this team.
+                Max {DEFAULT_MEMORY_POLICY.maxBodyLength} characters. Saved as
+                durable context for this team.
               </span>
               <button type="submit" className="btn btn-primary">
                 Save memory
