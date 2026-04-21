@@ -10,6 +10,11 @@ import {
   shouldRefreshOnPoll,
   shouldRefreshOnVisibility,
 } from "./visibilityRefresh";
+import {
+  parseChatHealth,
+  shouldRefreshHealthForError,
+  type ChatHealthSnapshot,
+} from "./chat-health";
 import type { ClientWidget, FocusRequest, Phase, Turn } from "./types";
 import type { FormatContext } from "./directives/CampaignList";
 import { appendConfirmedOutcome } from "./confirmedOutcome";
@@ -62,6 +67,8 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
   const [input, setInput] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [topError, setTopError] = useState<string | null>(null);
+  const [health, setHealth] = useState<ChatHealthSnapshot | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [sessionId, setSessionIdState] = useState<string | null>(null);
   // W4: pending focus request from the latest `widget_focus` frame.
   // The seq counter below bumps every time so React's effect in
@@ -118,6 +125,28 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     },
     [],
   );
+
+  const refreshHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const res = await fetch("/api/health", {
+        method: "GET",
+        credentials: "same-origin",
+      });
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      const parsed = parseChatHealth(body);
+      if (parsed) setHealth(parsed);
+    } catch {
+      /* silent: leave the last known status in place */
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
 
   // ---- mount hydration --------------------------------------------
 
@@ -250,6 +279,10 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
     void refreshSessions();
   }, [refreshSessions]);
 
+  useEffect(() => {
+    void refreshHealth();
+  }, [refreshHealth]);
+
   // P4-B — resume-last. If the operator landed on /chat with NO
   // `?session=` in the URL, pick the newest session from the list
   // and hydrate it. All the gating logic (URL session present,
@@ -381,6 +414,21 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
 
   useEffect(() => {
     if (typeof document === "undefined") return;
+    const handler = () => {
+      if (document.visibilityState !== "visible") return;
+      const degraded =
+        health?.db === "down" ||
+        Boolean(health && !health.ai.configured) ||
+        shouldRefreshHealthForError(topError);
+      if (!degraded) return;
+      void refreshHealth();
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [health, refreshHealth, topError]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
     const timer = window.setInterval(() => {
       // Low-frequency live sync for the currently-visible session.
       // This complements (not replaces) the visibilitychange refresh:
@@ -468,6 +516,9 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
               : t,
           ),
         );
+        if (shouldRefreshHealthForError(message)) {
+          void refreshHealth();
+        }
         setPhase("idle");
         return;
       }
@@ -507,6 +558,9 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
             : t,
         ),
       );
+      if (shouldRefreshHealthForError(msg)) {
+        void refreshHealth();
+      }
     } finally {
       setPhase("idle");
       abortRef.current = null;
@@ -636,6 +690,9 @@ export function ChatWorkspace({ fmt }: { fmt: FormatContext }) {
           setInput={setInput}
           phase={phase}
           topError={topError}
+          health={health}
+          healthLoading={healthLoading}
+          onRefreshHealth={() => void refreshHealth()}
           onSend={() => void send()}
           header={
             <SessionPicker

@@ -19,6 +19,10 @@ import {
   uploadErrorMessage,
   type UploadResponse,
 } from "./uploadReference";
+import {
+  deriveChatSystemNotice,
+  type ChatHealthSnapshot,
+} from "./chat-health";
 import { SEED_PROMPT_EVENT, isSeedPromptEvent } from "./seedComposerPrompt";
 import { Icon } from "@/components/Icon";
 
@@ -48,6 +52,9 @@ export function ChatRail({
   setInput,
   phase,
   topError,
+  health,
+  healthLoading,
+  onRefreshHealth,
   onSend,
   header,
 }: {
@@ -57,6 +64,9 @@ export function ChatRail({
   setInput: (v: string) => void;
   phase: Phase;
   topError: string | null;
+  health: ChatHealthSnapshot | null;
+  healthLoading: boolean;
+  onRefreshHealth: () => void;
   onSend: () => void;
   // P4-B — optional slot rendered above the transcript. ChatWorkspace
   // mounts the SessionPicker here; passing ReactNode keeps this rail
@@ -160,6 +170,16 @@ export function ChatRail({
     [fmt.locale],
   );
 
+  const systemNotice = useMemo(
+    () =>
+      deriveChatSystemNotice({
+        locale: fmt.locale,
+        topError,
+        health,
+      }),
+    [fmt.locale, health, topError],
+  );
+
   return (
     <div className="flex flex-col h-full min-w-0 border-e border-ink-100 bg-white">
       {header && (
@@ -193,10 +213,52 @@ export function ChatRail({
         )}
       </div>
 
-      {topError && (
+      {systemNotice && (
         <div className="px-4 pb-2">
-          <div className="rounded-md border border-rose-200 bg-rose-50 text-rose-800 text-sm px-3 py-2">
-            {topError}
+          <div
+            className={clsx(
+              "rounded-md border text-sm px-3 py-2",
+              systemNotice.tone === "danger"
+                ? "border-rose-200 bg-rose-50 text-rose-900"
+                : "border-amber-200 bg-amber-50 text-amber-900",
+            )}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-medium">{systemNotice.title}</div>
+                <div
+                  className={clsx(
+                    "mt-0.5 text-xs leading-relaxed",
+                    systemNotice.tone === "danger"
+                      ? "text-rose-700"
+                      : "text-amber-800",
+                  )}
+                >
+                  {systemNotice.detail}
+                </div>
+              </div>
+              {systemNotice.allowRefreshStatus && (
+                <button
+                  type="button"
+                  onClick={onRefreshHealth}
+                  disabled={healthLoading}
+                  className={clsx(
+                    "shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium",
+                    systemNotice.tone === "danger"
+                      ? "border-rose-300 text-rose-800 hover:bg-rose-100 disabled:text-rose-400"
+                      : "border-amber-300 text-amber-900 hover:bg-amber-100 disabled:text-amber-500",
+                  )}
+                >
+                  {healthLoading
+                    ? fmt.locale === "ar"
+                      ? "جارٍ الفحص…"
+                      : "Checking…"
+                    : fmt.locale === "ar"
+                      ? "تحقق الآن"
+                      : "Check now"}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
