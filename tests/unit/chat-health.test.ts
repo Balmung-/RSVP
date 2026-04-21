@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  deriveChatFatalNotice,
   deriveChatSystemNotice,
   parseChatHealth,
   shouldRefreshHealthForError,
@@ -141,6 +142,36 @@ test("deriveChatSystemNotice falls back to generic request failure copy", () => 
     title: "Request failed",
     detail: "socket_hangup",
     allowRefreshStatus: false,
+  });
+});
+
+test("deriveChatFatalNotice prefers health-derived database copy", () => {
+  const notice = deriveChatFatalNotice({
+    locale: "en",
+    health: {
+      ok: false,
+      db: "down",
+      ai: { name: "openrouter", configured: true },
+    },
+    fallbackMessage: "prisma blew up",
+  });
+  assert.deepEqual(notice, {
+    title: "Database unavailable",
+    detail: "Chat cannot send or refresh until the database recovers.",
+    allowRefreshStatus: true,
+  });
+});
+
+test("deriveChatFatalNotice falls back to a generic chat-unavailable notice", () => {
+  const notice = deriveChatFatalNotice({
+    locale: "en",
+    health: healthy(),
+    fallbackMessage: "session lookup failed",
+  });
+  assert.deepEqual(notice, {
+    title: "Chat is temporarily unavailable",
+    detail: "session lookup failed",
+    allowRefreshStatus: true,
   });
 });
 

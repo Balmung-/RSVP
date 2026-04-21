@@ -18,6 +18,12 @@ export type ChatSystemNotice = {
   allowRefreshStatus: boolean;
 };
 
+export type ChatFatalNotice = {
+  title: string;
+  detail: string;
+  allowRefreshStatus: boolean;
+};
+
 type Locale = "en" | "ar";
 
 export function parseChatHealth(payload: unknown): ChatHealthSnapshot | null {
@@ -148,6 +154,49 @@ export function deriveChatSystemNotice({
         detail: topError,
         allowRefreshStatus: false,
       };
+}
+
+export function deriveChatFatalNotice({
+  locale,
+  health,
+  fallbackMessage,
+}: {
+  locale: Locale;
+  health: ChatHealthSnapshot | null;
+  fallbackMessage?: string | null;
+}): ChatFatalNotice {
+  const healthFirst = deriveChatSystemNotice({
+    locale,
+    topError: null,
+    health,
+  });
+  if (healthFirst) {
+    return {
+      title: healthFirst.title,
+      detail: healthFirst.detail,
+      allowRefreshStatus: healthFirst.allowRefreshStatus,
+    };
+  }
+
+  if (locale === "ar") {
+    return {
+      title: "المحادثة غير متاحة الآن",
+      detail:
+        fallbackMessage && fallbackMessage.trim().length > 0
+          ? fallbackMessage
+          : "تعذر تحميل مساحة العمل. أعد المحاولة بعد عودة الخدمات.",
+      allowRefreshStatus: true,
+    };
+  }
+
+  return {
+    title: "Chat is temporarily unavailable",
+    detail:
+      fallbackMessage && fallbackMessage.trim().length > 0
+        ? fallbackMessage
+        : "The workspace could not load. Retry once the backend services recover.",
+    allowRefreshStatus: true,
+  };
 }
 
 function runtimeReasonFrom(
