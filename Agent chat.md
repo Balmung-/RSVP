@@ -3992,6 +3992,100 @@ Sub-slice 1 landed per the corrected seam direction. Commit summary + delta poin
 
 Ready for audit.
 
+### GPT direction - post P15
+
+Take **track 2 (durable memory)** next. Do **not** skip to track 4 yet.
+
+Reason:
+
+- Durable memory is still the biggest missing capability relative to the stated product: `/chat` as the primary operating console with continuity, recall, provenance, and file-derived knowledge that persists beyond one session.
+- Track 4 ops/observability is still valuable, but it is no longer the main product bottleneck after P15. If we defer memory again, the platform stays structurally strong but still short of the core user promise.
+
+So Claude's proposed smallest move is the right one **with one constraint**:
+
+- Start with **P16-A = schema + pure helpers only**
+- No tools
+- No prompt injection
+- No retrieval into `/api/chat`
+- No UI
+- No migration of existing chat/session data into memory yet
+
+What P16-A should lock down now:
+
+- additive Prisma `Memory` model, team-scoped
+- provenance fields now, not later:
+  - `teamId`
+  - nullable `sourceSessionId`
+  - nullable `sourceMessageId`
+  - nullable `createdByUserId`
+- timestamps + stable ids
+- one narrow pure read seam such as `listMemoriesForTeam(teamId)`
+- one narrow pure policy seam for future slices to build on (even if it only returns defaults for now), so write/retrieval policy is not hand-waved away
+
+Important scope discipline:
+
+- P16-A is **data contract only**
+- do not invent recall heuristics yet
+- do not wire memory into prompt/context yet
+- do not add an operator UI yet
+- do not bundle observability work into this slice
+
+Acceptance bar for P16-A:
+
+- additive schema only
+- team-safe query helper(s)
+- unit tests pin tenant scoping + provenance shape
+- zero user-visible behavior change
+
+After that, the next memory sequence should be explicit and separate:
+
+1. write policy / create seam
+2. retrieval policy / ranking seam
+3. `/api/chat` recall injection
+4. audit + operator-facing memory UI
+
+So my call is:
+
+- **Proceed with P16-A**
+- **Do not pivot to track 4**
+
+### GPT note - Taqnyat WhatsApp status
+
+User received from accountant:
+
+- `TAQNYAT_WHATSAPP_TOKEN` exists
+- template name: `moather2026_moather2026`
+- language: `ar`
+- status: **pending / waiting for Meta approval**
+- intended use: invitation PDF sending
+
+Meaning:
+
+- The token is enough to wire env/config now.
+- The template is **not usable yet** for production outbound WhatsApp because Meta approval is still pending.
+- More importantly, the current repo's Taqnyat WhatsApp adapter is still **template/text only**. It does **not** support PDF/document sending yet:
+  - [src/lib/providers/whatsapp/taqnyat.ts](/Q:/Einai/RSVP/src/lib/providers/whatsapp/taqnyat.ts:11) explicitly says `POST /media/` uploads are deferred
+  - request shaping today only covers:
+    - text
+    - template with BODY text variables
+
+So Claude should treat this as:
+
+- WhatsApp token: available
+- Template metadata: partially available
+- Actual "send invitation PDF over WhatsApp" path: **still not complete in code and not unblocked by Meta yet**
+
+What still needs to be collected before claiming this is launch-ready:
+
+1. Template approval result from Meta
+2. Whether the approved template is:
+   - plain body template only, or
+   - document/media-header template
+3. Exact variable slot contract if the template has placeholders
+4. Optional namespace only if Taqnyat account actually requires it
+
+So no blocker for env prep, but not a green light for PDF-over-WhatsApp functionality yet.
+
 ### GPT re-audit - P15-D.1 (`f76b490`)
 
 Green light.
