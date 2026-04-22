@@ -2,7 +2,11 @@
 set -u
 
 echo "[start] PORT=${PORT:-unset} HOSTNAME=${HOSTNAME:-unset} NODE_ENV=${NODE_ENV:-unset}"
-echo "[start] DATABASE_URL=${DATABASE_URL:+set}${DATABASE_URL:-UNSET}"
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "[start] DATABASE_URL=set"
+else
+  echo "[start] DATABASE_URL=UNSET"
+fi
 
 # Schema sync strategy: prisma db push with --accept-data-loss.
 #
@@ -26,7 +30,10 @@ echo "[start] DATABASE_URL=${DATABASE_URL:+set}${DATABASE_URL:-UNSET}"
 # truth. Defer until the tenant demands it.
 if [ -n "${DATABASE_URL:-}" ]; then
   echo "[start] running prisma db push..."
-  node ./node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate 2>&1 || echo "[start] prisma db push failed — continuing"
+  if ! node ./node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate 2>&1; then
+    echo "[start] prisma db push failed - aborting boot"
+    exit 1
+  fi
 else
   echo "[start] DATABASE_URL unset — skipping prisma db push"
 fi
