@@ -145,7 +145,7 @@ export async function isAuthed(): Promise<boolean> {
 export async function requireRole(role: Role): Promise<User> {
   const u = await getCurrentUser();
   if (!u) redirect("/login");
-  if (!hasRole(u, role)) redirect("/");
+  if (!hasRole(u, role)) redirect("/chat");
   return u;
 }
 

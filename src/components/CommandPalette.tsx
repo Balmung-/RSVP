@@ -40,12 +40,12 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
 
   const staticCommands: StaticCommand[] = useMemo(() => {
     const base: StaticCommand[] = [
-      { id: "go-home", label: "Overview", hint: "Dashboard", href: "/", icon: "dashboard", keywords: ["dashboard", "home"] },
+      { id: "go-chat", label: "Chat", hint: "Primary workspace", href: "/chat", icon: "message", keywords: ["ai", "assistant", "chatbot", "home"] },
+      { id: "go-overview", label: "Overview", hint: "Dashboard", href: "/overview", icon: "dashboard", keywords: ["dashboard"] },
       { id: "go-campaigns", label: "Campaigns", href: "/campaigns", icon: "calendar-check" },
       { id: "go-contacts", label: "Contacts", href: "/contacts", icon: "users" },
       { id: "go-templates", label: "Templates", href: "/templates", icon: "file-text" },
       { id: "go-inbox", label: "Inbox", href: "/inbox", icon: "inbox" },
-      { id: "go-chat", label: "Chat", hint: "AI assistant", href: "/chat", icon: "message", keywords: ["ai", "assistant", "chatbot"] },
       { id: "new-campaign", label: "New campaign", hint: "Create", href: "/campaigns/new", icon: "plus" },
       { id: "new-contact", label: "New contact", hint: "Add to address book", href: "/contacts/new", icon: "user-plus" },
       { id: "new-template", label: "New template", href: "/templates/new", icon: "plus" },
@@ -90,7 +90,8 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
     // visible, we mirror that here so an editor pressing "g a" for
     // approvals silently falls through instead of 404'ing.
     const gRoutes: Record<string, string> = {
-      h: "/",
+      h: "/chat",
+      o: "/overview",
       c: "/campaigns",
       p: "/contacts",
       t: "/templates",
@@ -378,7 +379,8 @@ export function CommandPalette({ isAdmin = false, teamsOn = false }: { isAdmin?:
             </ul>
             <div className="text-micro uppercase tracking-wider text-ink-400 mb-2">Jump to</div>
             <ul className="flex flex-col gap-2 text-body text-ink-700">
-              <Shortcut keys={["g", "h"]} label="Overview" />
+              <Shortcut keys={["g", "h"]} label="Chat" />
+              <Shortcut keys={["g", "o"]} label="Overview" />
               <Shortcut keys={["g", "c"]} label="Campaigns" />
               <Shortcut keys={["g", "p"]} label="Contacts" />
               <Shortcut keys={["g", "t"]} label="Templates" />

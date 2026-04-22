@@ -25,7 +25,7 @@ export function TemplateForm({
           required
           maxLength={120}
           defaultValue={template?.name ?? ""}
-          placeholder="Diplomatic reception — email (EN)"
+          placeholder="Diplomatic reception - email (EN)"
         />
       </Field>
       <Field label="Kind">
@@ -38,7 +38,7 @@ export function TemplateForm({
       <Field label="Locale">
         <select name="locale" className="field" defaultValue={template?.locale ?? "en"}>
           <option value="en">English</option>
-          <option value="ar">العربية</option>
+          <option value="ar">العربية (السعودية)</option>
         </select>
       </Field>
       <Field label="Email subject (email only)" className="col-span-2">
@@ -47,7 +47,7 @@ export function TemplateForm({
           className="field"
           maxLength={300}
           defaultValue={template?.subject ?? ""}
-          placeholder="Invitation — {{campaign}}"
+          placeholder="Invitation - {{campaign}}"
         />
       </Field>
       <Field label="Body" className="col-span-2">
@@ -82,4 +82,3 @@ export function TemplateForm({
     </form>
   );
 }
-

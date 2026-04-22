@@ -17,6 +17,101 @@ export type TemplateResult =
   | { ok: true; templateId: string }
   | { ok: false; reason: "missing_name" | "missing_body" | "invalid_kind" | "not_found" };
 
+export const GOVERNMENT_TEMPLATE_PACK: ReadonlyArray<TemplateInput> = [
+  {
+    name: "Ministry Invitation - Email (AR)",
+    kind: "email",
+    locale: "ar",
+    subject: "دعوة رسمية - {{campaign}}",
+    body:
+      "السلام عليكم ورحمة الله وبركاته،\n\nيسرنا دعوتكم لحضور {{campaign}}.\nالموعد: {{eventAt}}\nالمكان: {{venue}}\n\nيرجى تأكيد الحضور عبر الرابط التالي:\n{{rsvpUrl}}\n\nمع خالص التقدير،\n{{brand}}",
+    tags: "starter,government,ministry,formal,invitation,ar,email",
+  },
+  {
+    name: "Ministry Invitation - Email (EN)",
+    kind: "email",
+    locale: "en",
+    subject: "Formal invitation - {{campaign}}",
+    body:
+      "Dear {{name}},\n\nYou are cordially invited to attend {{campaign}}.\nDate: {{eventAt}}\nVenue: {{venue}}\n\nPlease confirm your attendance using the link below:\n{{rsvpUrl}}\n\nWith regards,\n{{brand}}",
+    tags: "starter,government,ministry,formal,invitation,en,email",
+  },
+  {
+    name: "Ministry Reminder - Email (AR)",
+    kind: "email",
+    locale: "ar",
+    subject: "تذكير بالحضور - {{campaign}}",
+    body:
+      "نحيطكم علماً بأن {{campaign}} سيقام في {{eventAt}} بموقع {{venue}}.\n\nإذا لم تؤكدوا الحضور بعد، يرجى استخدام الرابط التالي:\n{{rsvpUrl}}\n\nوتفضلوا بقبول فائق الاحترام،\n{{brand}}",
+    tags: "starter,government,ministry,formal,reminder,ar,email",
+  },
+  {
+    name: "Ministry Reminder - Email (EN)",
+    kind: "email",
+    locale: "en",
+    subject: "Attendance reminder - {{campaign}}",
+    body:
+      "This is a reminder for {{campaign}}, scheduled for {{eventAt}} at {{venue}}.\n\nIf you have not yet replied, please confirm using the link below:\n{{rsvpUrl}}\n\nSincerely,\n{{brand}}",
+    tags: "starter,government,ministry,formal,reminder,en,email",
+  },
+  {
+    name: "Ministry Invitation - SMS (AR)",
+    kind: "sms",
+    locale: "ar",
+    body: "ندعوكم لحضور {{campaign}} في {{eventAt}}. تأكيد الحضور: {{rsvpUrl}} - {{brand}}",
+    tags: "starter,government,ministry,formal,invitation,ar,sms",
+  },
+  {
+    name: "Ministry Invitation - SMS (EN)",
+    kind: "sms",
+    locale: "en",
+    body: "You are invited to {{campaign}} on {{eventAt}}. RSVP: {{rsvpUrl}} - {{brand}}",
+    tags: "starter,government,ministry,formal,invitation,en,sms",
+  },
+  {
+    name: "Ministry RSVP Reminder - SMS (AR)",
+    kind: "sms",
+    locale: "ar",
+    body: "تذكير بتأكيد حضور {{campaign}}. رابط الرد: {{rsvpUrl}} - {{brand}}",
+    tags: "starter,government,ministry,formal,reminder,ar,sms",
+  },
+  {
+    name: "Ministry RSVP Reminder - SMS (EN)",
+    kind: "sms",
+    locale: "en",
+    body: "Reminder to confirm attendance for {{campaign}}: {{rsvpUrl}} - {{brand}}",
+    tags: "starter,government,ministry,formal,reminder,en,sms",
+  },
+];
+
+export function buildMissingGovernmentTemplates(existingNames: Iterable<string>): TemplateInput[] {
+  const existing = new Set(existingNames);
+  return GOVERNMENT_TEMPLATE_PACK.filter((tpl) => !existing.has(tpl.name)).map((tpl) => ({ ...tpl }));
+}
+
+export async function loadGovernmentTemplatePack(createdBy?: string | null) {
+  const existing = await prisma.template.findMany({
+    where: { name: { in: GOVERNMENT_TEMPLATE_PACK.map((tpl) => tpl.name) } },
+    select: { name: true },
+  });
+  const missing = buildMissingGovernmentTemplates(existing.map((row) => row.name));
+  if (missing.length === 0) {
+    return { created: 0, skipped: GOVERNMENT_TEMPLATE_PACK.length };
+  }
+  const created = await prisma.template.createMany({
+    data: missing.map((tpl) => ({
+      name: tpl.name,
+      kind: tpl.kind,
+      locale: tpl.locale,
+      subject: tpl.kind === "email" ? tpl.subject ?? null : null,
+      body: tpl.body,
+      tags: tpl.tags ?? null,
+      createdBy: createdBy ?? null,
+    })),
+  });
+  return { created: created.count, skipped: GOVERNMENT_TEMPLATE_PACK.length - created.count };
+}
+
 export async function createTemplate(
   input: TemplateInput,
   createdBy?: string | null,

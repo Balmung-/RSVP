@@ -4,11 +4,33 @@ import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
-import { getCurrentUser, hasRole } from "@/lib/auth";
-import { listTemplates, type TemplateKind } from "@/lib/templates";
+import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { listTemplates, loadGovernmentTemplatePack, type TemplateKind } from "@/lib/templates";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
+import { setFlash } from "@/lib/flash";
+import { logAction } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
+
+async function loadStarters() {
+  "use server";
+  const me = await requireRole("editor");
+  const res = await loadGovernmentTemplatePack(me.id);
+  await logAction({
+    kind: "template.starter_pack_loaded",
+    actorId: me.id,
+    data: { created: res.created, skipped: res.skipped, pack: "government_ministry" },
+  });
+  setFlash({
+    kind: "success",
+    text: "Starter templates ready",
+    detail:
+      res.created > 0
+        ? `${res.created} created, ${res.skipped} already present`
+        : "All ministry starter templates were already present",
+  });
+  redirect("/templates");
+}
 
 export default async function TemplatesPage({
   searchParams,
@@ -30,10 +52,15 @@ export default async function TemplatesPage({
       crumb="Reusable messages"
       actions={
         canWrite ? (
-          <Link href="/templates/new" className="btn btn-primary">
-            <Icon name="plus" size={14} />
-            New template
-          </Link>
+          <div className="flex items-center gap-2">
+            <form action={loadStarters}>
+              <button className="btn btn-ghost" type="submit">Load ministry starters</button>
+            </form>
+            <Link href="/templates/new" className="btn btn-primary">
+              <Icon name="plus" size={14} />
+              New template
+            </Link>
+          </div>
         ) : null
       }
     >
@@ -87,7 +114,7 @@ export default async function TemplatesPage({
           action={canWrite ? { label: "Create one", href: "/templates/new" } : undefined}
         >
           Save your house style once. Every campaign and stage can load a
-          template to seed its subject and body — tweak from there.
+          template to seed its subject and body - tweak from there.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-5xl">

@@ -160,4 +160,3 @@ export default async function EditUser({
     </Shell>
   );
 }
-

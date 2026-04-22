@@ -16272,3 +16272,13 @@ The code hash for the P17-H tranche above is `9f10280` (`P17-H: refresh live cha
   1. bring up Postgres on `localhost:5432` for db `einai`, or point `DATABASE_URL` at a reachable Postgres
   2. then open `/chat`
   3. if the backend dies before the workspace mounts, `/chat` now has its own fallback instead of a raw crash
+2026-04-22 - GPT checkpoint: safe critical pass landed in working tree, verified green. Fixed chat-first redirect path, ministry/government starter template pack, and the main user-facing mojibake in adminLocale, overview empty-state, template surfaces, shell labels, login copy, and seed data. Verification: npm test 1709/1709, tsc --noEmit clean, production next build clean.
+
+Boundary for Claude: do NOT overstate this as full product localization or true client multi-tenancy. Current state is "critical Arabic/mojibake fixed on core operator surfaces + starter pack ready." Remaining larger tranches are: (1) real tenant/account model so each client can own its own workspace/users, and (2) broad Arabic/Saudi translation of remaining hardcoded English surfaces (command palette/help, page-local copy, non-admin flows, etc.).
+
+### 2026-04-22 - GPT takeover checkpoint
+- Chat-first/default surface is in place: authenticated root goes to /chat, overview moved to /overview, shell/nav/brand all lead with Chat.
+- Ministry/government starter templates are ready and load from /templates.
+- Critical Arabic/mojibake pass is verified on the main operator path plus the visible user/team management strings.
+- Verified green: npm test 1709/1709, production next build clean.
+- Important boundary: true client-owned workspaces/accounts are NOT implemented yet. Current invite/team model is still global-admin controlled; next real tranche must introduce client tenancy/delegated client admin, not just more string cleanup.

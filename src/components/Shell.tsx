@@ -14,14 +14,13 @@ import { NotificationBell } from "./NotificationBell";
 import { AvatarMenu } from "./AvatarMenu";
 
 // One horizontal plane. Top seam holds everything the operator needs
-// persistently: brand on the left, five primary destinations, right
+// persistently: brand on the left, primary destinations, right
 // cluster for command / alerts / account. No sidebar, no vertical
 // chrome. The workspace below gets the full width.
 //
-// The avatar dropdown is the "recessed tool drawer" — admin-only
-// pages (approvals, deliverability, unsubscribes, users, teams,
-// events) plus account and sign-out. Primary nav stays at five
-// items so the seam doesn't drift toward a toolbar.
+// The avatar dropdown is the "recessed tool drawer" - secondary
+// destinations plus account and sign-out. Chat is now first-class in
+// the top seam instead of being discoverability-hidden.
 
 export async function Shell({
   title,
@@ -44,22 +43,23 @@ export async function Shell({
   const T = adminDict(locale);
   const notifications = me ? await getNotifications(me.id, isAdmin) : [];
 
-  const avatarItems = buildAvatarItems({ isAdmin, showTeams, locale });
+  const avatarItems = buildAvatarItems({ isAdmin, showTeams, locale, overviewLabel: T.overview });
 
   return (
     <div className="min-h-screen flex flex-col">
       <header className="h-14 shrink-0 flex items-center gap-6 px-6 border-b border-ink-100 bg-ink-0">
-        <Link href="/" className="flex items-center gap-2.5 shrink-0" aria-label="Einai">
+        <Link href="/chat" className="flex items-center gap-2.5 shrink-0" aria-label="Einai">
           <span className="h-6 w-6 rounded-md bg-ink-900 grid place-items-center">
             <span className="h-1.5 w-1.5 rounded-full bg-ink-0" />
           </span>
           <span className="text-[15px] font-medium tracking-tight hidden sm:inline">Einai</span>
         </Link>
         <nav className="flex items-center gap-1 min-w-0">
-          <TopLink href="/" label={T.overview} />
+          <TopLink href="/chat" label="Chat" />
+          <TopLink href="/overview" label={T.overview} />
           <TopLink href="/campaigns" label={T.campaigns} />
           <TopLink href="/contacts" label={T.contacts} />
-          <TopLink href="/templates" label={locale === "ar" ? "القوالب" : "Templates"} />
+          <TopLink href="/templates" label={T.templates} />
           <TopLink href="/inbox" label={T.inbox} />
         </nav>
         <div className="ms-auto flex items-center gap-2 shrink-0">
@@ -128,19 +128,22 @@ function buildAvatarItems({
   isAdmin,
   showTeams,
   locale,
+  overviewLabel,
 }: {
   isAdmin: boolean;
   showTeams: boolean;
   locale: "en" | "ar";
+  overviewLabel: string;
 }): MenuItem[] {
   const items: MenuItem[] = [
     // Chat sits at the top as a featured primary tool, visually
     // separated from the account-management items below by a
-    // divider. Available to all authenticated users — the chat
+    // divider. Available to all authenticated users - the chat
     // surface itself role-gates individual tools (viewer can
     // list, editor can draft / send).
     { kind: "link", href: "/chat", label: locale === "ar" ? "المحادثة" : "Chat", icon: "message" },
-    // P16-E — the operator memory surface. Sits next to Chat
+    { kind: "link", href: "/overview", label: overviewLabel, icon: "dashboard" },
+    // P16-E - the operator memory surface. Sits next to Chat
     // because the two share a trust context (team-scoped,
     // any-authenticated-user). Shows durable facts the assistant
     // has been taught so the team can audit / curate them.
@@ -148,14 +151,14 @@ function buildAvatarItems({
     { kind: "divider" },
     { kind: "link", href: "/settings", label: locale === "ar" ? "الإعدادات" : "Settings", icon: "settings" },
     { kind: "link", href: "/account/password", label: locale === "ar" ? "تغيير كلمة المرور" : "Change password", icon: "settings" },
-    { kind: "link", href: "/account/2fa", label: locale === "ar" ? "تحقق من خطوتين" : "Two-step sign-in", icon: "qr" },
+    { kind: "link", href: "/account/2fa", label: locale === "ar" ? "التحقق بخطوتين" : "Two-step sign-in", icon: "qr" },
   ];
   if (isAdmin) {
     items.push({ kind: "divider" });
     items.push({ kind: "link", href: "/approvals", label: locale === "ar" ? "الموافقات" : "Approvals", icon: "circle-alert" });
     items.push({ kind: "link", href: "/deliverability", label: locale === "ar" ? "قابلية الإرسال" : "Deliverability", icon: "warning" });
     items.push({ kind: "link", href: "/unsubscribes", label: locale === "ar" ? "المنسحبون" : "Unsubscribes", icon: "eye-off" });
-    items.push({ kind: "link", href: "/users", label: locale === "ar" ? "الفريق" : "People", icon: "user-plus" });
+    items.push({ kind: "link", href: "/users", label: locale === "ar" ? "الأشخاص" : "People", icon: "user-plus" });
     if (showTeams) {
       items.push({ kind: "link", href: "/teams", label: locale === "ar" ? "الفرق" : "Teams", icon: "tag" });
     }
@@ -165,7 +168,7 @@ function buildAvatarItems({
   items.push({
     kind: "action",
     action: signOutAction,
-    label: locale === "ar" ? "تسجيل خروج" : "Sign out",
+    label: locale === "ar" ? "تسجيل الخروج" : "Sign out",
     icon: "log-out",
     danger: true,
   });

@@ -174,7 +174,6 @@ export default async function TeamPage({
               <button className="btn btn-primary">Save</button>
             </div>
           </form>
-          {/* Danger zone lives as sibling forms — nested <form> is invalid HTML. */}
           <div className="mt-3 flex items-center gap-2">
             {team.archivedAt ? null : (
               <form action={boundArchive}>
@@ -243,4 +242,3 @@ export default async function TeamPage({
     </Shell>
   );
 }
-

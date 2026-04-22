@@ -6,7 +6,7 @@ import { WhatsAppDocumentInput } from "./WhatsAppDocumentInput";
 import { Field } from "./Field";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
-// The submit action is whatever the caller binds — we just collect fields.
+// The submit action is whatever the caller binds - we just collect fields.
 
 export function CampaignForm({
   campaign,
@@ -63,7 +63,7 @@ export function CampaignForm({
       <Field label="Locale" className={teams && teams.length > 0 ? "" : ""}>
         <select name="locale" className="field" defaultValue={campaign?.locale ?? "en"}>
           <option value="en">English</option>
-          <option value="ar">العربية</option>
+          <option value="ar">العربية (السعودية)</option>
         </select>
       </Field>
       <Field label="Event date & time">
@@ -96,7 +96,7 @@ export function CampaignForm({
         open={!!(campaign?.brandColor || campaign?.brandLogoUrl || campaign?.brandHeroUrl)}
       >
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
-          Branding — per-campaign logo, hero, accent
+          Branding - per-campaign logo, hero, accent
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Field label="Accent color (hex)">
@@ -128,7 +128,7 @@ export function CampaignForm({
       </details>
       <details className="col-span-2 group" open={!!(campaign?.subjectEmail || campaign?.templateEmail || campaign?.templateSms)}>
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
-          Templates — override defaults
+          Templates - override defaults
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Field label="Email subject" className="col-span-2">
@@ -137,7 +137,7 @@ export function CampaignForm({
               className="field"
               maxLength={300}
               defaultValue={campaign?.subjectEmail ?? ""}
-              placeholder="Invitation — {{campaign}}"
+              placeholder="Invitation - {{campaign}}"
             />
           </Field>
           <Field label="Email body" className="col-span-2">
@@ -167,12 +167,12 @@ export function CampaignForm({
         </div>
       </details>
       {/*
-        P17-D.2 — WhatsApp template config. Separate disclosure from
+        P17-D.2 - WhatsApp template config. Separate disclosure from
         the Email/SMS block above because a WhatsApp template is NOT
         a freeform body: `templateWhatsAppName` is an exact-match
         reference to a pre-approved Meta template, and
         `templateWhatsAppVariables` is a JSON array of positional
-        param expressions (Meta's {{1}} / {{2}} / {{3}} model) — a
+        param expressions (Meta's {{1}} / {{2}} / {{3}} model) - a
         fundamentally different shape from the inline-token
         `{{name}}` / `{{venue}}` style the email + SMS templates
         use. Rendering them together would suggest they're
@@ -194,7 +194,7 @@ export function CampaignForm({
         }
       >
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
-          WhatsApp template — approved Meta template + positional params
+          WhatsApp template - approved Meta template + positional params
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Field label="Template name">
@@ -230,7 +230,7 @@ export function CampaignForm({
             exactly. Language is a BCP-47 tag like <code>ar</code>,{" "}
             <code>en_US</code>, or <code>fr_FR</code>. Variables are a
             JSON array of expressions in the template's positional
-            order — each one is rendered with the standard tokens (
+            order - each one is rendered with the standard tokens (
             <code>{"{{name}}"}</code> <code>{"{{venue}}"}</code>{" "}
             <code>{"{{eventAt}}"}</code> <code>{"{{rsvpUrl}}"}</code>
             ). Leave variables empty for a zero-param template.
@@ -252,4 +252,3 @@ export function CampaignForm({
     </form>
   );
 }
-

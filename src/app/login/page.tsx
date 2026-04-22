@@ -17,9 +17,9 @@ export const dynamic = "force-dynamic";
 function safeReturnTo(raw: string | undefined | null): string {
   // Only allow same-origin relative paths, never protocol-relative or
   // absolute URLs that could bounce a session into attacker hands.
-  if (!raw) return "/";
-  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
-  if (raw.length > 300) return "/";
+  if (!raw) return "/chat";
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/chat";
+  if (raw.length > 300) return "/chat";
   return raw;
 }
 
@@ -31,7 +31,7 @@ async function loginAction(formData: FormData) {
 
   // Two-key rate limiter: per-IP catches credential-stuffing across
   // many accounts, per-email catches spray against a single account.
-  // ~5 attempts per burst, refill one per ~12s — legitimate retypes
+  // ~5 attempts per burst, refill one per ~12s - legitimate retypes
   // aren't blocked, a script doing 60/min is.
   const h0 = headers();
   const ip = h0.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
@@ -64,7 +64,7 @@ async function verify2fa(formData: FormData) {
   const returnTo = safeReturnTo(String(formData.get("returnTo") ?? ""));
   if (!pendingId) redirect("/login?e=expired");
   // Brute-force guard on the 6-digit code. Per-pending-id caps a
-  // single handshake to a handful of tries — the pending cookie
+  // single handshake to a handful of tries - the pending cookie
   // expires in 5 minutes, but a script could otherwise grind
   // 1,000,000 codes in that window.
   const byPending = rateLimit(`2fa:${pendingId}`, { capacity: 5, refillPerSec: 0.1 });
@@ -108,13 +108,13 @@ export default async function Login({
         </div>
         <div className="max-w-md">
           <p className="text-[28px] leading-tight tracking-tightest text-ink-900 font-medium">
-            Invitations, responses, arrivals — one quiet workspace.
+            Invitations, responses, arrivals - one quiet workspace.
           </p>
           <p className="text-sm text-ink-500 mt-6 leading-relaxed">
             Protocol-grade RSVP. Bilingual by default. Nothing leaves the page that isn&apos;t asked for.
           </p>
         </div>
-        <p className="text-xs text-ink-400">© {new Date().getFullYear()} {brand}</p>
+        <p className="text-xs text-ink-400">(c) {new Date().getFullYear()} {brand}</p>
       </aside>
 
       <main className="flex items-center justify-center px-6 py-16">
@@ -147,7 +147,7 @@ export default async function Login({
               />
             </label>
             {searchParams.e === "wrong_code" ? (
-              <p role="alert" className="text-xs text-signal-fail">Wrong code — codes rotate every 30s.</p>
+              <p role="alert" className="text-xs text-signal-fail">Wrong code - codes rotate every 30s.</p>
             ) : searchParams.e === "throttled" ? (
               <p role="alert" className="text-xs text-signal-fail">Too many attempts. Try again in a minute.</p>
             ) : null}

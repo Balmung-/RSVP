@@ -1,9 +1,5 @@
 import { cookies } from "next/headers";
 
-// Admin locale + calendar preferences, stored in cookies. No DB migration.
-// The dict below is the single source for every translated admin string;
-// keep keys terse and commit to English/Arabic pairs.
-
 export type AdminLocale = "en" | "ar";
 export type AdminCalendar = "gregorian" | "hijri";
 
@@ -40,7 +36,6 @@ export function writeAdminCalendar(cal: AdminCalendar) {
 
 export const adminT = {
   en: {
-    // Nav
     overview: "Overview",
     campaigns: "Campaigns",
     contacts: "Contacts",
@@ -51,10 +46,8 @@ export const adminT = {
     people: "People",
     events: "Events",
     settings: "Settings",
-    // Auth
     signOut: "Sign out",
     signIn: "Sign in",
-    // Generic actions
     new: "New",
     save: "Save",
     cancel: "Cancel",
@@ -70,19 +63,16 @@ export const adminT = {
     filter: "Filter",
     load: "Load",
     send: "Send",
-    // Campaign
     newCampaign: "New campaign",
     newContact: "New contact",
     newTemplate: "New template",
     sendInvitations: "Send invitations",
-    sendingEllipsis: "Sending…",
-    // Status
+    sendingEllipsis: "Sending...",
     draft: "Draft",
     active: "Active",
     sending: "Sending",
     closed: "Closed",
     archived: "Archived",
-    // Stats
     invited: "Invited",
     responded: "Responded",
     attending: "Attending",
@@ -90,7 +80,6 @@ export const adminT = {
     pending: "Pending",
     headcount: "Headcount",
     guestsPlus: "Guests +",
-    // Settings
     signedInAs: "Signed in as",
     role: "Role",
     language: "Language",
@@ -98,15 +87,13 @@ export const adminT = {
     gregorian: "Gregorian",
     hijri: "Hijri (Umm al-Qura)",
     english: "English",
-    arabic: "العربية",
+    arabic: "Arabic (Saudi)",
     changePassword: "Change password",
     twoStep: "Two-step sign-in",
     managePeople: "Manage people",
     integrations: "Integrations",
     account: "Account",
-    // Empties
     noCampaignsYet: "No campaigns yet",
-    // Dashboard
     thisWeek: "This week",
     activity: "Activity",
     responsePulse: "Response pulse",
@@ -126,17 +113,17 @@ export const adminT = {
     inbox: "صندوق الوارد",
     approvals: "الموافقات",
     teams: "الفرق",
-    people: "الفريق",
+    people: "الأشخاص",
     events: "السجل",
     settings: "الإعدادات",
-    signOut: "تسجيل خروج",
+    signOut: "تسجيل الخروج",
     signIn: "تسجيل الدخول",
     new: "جديد",
     save: "حفظ",
     cancel: "إلغاء",
     delete: "حذف",
     archive: "أرشفة",
-    unarchive: "إعادة من الأرشيف",
+    unarchive: "إلغاء الأرشفة",
     edit: "تعديل",
     create: "إنشاء",
     remove: "إزالة",
@@ -150,10 +137,10 @@ export const adminT = {
     newContact: "جهة اتصال جديدة",
     newTemplate: "قالب جديد",
     sendInvitations: "إرسال الدعوات",
-    sendingEllipsis: "جاري الإرسال…",
+    sendingEllipsis: "جارٍ الإرسال...",
     draft: "مسودة",
-    active: "فعّال",
-    sending: "جاري الإرسال",
+    active: "نشطة",
+    sending: "قيد الإرسال",
     closed: "مغلقة",
     archived: "مؤرشفة",
     invited: "المدعوون",
@@ -161,7 +148,7 @@ export const adminT = {
     attending: "سيحضرون",
     declined: "معتذرون",
     pending: "بالانتظار",
-    headcount: "الحضور المتوقع",
+    headcount: "عدد الحضور",
     guestsPlus: "المرافقون +",
     signedInAs: "تسجيل الدخول باسم",
     role: "الدور",
@@ -170,42 +157,32 @@ export const adminT = {
     gregorian: "ميلادي",
     hijri: "هجري (أم القرى)",
     english: "English",
-    arabic: "العربية",
+    arabic: "العربية (السعودية)",
     changePassword: "تغيير كلمة المرور",
-    twoStep: "تحقق من خطوتين",
-    managePeople: "إدارة الفريق",
-    integrations: "الخدمات الخارجية",
+    twoStep: "التحقق بخطوتين",
+    managePeople: "إدارة الأشخاص",
+    integrations: "التكاملات",
     account: "الحساب",
     noCampaignsYet: "لا توجد حملات بعد",
     thisWeek: "هذا الأسبوع",
     activity: "النشاط",
     responsePulse: "نبض الردود",
-    needsAttention: "بحاجة إلى متابعة",
-    vipWatch: "كبار الشخصيات",
-    activeCampaigns: "الحملات الفعّالة",
-    sendingNow: "جاري الإرسال الآن",
+    needsAttention: "تحتاج متابعة",
+    vipWatch: "مراقبة كبار الشخصيات",
+    activeCampaigns: "الحملات النشطة",
+    sendingNow: "يتم الإرسال الآن",
     responsesThisWeek: "ردود هذا الأسبوع",
-    deliveryFailures7d: "فشل الإرسال (٧ أيام)",
+    deliveryFailures7d: "تعثرات الإرسال (7 أيام)",
     deliverability: "قابلية الإرسال",
   },
 } as const;
 
-// AdminT is keyed from the English dict (the source of truth for keys
-// and shape). We cast on lookup because the Arabic dict has different
-// literal-type values for every field — `typeof adminT.en` would
-// reject `adminT.ar` even though both have the identical key set. The
-// runtime shape match is guaranteed by this file being the only
-// source of truth for both locales.
 export type AdminT = typeof adminT.en;
 
 export function adminDict(locale: AdminLocale): AdminT {
   return adminT[locale] as unknown as AdminT;
 }
 
-// Date formatting that respects the user's locale + calendar preference.
-// Gregorian = en-GB / ar-SA with default calendar; Hijri = Umm al-Qura.
-// Returns plain strings so callers just substitute their existing
-// Intl.DateTimeFormat usage one-for-one.
 export function formatAdminDate(
   d: Date | null | undefined,
   locale: AdminLocale,
@@ -214,9 +191,7 @@ export function formatAdminDate(
 ): string {
   if (!d) return "";
   const base = locale === "ar" ? "ar-SA" : "en-GB";
-  const tag = calendar === "hijri"
-    ? `${base}-u-ca-islamic-umalqura`
-    : base;
+  const tag = calendar === "hijri" ? `${base}-u-ca-islamic-umalqura` : base;
   try {
     return new Intl.DateTimeFormat(tag, {
       ...opts,
