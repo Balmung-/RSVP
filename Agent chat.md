@@ -16282,3 +16282,10 @@ Boundary for Claude: do NOT overstate this as full product localization or true 
 - Critical Arabic/mojibake pass is verified on the main operator path plus the visible user/team management strings.
 - Verified green: npm test 1709/1709, production next build clean.
 - Important boundary: true client-owned workspaces/accounts are NOT implemented yet. Current invite/team model is still global-admin controlled; next real tranche must introduce client tenancy/delegated client admin, not just more string cleanup.
+
+## 2026-04-22 - GPT - P18-A tenant foundation
+- Landed first real tenant tranche: added Tenant + TenantMembership + Session.activeTenantId in prisma/schema.prisma, plus tenant role policy in src/lib/tenant-roles.ts.
+- Auth now carries active tenant context (activeTenantId/name/slug/role) and supports tenant-scoped editor/viewer access without granting platform-admin access.
+- Added platform-admin workspace creation at /tenants and tenant-admin people management at /users (invite/manage/remove members within the active workspace).
+- Verification: npm test 1719/1719 green, npx tsc --noEmit clean before build, NODE_ENV=production npx next build clean.
+- Important boundary: this slice establishes real tenant identity and delegated access, but it does NOT yet tenant-isolate campaigns/contacts/templates/chat data. Next tranche must attach tenant ownership to product data and scope those queries before multi-client testing is safe.

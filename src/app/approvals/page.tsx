@@ -5,8 +5,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { Badge } from "@/components/Badge";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
-import { decideApproval, listPendingApprovals, approvalThreshold } from "@/lib/approvals";
+import { getCurrentUser, hasTenantRole, requireTenantRole } from "@/lib/auth";
+import { decideApproval, listPendingApprovalsForTenant, approvalThreshold } from "@/lib/approvals";
 import { setFlash } from "@/lib/flash";
 
 export const dynamic = "force-dynamic";
@@ -16,12 +16,13 @@ const fmt = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "
 
 async function decide(formData: FormData) {
   "use server";
-  const me = await requireRole("admin");
+  const me = await requireTenantRole("admin");
+  if (!me.activeTenantId) redirect("/tenants");
   const id = String(formData.get("id"));
   const decision = String(formData.get("decision")) as "approved" | "rejected";
   if (decision !== "approved" && decision !== "rejected") redirect("/approvals");
   const note = String(formData.get("note") ?? "").trim() || null;
-  const res = await decideApproval(id, me.id, decision, note);
+  const res = await decideApproval(id, me.activeTenantId, me.id, decision, note);
   if (!res.ok) {
     setFlash({ kind: "warn", text: "Couldn't decide", detail: (res as { reason?: string }).reason ?? "" });
   } else {
@@ -36,9 +37,10 @@ async function decide(formData: FormData) {
 export default async function ApprovalsPage() {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
-  if (!hasRole(me, "admin")) redirect("/");
+  if (!hasTenantRole(me, "admin")) redirect("/chat");
+  if (!me.activeTenantId) redirect("/tenants");
 
-  const approvals = await listPendingApprovals();
+  const approvals = await listPendingApprovalsForTenant(me.activeTenantId);
 
   // Resolve requester names in one round-trip.
   const requesterIds = Array.from(new Set(approvals.map((a) => a.requestedBy)));

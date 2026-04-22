@@ -3,7 +3,7 @@ import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { requireRole } from "@/lib/auth";
+import { requirePlatformAdmin } from "@/lib/auth";
 import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
 import { InlineStat } from "@/components/Stat";
@@ -28,7 +28,7 @@ export default async function UnsubscribesPage({
 }: {
   searchParams: SearchParams;
 }) {
-  await requireRole("admin");
+  await requirePlatformAdmin();
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
 
@@ -191,4 +191,3 @@ function humanReason(reason: string, locale: "en" | "ar"): string {
   if (reason === "public_page") return locale === "ar" ? "صفحة الإلغاء العامة" : "via /unsubscribe page";
   return reason;
 }
-

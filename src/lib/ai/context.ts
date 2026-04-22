@@ -1,7 +1,6 @@
 import { cache } from "react";
-import type { User } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { hasRole } from "@/lib/auth";
+import { hasRole, type AuthUser } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { getNotifications } from "@/lib/notifications";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
@@ -74,13 +73,13 @@ function localDateKey(d: Date, tz: string): string {
 }
 
 export const buildContext = cache(async function buildContext(
-  user: User,
+  user: AuthUser,
 ): Promise<TenantContext> {
   const isAdmin = hasRole(user, "admin");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
   const tz = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
-  const campaignScope = await scopedCampaignWhere(user.id, isAdmin);
+  const campaignScope = await scopedCampaignWhere(user.id, isAdmin, user.activeTenantId);
   const now = new Date();
   const horizon = new Date(now.getTime() + HORIZON_DAYS * 24 * 3600_000);
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
@@ -118,14 +117,14 @@ export const buildContext = cache(async function buildContext(
       },
     }),
     vipWatch(campaignScope),
-    getNotifications(user.id, isAdmin),
+    getNotifications(user.id, isAdmin, user.activeTenantId),
   ]);
 
   const lines: string[] = [];
   lines.push(`## Tenant context (as of ${nowLocal}, ${tz})`);
   lines.push("");
   lines.push(
-    `Viewer: ${user.fullName ?? user.email} (${user.role}). Team scope: ${
+      `Viewer: ${user.fullName ?? user.email} (${user.activeTenantName ?? "no workspace"}) / ${user.role}. Team scope: ${
       isAdmin ? "admin — no restriction" : "team-member — sees own teams + office-wide"
     }.`,
   );

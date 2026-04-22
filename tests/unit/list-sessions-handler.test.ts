@@ -49,17 +49,17 @@ function row(overrides: Partial<ListSessionsRow> = {}): ListSessionsRow {
 
 function makeDeps(
   overrides: {
-    user?: { id: string } | null;
+    user?: { id: string; activeTenantId: string | null } | null;
     rows?: ListSessionsRow[];
-    onFind?: (args: { userId: string; limit: number }) => void;
+    onFind?: (args: { userId: string; tenantId: string; limit: number }) => void;
   } = {},
 ): {
   deps: ListSessionsDeps;
-  findCalls: Array<{ userId: string; limit: number }>;
+  findCalls: Array<{ userId: string; tenantId: string; limit: number }>;
 } {
-  const findCalls: Array<{ userId: string; limit: number }> = [];
+  const findCalls: Array<{ userId: string; tenantId: string; limit: number }> = [];
   const user =
-    overrides.user === undefined ? { id: USER_ID } : overrides.user;
+    overrides.user === undefined ? { id: USER_ID, activeTenantId: "tenant-1" } : overrides.user;
   const rows = overrides.rows ?? [];
 
   const deps: ListSessionsDeps = {
@@ -160,7 +160,7 @@ test("ownership: findSessions is called with the authenticated user's id — not
   // trying to browse another user. The handler must IGNORE any
   // such query input and pass getCurrentUser().id to findSessions.
   const { deps, findCalls } = makeDeps({
-    user: { id: "alice" },
+    user: { id: "alice", activeTenantId: "tenant-a" },
     rows: [],
   });
   await listSessionsHandler(
@@ -169,6 +169,7 @@ test("ownership: findSessions is called with the authenticated user's id — not
   );
   assert.equal(findCalls.length, 1);
   assert.equal(findCalls[0]!.userId, "alice");
+  assert.equal(findCalls[0]!.tenantId, "tenant-a");
 });
 
 // 5. Limit parse + clamp -------------------------------------------

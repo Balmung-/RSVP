@@ -11,13 +11,14 @@ import type { UploadKind } from "@/lib/uploads";
 // already persisted; extraction can be re-driven later by calling
 // extractFromUpload(id) again (the orchestrator is idempotent).
 
-export type UploadsUser = { id: string };
+export type UploadsUser = { id: string; activeTenantId: string };
 
 export interface UploadsDeps {
   requireEditor: () => Promise<UploadsUser>;
   readFormData: (req: Request) => Promise<FormData>;
   validateUpload: (file: { type: string; size: number }, kind: UploadKind) => string | null;
   storeUpload: (params: {
+    tenantId: string;
     filename: string;
     contentType: string;
     size: number;
@@ -73,6 +74,7 @@ export async function uploadsHandler(req: Request, deps: UploadsDeps): Promise<U
 
   const buf = Buffer.from(await file.arrayBuffer());
   const saved = await deps.storeUpload({
+    tenantId: me.activeTenantId,
     filename: file.name || "upload",
     contentType: file.type,
     size: file.size,

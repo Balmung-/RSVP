@@ -1,6 +1,5 @@
 import { cache } from "react";
-import type { User } from "@prisma/client";
-import { hasRole } from "@/lib/auth";
+import { hasRole, type AuthUser } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { readAdminLocale } from "@/lib/adminLocale";
 import type { ToolCtx } from "./tools/types";
@@ -17,10 +16,10 @@ import type { ToolCtx } from "./tools/types";
 // separate from the tool layer.
 
 export const buildToolCtx = cache(async function buildToolCtx(
-  user: User,
+  user: AuthUser,
 ): Promise<ToolCtx> {
   const isAdmin = hasRole(user, "admin");
   const locale = readAdminLocale();
-  const campaignScope = await scopedCampaignWhere(user.id, isAdmin);
+  const campaignScope = await scopedCampaignWhere(user.id, isAdmin, user.activeTenantId);
   return { user, isAdmin, locale, campaignScope };
 });

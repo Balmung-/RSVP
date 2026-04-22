@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect, notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { createTeam, teamsEnabled } from "@/lib/teams";
 import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
@@ -17,8 +17,8 @@ const ERROR_MSG: Record<string, string> = {
 
 async function create(formData: FormData) {
   "use server";
-  await requireRole("admin");
-  const res = await createTeam({
+  const me = await requireRole("admin");
+  const res = await createTeam(requireActiveTenantId(me), {
     name: String(formData.get("name") ?? ""),
     slug: String(formData.get("slug") ?? ""),
     color: String(formData.get("color") ?? ""),
@@ -35,6 +35,7 @@ export default async function NewTeam({ searchParams }: { searchParams: { e?: st
   if (!me) redirect("/login");
   if (!hasRole(me, "admin")) redirect("/");
   if (!teamsEnabled()) notFound();
+  requireActiveTenantId(me);
 
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
 
@@ -76,4 +77,3 @@ export default async function NewTeam({ searchParams }: { searchParams: { e?: st
     </Shell>
   );
 }
-

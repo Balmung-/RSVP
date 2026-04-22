@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasPlatformRole } from "@/lib/auth";
 import { logAction } from "@/lib/audit";
 import { csvRow } from "@/lib/contact";
 
@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export async function GET() {
   const me = await getCurrentUser();
   if (!me) return new NextResponse("Unauthorized", { status: 401 });
-  if (!hasRole(me, "admin")) return new NextResponse("Forbidden", { status: 403 });
+  if (!hasPlatformRole(me, "admin")) return new NextResponse("Forbidden", { status: 403 });
 
   const rows = await prisma.unsubscribe.findMany({
     orderBy: { createdAt: "desc" },

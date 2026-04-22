@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { TemplateForm } from "@/components/TemplateForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
-import { requireRole } from "@/lib/auth";
+import { requireActiveTenantId, requireRole } from "@/lib/auth";
 import {
   getTemplate,
   updateTemplate,
@@ -20,12 +20,13 @@ export const dynamic = "force-dynamic";
 
 async function save(id: string, formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const kindRaw = String(formData.get("kind") ?? "email");
   const kind: TemplateKind = (TEMPLATE_KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as TemplateKind) : "email";
   const localeRaw = String(formData.get("locale") ?? "en");
   const locale: "en" | "ar" = localeRaw === "ar" ? "ar" : "en";
-  const res = await updateTemplate(id, {
+  const res = await updateTemplate(tenantId, id, {
     name: String(formData.get("name") ?? ""),
     kind,
     locale,
@@ -46,24 +47,24 @@ async function save(id: string, formData: FormData) {
 
 async function archive(id: string) {
   "use server";
-  await requireRole("editor");
-  await archiveTemplate(id);
+  const me = await requireRole("editor");
+  await archiveTemplate(requireActiveTenantId(me), id);
   await logAction({ kind: "template.archived", refType: "template", refId: id });
   redirect("/templates");
 }
 
 async function unarchive(id: string) {
   "use server";
-  await requireRole("editor");
-  await unarchiveTemplate(id);
+  const me = await requireRole("editor");
+  await unarchiveTemplate(requireActiveTenantId(me), id);
   await logAction({ kind: "template.unarchived", refType: "template", refId: id });
   redirect(`/templates/${id}/edit`);
 }
 
 async function remove(id: string) {
   "use server";
-  await requireRole("admin");
-  await deleteTemplateRecord(id);
+  const me = await requireRole("admin");
+  await deleteTemplateRecord(requireActiveTenantId(me), id);
   await logAction({ kind: "template.deleted", refType: "template", refId: id });
   setFlash({ kind: "warn", text: "Template deleted" });
   redirect("/templates");
@@ -83,8 +84,8 @@ export default async function EditTemplate({
   params: { id: string };
   searchParams: { e?: string };
 }) {
-  await requireRole("editor");
-  const tpl = await getTemplate(params.id);
+  const me = await requireRole("editor");
+  const tpl = await getTemplate(requireActiveTenantId(me), params.id);
   if (!tpl) notFound();
 
   const boundSave = save.bind(null, tpl.id);

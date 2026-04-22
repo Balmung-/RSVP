@@ -88,7 +88,7 @@ export type GatherOptions = {
 // pass the full User row, but typing against `{ id: string }`
 // keeps this module independent of the Prisma User shape — a
 // future mock user in tests doesn't need the full column set.
-export type GatherInput = { id: string };
+export type GatherInput = { id: string; activeTenantId: string | null };
 
 // Injectable dependency surface. Each field is a single function
 // the gather calls; tests synthesise them to exercise each
@@ -97,7 +97,7 @@ export type GatherInput = { id: string };
 // narrow prisma-team-name lookup) so the production binding in
 // `gatherMemoriesForUser` is a simple passthrough.
 export type GatherDeps = {
-  teamIdsForUser: (userId: string) => Promise<string[]>;
+  teamIdsForUser: (userId: string, tenantId: string | null) => Promise<string[]>;
   recallMemoriesForTeam: (
     teamId: string,
     opts: { limit?: number; policy?: MemoryPolicy },
@@ -184,7 +184,7 @@ export async function gatherMemoriesForUserWith(
   // sees memory from teams they're an active member of.
   let teamIds: string[];
   try {
-    teamIds = await deps.teamIdsForUser(user.id);
+    teamIds = await deps.teamIdsForUser(user.id, user.activeTenantId ?? null);
   } catch (err) {
     // Log to stderr; the chat route's own error handling will
     // still serve the turn. Note: we avoid pulling in the

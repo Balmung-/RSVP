@@ -3,7 +3,7 @@ import { redirect, notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { listTeams, teamsEnabled } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
@@ -13,8 +13,9 @@ export default async function TeamsPage() {
   if (!me) redirect("/login");
   if (!hasRole(me, "admin")) redirect("/");
   if (!teamsEnabled()) notFound();
+  const tenantId = requireActiveTenantId(me);
 
-  const teams = await listTeams();
+  const teams = await listTeams(tenantId);
 
   return (
     <Shell

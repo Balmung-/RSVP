@@ -71,10 +71,11 @@ test("OPERATOR_VISIBLE_ROLES is exactly ['user', 'assistant'] — tool is exclud
 test("buildFindSessions: calls chatSession.findMany exactly once with the given limit + userId", async () => {
   const { finder, calls } = makeStubFinder();
   const find = buildFindSessions(finder);
-  await find({ userId: "alice", limit: 12 });
+  await find({ userId: "alice", tenantId: "tenant-1", limit: 12 });
   assert.equal(calls.length, 1);
   const args = calls[0]!;
   assert.equal(args.where.userId, "alice");
+  assert.equal(args.where.tenantId, "tenant-1");
   assert.equal(args.where.archivedAt, null);
   assert.equal(args.take, 12);
   assert.equal(args.orderBy.updatedAt, "desc");
@@ -83,7 +84,7 @@ test("buildFindSessions: calls chatSession.findMany exactly once with the given 
 test("buildFindSessions: select carries id, title, createdAt, updatedAt (top-level columns)", async () => {
   const { finder, calls } = makeStubFinder();
   const find = buildFindSessions(finder);
-  await find({ userId: "alice", limit: 25 });
+  await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   const sel = calls[0]!.select;
   assert.equal(sel.id, true);
   assert.equal(sel.title, true);
@@ -99,7 +100,7 @@ test("regression: _count.messages is filtered to role IN ('user', 'assistant') �
   // the notepad blocker flagged on 6b3aa8c.
   const { finder, calls } = makeStubFinder();
   const find = buildFindSessions(finder);
-  await find({ userId: "alice", limit: 25 });
+  await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   const countWhere = calls[0]!.select._count.select.messages.where;
   assert.ok(countWhere, "messages._count must carry a where clause");
   assert.ok(countWhere.role, "count filter must include role predicate");
@@ -122,7 +123,7 @@ test("regression: the filter is sourced from OPERATOR_VISIBLE_ROLES — not a du
   // this test catches it by pinning the exact reference.
   const { finder, calls } = makeStubFinder();
   const find = buildFindSessions(finder);
-  await find({ userId: "alice", limit: 25 });
+  await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   const countRoles = calls[0]!.select._count.select.messages.where.role.in;
   assert.equal(countRoles.length, OPERATOR_VISIBLE_ROLES.length);
   for (const role of OPERATOR_VISIBLE_ROLES) {
@@ -141,7 +142,7 @@ test("buildFindSessions: messages include is restricted to the first user messag
   // changes or `take` changes here would break preview semantics.
   const { finder, calls } = makeStubFinder();
   const find = buildFindSessions(finder);
-  await find({ userId: "alice", limit: 25 });
+  await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   const msgs = calls[0]!.select.messages;
   assert.equal(msgs.where.role, "user");
   assert.equal(msgs.orderBy.createdAt, "asc");
@@ -165,7 +166,7 @@ test("buildFindSessions: forwards the rows Prisma returned — no transform, no 
   };
   const { finder } = makeStubFinder([row]);
   const find = buildFindSessions(finder);
-  const out = await find({ userId: "alice", limit: 25 });
+  const out = await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   assert.equal(out.length, 1);
   assert.equal(out[0], row);
 });
@@ -189,7 +190,7 @@ test("behavior: when Prisma returns a pre-filtered count of 2 for a session that
   };
   const { finder } = makeStubFinder([row]);
   const find = buildFindSessions(finder);
-  const [result] = await find({ userId: "alice", limit: 25 });
+  const [result] = await find({ userId: "alice", tenantId: "tenant-1", limit: 25 });
   assert.ok(result, "row must be returned");
   assert.equal(result._count.messages, 2);
 });

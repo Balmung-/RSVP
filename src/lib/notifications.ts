@@ -25,14 +25,18 @@ export type NotificationItem = {
 
 export const getNotifications = cache(async function getNotifications(
   userId: string,
-  isAdmin: boolean,
+  isWorkspaceAdmin: boolean,
+  tenantId: string | null,
 ): Promise<NotificationItem[]> {
-  const campaignScope = await scopedCampaignWhere(userId, isAdmin);
+  if (!tenantId) return [];
+  const campaignScope = await scopedCampaignWhere(userId, isWorkspaceAdmin, tenantId);
   const out: NotificationItem[] = [];
 
   // Approvals — admins only, because only they can decide them.
-  if (isAdmin) {
-    const pending = await prisma.sendApproval.count({ where: { status: "pending" } });
+  if (isWorkspaceAdmin) {
+    const pending = await prisma.sendApproval.count({
+      where: { status: "pending", campaign: campaignScope },
+    });
     if (pending > 0) {
       out.push({
         kind: "approval",
@@ -66,7 +70,7 @@ export const getNotifications = cache(async function getNotifications(
   const inbox = await prisma.inboundMessage.count({
     where: {
       status: "needs_review",
-      ...(isAdmin ? {} : {
+      ...(isWorkspaceAdmin ? {} : {
         OR: [
           { inviteeId: null },
           { invitee: { campaign: campaignScope } },
@@ -98,11 +102,10 @@ export const getNotifications = cache(async function getNotifications(
       kind: "vip",
       title: vipCount === 1 ? "1 VIP response" : `${vipCount} VIP responses`,
       detail: "In the last 24 hours.",
-      href: "/",
+      href: "/overview",
       tone: "default",
     });
   }
 
   return out;
 });
-

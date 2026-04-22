@@ -4,6 +4,7 @@ import { cache } from "react";
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { prisma } from "./db";
 import type { User } from "@prisma/client";
+import { appRankForTenantRole, hasTenantRoleValue, isTenantRole, type TenantRole } from "./tenant-roles";
 
 // Auth surface — tight + swappable. The rest of the app only talks to
 // getCurrentUser / requireUser / hasRole / startSession / endSession.
@@ -11,6 +12,12 @@ import type { User } from "@prisma/client";
 
 export const ROLES = ["admin", "editor", "viewer"] as const;
 export type Role = (typeof ROLES)[number];
+export type AuthUser = User & {
+  activeTenantId: string | null;
+  activeTenantName: string | null;
+  activeTenantSlug: string | null;
+  activeTenantRole: TenantRole | null;
+};
 
 const COOKIE = "einai_sid";
 const SESSION_DAYS = 14;
@@ -80,8 +87,19 @@ function unpack(raw: string | undefined): string | null {
 
 export async function startSession(userId: string, meta: { ip?: string; userAgent?: string }) {
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400_000);
+  const firstMembership = await prisma.tenantMembership.findFirst({
+    where: { userId, tenant: { archivedAt: null } },
+    orderBy: [{ createdAt: "asc" }],
+    select: { tenantId: true },
+  });
   const session = await prisma.session.create({
-    data: { userId, expiresAt, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 300) },
+    data: {
+      userId,
+      activeTenantId: firstMembership?.tenantId ?? null,
+      expiresAt,
+      ip: meta.ip,
+      userAgent: meta.userAgent?.slice(0, 300),
+    },
   });
   await prisma.user.update({ where: { id: userId }, data: { lastLoginAt: new Date() } });
   cookies().set(COOKIE, pack(session.id), {
@@ -113,26 +131,80 @@ export async function endSession() {
 
 // Request-scoped cache via React — multiple components in one render share
 // a single DB lookup, and different requests get their own call.
-export const getCurrentUser = cache(async (): Promise<User | null> => {
+export const getCurrentUser = cache(async (): Promise<AuthUser | null> => {
   const raw = cookies().get(COOKIE)?.value;
   const sid = unpack(raw);
   if (!sid) return null;
   const session = await prisma.session.findUnique({
     where: { id: sid },
-    include: { user: true },
+    include: {
+      user: true,
+      activeTenant: { select: { id: true, name: true, slug: true, archivedAt: true } },
+    },
   });
   if (!session || session.expiresAt < new Date() || !session.user.active) return null;
-  return session.user;
+  let activeTenantId = session.activeTenant?.archivedAt ? null : session.activeTenant?.id ?? null;
+  let activeTenantName = session.activeTenant?.archivedAt ? null : session.activeTenant?.name ?? null;
+  let activeTenantSlug = session.activeTenant?.archivedAt ? null : session.activeTenant?.slug ?? null;
+  let activeTenantRole: TenantRole | null = null;
+
+  if (activeTenantId) {
+    const membership = await prisma.tenantMembership.findUnique({
+      where: { tenantId_userId: { tenantId: activeTenantId, userId: session.userId } },
+      select: { role: true },
+    });
+    activeTenantRole = membership && isTenantRole(membership.role) ? membership.role : null;
+  }
+
+  if (!activeTenantId) {
+    const fallback = await prisma.tenantMembership.findFirst({
+      where: { userId: session.userId, tenant: { archivedAt: null } },
+      orderBy: [{ createdAt: "asc" }],
+      select: { role: true, tenant: { select: { id: true, name: true, slug: true } } },
+    });
+    if (fallback && isTenantRole(fallback.role)) {
+      activeTenantId = fallback.tenant.id;
+      activeTenantName = fallback.tenant.name;
+      activeTenantSlug = fallback.tenant.slug;
+      activeTenantRole = fallback.role;
+    }
+  }
+
+  return Object.assign(session.user, {
+    activeTenantId,
+    activeTenantName,
+    activeTenantSlug,
+    activeTenantRole,
+  });
 });
 
 // Capability checks ------------------------------------------------
 
 const ROLE_RANK: Record<Role, number> = { viewer: 0, editor: 1, admin: 2 };
 
-export function hasRole(user: User | null | undefined, role: Role): boolean {
+export function hasPlatformRole(user: Pick<User, "role"> | null | undefined, role: Role): boolean {
   if (!user) return false;
   const r = user.role as Role;
   return (ROLE_RANK[r] ?? -1) >= ROLE_RANK[role];
+}
+
+export function hasRole(
+  user: (Pick<User, "role"> & { activeTenantRole?: TenantRole | null }) | null | undefined,
+  role: Role,
+): boolean {
+  if (!user) return false;
+  if (hasPlatformRole(user, role)) return true;
+  if (role === "admin") return false;
+  return appRankForTenantRole(user.activeTenantRole ?? null) >= ROLE_RANK[role];
+}
+
+export function hasTenantRole(
+  user: (Pick<User, "role"> & { activeTenantRole?: TenantRole | null }) | null | undefined,
+  role: TenantRole,
+): boolean {
+  if (!user) return false;
+  if (hasPlatformRole(user, "admin")) return true;
+  return hasTenantRoleValue(user.activeTenantRole ?? null, role);
 }
 
 export async function isAuthed(): Promise<boolean> {
@@ -142,11 +214,58 @@ export async function isAuthed(): Promise<boolean> {
 // Gate a server action or page on a minimum role. Redirects to /login if
 // unauthenticated; redirects to / if authenticated but under-privileged.
 // Returns the user so callers can attribute logs.
-export async function requireRole(role: Role): Promise<User> {
+export async function requireRole(role: Role): Promise<AuthUser> {
   const u = await getCurrentUser();
   if (!u) redirect("/login");
   if (!hasRole(u, role)) redirect("/chat");
   return u;
+}
+
+export async function requireTenantRole(role: TenantRole): Promise<AuthUser> {
+  const u = await getCurrentUser();
+  if (!u) redirect("/login");
+  if (!u.activeTenantId) redirect("/tenants");
+  if (!hasTenantRole(u, role)) redirect("/chat");
+  return u;
+}
+
+export async function requirePlatformAdmin(): Promise<AuthUser> {
+  const u = await getCurrentUser();
+  if (!u) redirect("/login");
+  if (!hasPlatformRole(u, "admin")) redirect("/chat");
+  return u;
+}
+
+export function requireActiveTenantId(user: { activeTenantId?: string | null }): string {
+  if (!user.activeTenantId) redirect("/tenants");
+  return user.activeTenantId;
+}
+
+export function activeTenantIdOf(user: { activeTenantId?: string | null } | null | undefined): string | null {
+  return user?.activeTenantId ?? null;
+}
+
+export async function setActiveTenant(tenantId: string): Promise<boolean> {
+  const raw = cookies().get(COOKIE)?.value;
+  const sid = unpack(raw);
+  if (!sid) return false;
+  const session = await prisma.session.findUnique({
+    where: { id: sid },
+    include: { user: true },
+  });
+  if (!session || session.expiresAt < new Date() || !session.user.active) return false;
+  const exists = hasPlatformRole(session.user, "admin")
+    ? await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } })
+    : await prisma.tenantMembership.findUnique({
+        where: { tenantId_userId: { tenantId, userId: session.userId } },
+        select: { tenantId: true },
+      });
+  if (!exists) return false;
+  await prisma.session.update({
+    where: { id: sid },
+    data: { activeTenantId: tenantId },
+  });
+  return true;
 }
 
 // Bootstrap --------------------------------------------------------

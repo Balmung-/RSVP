@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
 import { Field } from "@/components/Field";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { canSeeCampaign, canSeeCampaignRow } from "@/lib/teams";
 import { testSendEmail, testSendSms } from "@/lib/testsend";
 import { renderEmail, renderSms, type Recipient } from "@/lib/preview";
@@ -29,7 +29,8 @@ type SearchParams = { to?: string; name?: string; channel?: string };
 async function run(campaignId: string, formData: FormData) {
   "use server";
   const me = await requireRole("editor");
-  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), campaignId))) {
+  const tenantId = requireActiveTenantId(me);
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), tenantId, campaignId))) {
     redirect(`/campaigns`);
   }
   const channel = String(formData.get("channel") ?? "email");
@@ -101,9 +102,10 @@ export default async function TestSend({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, c.tenantId, c.teamId))) notFound();
   const action = run.bind(null, c.id);
 
   // Default the recipient field to the signed-in user's email so the
@@ -212,4 +214,3 @@ function PreviewCard({
     </div>
   );
 }
-

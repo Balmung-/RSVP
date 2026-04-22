@@ -36,7 +36,7 @@ export const OPERATOR_VISIBLE_ROLES = ["user", "assistant"] as const;
 // test stub captures the args object for inspection; the real client
 // ignores extra fields the way Prisma normally does.
 export type FindSessionsArgs = {
-  where: { userId: string; archivedAt: null };
+  where: { userId: string; tenantId: string; archivedAt: null };
   orderBy: { updatedAt: "desc" };
   take: number;
   select: {
@@ -68,10 +68,10 @@ export type PrismaSessionFinder = {
 
 export function buildFindSessions(
   prismaLike: PrismaSessionFinder,
-): (args: { userId: string; limit: number }) => Promise<ListSessionsRow[]> {
-  return ({ userId, limit }) =>
+): (args: { userId: string; tenantId: string; limit: number }) => Promise<ListSessionsRow[]> {
+  return ({ userId, tenantId, limit }) =>
     prismaLike.chatSession.findMany({
-      where: { userId, archivedAt: null },
+      where: { userId, tenantId, archivedAt: null },
       orderBy: { updatedAt: "desc" },
       take: limit,
       select: {

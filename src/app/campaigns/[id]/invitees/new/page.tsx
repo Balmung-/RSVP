@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { InviteeForm } from "@/components/InviteeForm";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
 import { createInvitee } from "@/lib/campaigns";
 
@@ -48,9 +48,10 @@ export default async function NewInvitee({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, c.tenantId, c.teamId))) notFound();
   const action = addInvitee.bind(null, c.id);
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
 

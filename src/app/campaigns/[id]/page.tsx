@@ -12,7 +12,7 @@ import { InviteesTab } from "@/components/workspace/InviteesTab";
 import { ScheduleTab } from "@/components/workspace/ScheduleTab";
 import { ContentTab } from "@/components/workspace/ContentTab";
 import { prisma } from "@/lib/db";
-import { requireRole, getCurrentUser, hasRole } from "@/lib/auth";
+import { requireRole, getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import {
   campaignStats,
   sendCampaign,
@@ -297,6 +297,7 @@ export default async function CampaignWorkspace({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const canWrite = hasRole(me, "editor");
   const canDelete = hasRole(me, "admin");
 
@@ -307,7 +308,7 @@ export default async function CampaignWorkspace({
   // with no team assignment (office-wide). 404 on a miss rather than
   // 403 — avoids leaking that a specific campaign exists. We pass
   // the already-loaded teamId to skip the extra DB roundtrip.
-  if (!(await canSeeCampaignRow(me.id, canDelete, campaign.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, canDelete, tenantId, campaign.tenantId, campaign.teamId))) notFound();
 
   const tabRaw = (searchParams.tab as Tab) ?? "invitees";
   const tab: Tab = (TABS as readonly string[]).includes(tabRaw) ? (tabRaw as Tab) : "invitees";
@@ -692,4 +693,3 @@ async function loadInviteesRows(campaignId: string, sp: { page?: string; q?: str
   }));
   return { rows, totalInvitees, page, searchQuery: q };
 }
-

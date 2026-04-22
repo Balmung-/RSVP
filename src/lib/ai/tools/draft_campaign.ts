@@ -131,7 +131,7 @@ export const draftCampaignTool: ToolDef<Input> = {
       if (ctx.isAdmin) {
         teamId = input.team_id;
       } else {
-        const allowed = new Set(await teamIdsForUser(ctx.user.id));
+        const allowed = new Set(await teamIdsForUser(ctx.user.id, ctx.user.activeTenantId ?? null));
         if (!allowed.has(input.team_id)) {
           return {
             output: {
@@ -170,6 +170,7 @@ export const draftCampaignTool: ToolDef<Input> = {
 
     const created = await prisma.campaign.create({
       data: {
+        tenantId: ctx.user.activeTenantId!,
         name,
         description,
         venue,

@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { requireRole, hasRole } from "@/lib/auth";
+import { requireRole, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { sendEmail, sendSms } from "@/lib/delivery";
 import { logAction } from "@/lib/audit";
 import { setFlash } from "@/lib/flash";
@@ -32,6 +32,7 @@ type SearchParams = {
 async function retryOne(invitationId: string, _fd: FormData) {
   "use server";
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const inv = await prisma.invitation.findUnique({
     where: { id: invitationId },
     include: { campaign: true, invitee: true },
@@ -43,7 +44,7 @@ async function retryOne(invitationId: string, _fd: FormData) {
   // Defence in depth: the page-level list is already team-scoped, but a
   // direct POST with an invitation id belonging to another team's
   // campaign would otherwise bypass. Treat team-miss as 404.
-  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), inv.campaignId))) {
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), tenantId, inv.campaignId))) {
     setFlash({ kind: "warn", text: "You don't have access to that campaign." });
     redirect("/deliverability");
   }
@@ -73,6 +74,7 @@ const RETRY_BATCH = 50;
 async function retryAll(formData: FormData) {
   "use server";
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const ids = formData.getAll("id").map(String).filter(Boolean);
   if (ids.length === 0) {
     setFlash({ kind: "warn", text: "Pick at least one failure to retry." });
@@ -82,7 +84,7 @@ async function retryAll(formData: FormData) {
   const deferred = ids.length - capped.length;
   // Team-scope the bulk too: fetch candidates, then drop any whose
   // campaign the caller can't see before we actually send.
-  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"), tenantId);
   const rows = await prisma.invitation.findMany({
     where: { id: { in: capped }, campaign: campaignScope },
     include: { campaign: true, invitee: true },
@@ -119,6 +121,7 @@ export default async function Deliverability({
   searchParams: SearchParams;
 }) {
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
 
@@ -131,7 +134,7 @@ export default async function Deliverability({
   // facet query that drives the campaign dropdown, and the retry
   // actions. Admins see every campaign; editors see their teams' plus
   // office-wide (teamId=null).
-  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"), tenantId);
 
   // Pull every non-happy Invitation. Scope to the last 60 days so ancient
   // bounces don't drown the view.
@@ -312,4 +315,3 @@ export default async function Deliverability({
     </Shell>
   );
 }
-

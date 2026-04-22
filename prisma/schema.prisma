@@ -14,14 +14,16 @@ datasource db {
 
 // A Campaign is the top-level container. Long-running, reusable.
 model Campaign {
-  id                        String    @id @default(cuid())
+  id                        String      @id @default(cuid())
+  tenantId                  String
+  tenant                    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name                      String
   description               String?
   eventAt                   DateTime?
   venue                     String?
-  locale                    String    @default("en") // primary locale (en | ar)
+  locale                    String      @default("en") // primary locale (en | ar)
   rsvpDeadline              DateTime?
-  status                    String    @default("draft") // draft | active | closed | archived
+  status                    String      @default("draft") // draft | active | closed | archived
   templateEmail             String? // optional custom email body (liquid-lite)
   templateSms               String? // optional custom sms body
   subjectEmail              String?
@@ -56,8 +58,8 @@ model Campaign {
   // cascading into destruction.
   whatsappDocumentUploadId  String?
   whatsappDocumentUpload    FileUpload? @relation("CampaignWhatsAppDocument", fields: [whatsappDocumentUploadId], references: [id], onDelete: SetNull)
-  createdAt                 DateTime  @default(now())
-  updatedAt                 DateTime  @updatedAt
+  createdAt                 DateTime    @default(now())
+  updatedAt                 DateTime    @updatedAt
   // Branding (optional overrides for RSVP page + email hero).
   brandColor                String? // hex, e.g. "#0a6e3d"
   brandLogoUrl              String?
@@ -76,8 +78,8 @@ model Campaign {
   eventOptions EventOption[]
   approvals    SendApproval[]
 
-  @@index([status])
-  @@index([teamId])
+  @@index([tenantId, status])
+  @@index([tenantId, teamId])
 }
 
 // Per-campaign custom question asked on the RSVP page.
@@ -275,6 +277,8 @@ model EventLog {
 // notes).
 model Contact {
   id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   fullName        String
   title           String?
   organization    String?
@@ -287,7 +291,7 @@ model Contact {
   dress           String?
   securityNotes   String?
   notes           String?
-  dedupKey        String    @unique
+  dedupKey        String
   archivedAt      DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
@@ -295,10 +299,11 @@ model Contact {
 
   invitees Invitee[]
 
-  @@index([vipTier])
-  @@index([fullName])
-  @@index([email])
-  @@index([phoneE164])
+  @@unique([tenantId, dedupKey])
+  @@index([tenantId, vipTier])
+  @@index([tenantId, fullName])
+  @@index([tenantId, email])
+  @@index([tenantId, phoneE164])
 }
 
 // --- Files -----------------------------------------------------
@@ -309,6 +314,8 @@ model Contact {
 // without changing callers.
 model FileUpload {
   id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   filename    String
   contentType String
   size        Int
@@ -316,13 +323,13 @@ model FileUpload {
   uploadedBy  String?
   createdAt   DateTime @default(now())
 
-  ingests FileIngest[]
+  ingests                 FileIngest[]
   // P17-C — back-relation for Campaign.whatsappDocumentUpload. Every
   // FileUpload can be referenced by zero-or-more Campaigns as their
   // WhatsApp header document.
-  whatsappHeaderCampaigns Campaign[] @relation("CampaignWhatsAppDocument")
+  whatsappHeaderCampaigns Campaign[]   @relation("CampaignWhatsAppDocument")
 
-  @@index([createdAt])
+  @@index([tenantId, createdAt])
 }
 
 // Extracted text + provenance for an uploaded file. One-to-one with
@@ -381,6 +388,8 @@ model SendApproval {
 // template is either en or ar.
 model Template {
   id         String    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name       String
   kind       String // email | sms
   locale     String    @default("en") // en | ar
@@ -392,8 +401,8 @@ model Template {
   updatedAt  DateTime  @updatedAt
   createdBy  String?
 
-  @@index([kind, archivedAt])
-  @@index([locale])
+  @@index([tenantId, kind, archivedAt])
+  @@index([tenantId, locale])
 }
 
 // --- Inbound / compliance --------------------------------------
@@ -446,8 +455,10 @@ model Unsubscribe {
 // Membership is many-to-many; users can belong to multiple teams.
 model Team {
   id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name        String
-  slug        String    @unique
+  slug        String
   color       String?
   description String?
   archivedAt  DateTime?
@@ -459,7 +470,8 @@ model Team {
   oauthAccounts OAuthAccount[]
   memories      Memory[]
 
-  @@index([slug])
+  @@unique([tenantId, slug])
+  @@index([tenantId, slug])
 }
 
 model TeamMembership {
@@ -475,6 +487,48 @@ model TeamMembership {
   @@index([userId])
 }
 
+// --- Tenants / workspaces --------------------------------------
+//
+// A Tenant is a real client workspace. Unlike Teams (org-unit desks
+// inside one office), tenants are the hard product boundary when the
+// service is given to multiple external entities. The first tenant
+// tranche makes identity and user-management tenant-aware here;
+// later tranches move campaigns / contacts / templates / chat data
+// behind the same boundary.
+model Tenant {
+  id         String    @id @default(cuid())
+  name       String
+  slug       String    @unique
+  locale     String    @default("en")
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  memberships TenantMembership[]
+  sessions    Session[]
+  campaigns   Campaign[]
+  contacts    Contact[]
+  uploads     FileUpload[]
+  templates   Template[]
+  teams       Team[]
+  chatSessions ChatSession[]
+
+  @@index([slug])
+}
+
+model TenantMembership {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   @default("viewer") // owner | admin | editor | viewer
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+}
+
 // --- Conversational surface ------------------------------------
 
 // A ChatSession is one conversational thread between an operator and
@@ -486,6 +540,8 @@ model TeamMembership {
 // never trusted from the model's output.
 model ChatSession {
   id              String        @id @default(cuid())
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId          String
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   title           String?
@@ -499,8 +555,8 @@ model ChatSession {
   // team memories intact — they just lose the back-pointer.
   sourcedMemories Memory[]
 
-  @@index([userId, updatedAt])
-  @@index([userId, archivedAt])
+  @@index([tenantId, userId, updatedAt])
+  @@index([tenantId, userId, archivedAt])
 }
 
 // One message in a ChatSession. `role` = user | assistant | tool. For
@@ -715,28 +771,29 @@ model Memory {
 // Admin users. One row per human. `passwordHash` is nullable for SSO-only
 // users; `role` drives every capability check in lib/auth.ts.
 model User {
-  id                 String           @id @default(cuid())
-  email              String           @unique
+  id                 String             @id @default(cuid())
+  email              String             @unique
   passwordHash       String?
-  mustChangePassword Boolean          @default(false)
+  mustChangePassword Boolean            @default(false)
   totpSecret         String?
   totpConfirmedAt    DateTime?
   fullName           String?
-  role               String           @default("viewer") // admin | editor | viewer
-  active             Boolean          @default(true)
-  createdAt          DateTime         @default(now())
-  updatedAt          DateTime         @updatedAt
+  role               String             @default("viewer") // admin | editor | viewer
+  active             Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
   lastLoginAt        DateTime?
   sessions           Session[]
   eventLog           EventLog[]
   teams              TeamMembership[]
+  tenantMemberships  TenantMembership[]
   chatSessions       ChatSession[]
-  oauthAccounts      OAuthAccount[]   @relation("OAuthConnectedBy")
+  oauthAccounts      OAuthAccount[]     @relation("OAuthConnectedBy")
   // Memories authored by this user. Named relation so a future
   // second user-pointer on Memory (e.g. an "assigned_to" slot)
   // can coexist without a schema rewrite, mirroring the
   // OAuthConnectedBy pattern above.
-  authoredMemories   Memory[]         @relation("MemoryCreatedBy")
+  authoredMemories   Memory[]           @relation("MemoryCreatedBy")
 
   @@index([email])
 }
@@ -744,15 +801,18 @@ model User {
 // Server-side session. The cookie carries the id + HMAC; this row is the
 // authority (allows revocation + audit). Expired rows are pruned lazily.
 model Session {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  ip        String?
-  userAgent String?
-  createdAt DateTime @default(now())
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeTenantId String?
+  activeTenant   Tenant?  @relation(fields: [activeTenantId], references: [id], onDelete: SetNull)
+  expiresAt      DateTime
+  ip             String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
 
   @@index([userId])
+  @@index([activeTenantId])
   @@index([expiresAt])
 }
 

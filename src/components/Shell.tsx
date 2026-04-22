@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
-import { getCurrentUser, hasRole, endSession } from "@/lib/auth";
+import { getCurrentUser, hasPlatformRole, hasTenantRole, hasRole, endSession } from "@/lib/auth";
 import { consumeFlash } from "@/lib/flash";
 import { teamsEnabled } from "@/lib/teams";
 import { readAdminLocale, adminDict } from "@/lib/adminLocale";
@@ -12,15 +12,6 @@ import { CommandPalette } from "./CommandPalette";
 import { CommandHint } from "./CommandHint";
 import { NotificationBell } from "./NotificationBell";
 import { AvatarMenu } from "./AvatarMenu";
-
-// One horizontal plane. Top seam holds everything the operator needs
-// persistently: brand on the left, primary destinations, right
-// cluster for command / alerts / account. No sidebar, no vertical
-// chrome. The workspace below gets the full width.
-//
-// The avatar dropdown is the "recessed tool drawer" - secondary
-// destinations plus account and sign-out. Chat is now first-class in
-// the top seam instead of being discoverability-hidden.
 
 export async function Shell({
   title,
@@ -36,14 +27,24 @@ export async function Shell({
   compactTitle?: boolean;
 }) {
   const me = await getCurrentUser();
-  const isAdmin = hasRole(me, "admin");
+  const isPlatformAdmin = hasPlatformRole(me, "admin");
+  const isWorkspaceAdmin = hasRole(me, "admin");
+  const canManageWorkspacePeople = hasTenantRole(me, "admin");
+  const canManageWorkspaceOps = hasTenantRole(me, "admin");
   const flash = consumeFlash();
-  const showTeams = teamsEnabled() && isAdmin;
+  const showTeams = teamsEnabled() && canManageWorkspaceOps;
   const locale = readAdminLocale();
   const T = adminDict(locale);
-  const notifications = me ? await getNotifications(me.id, isAdmin) : [];
+  const notifications = me ? await getNotifications(me.id, isWorkspaceAdmin, me.activeTenantId) : [];
 
-  const avatarItems = buildAvatarItems({ isAdmin, showTeams, locale, overviewLabel: T.overview });
+  const avatarItems = buildAvatarItems({
+    isPlatformAdmin,
+    canManageWorkspacePeople,
+    canManageWorkspaceOps,
+    showTeams,
+    locale,
+    overviewLabel: T.overview,
+  });
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -52,7 +53,14 @@ export async function Shell({
           <span className="h-6 w-6 rounded-md bg-ink-900 grid place-items-center">
             <span className="h-1.5 w-1.5 rounded-full bg-ink-0" />
           </span>
-          <span className="text-[15px] font-medium tracking-tight hidden sm:inline">Einai</span>
+          <span className="hidden sm:flex flex-col leading-none">
+            <span className="text-[15px] font-medium tracking-tight">Einai</span>
+            {me?.activeTenantName ? (
+              <span className="text-[10px] uppercase tracking-[0.18em] text-ink-400 mt-1">
+                {me.activeTenantName}
+              </span>
+            ) : null}
+          </span>
         </Link>
         <nav className="flex items-center gap-1 min-w-0">
           <TopLink href="/chat" label="Chat" />
@@ -97,7 +105,7 @@ export async function Shell({
         <div className="flex-1 px-10 pb-12 min-w-0">{children}</div>
       </main>
       {flash ? <Toast flash={flash} /> : null}
-      <CommandPalette isAdmin={isAdmin} teamsOn={showTeams} />
+      <CommandPalette isAdmin={isPlatformAdmin} teamsOn={showTeams} />
     </div>
   );
 }
@@ -125,50 +133,50 @@ type MenuItem =
   | { kind: "divider" };
 
 function buildAvatarItems({
-  isAdmin,
+  isPlatformAdmin,
+  canManageWorkspacePeople,
+  canManageWorkspaceOps,
   showTeams,
   locale,
   overviewLabel,
 }: {
-  isAdmin: boolean;
+  isPlatformAdmin: boolean;
+  canManageWorkspacePeople: boolean;
+  canManageWorkspaceOps: boolean;
   showTeams: boolean;
   locale: "en" | "ar";
   overviewLabel: string;
 }): MenuItem[] {
   const items: MenuItem[] = [
-    // Chat sits at the top as a featured primary tool, visually
-    // separated from the account-management items below by a
-    // divider. Available to all authenticated users - the chat
-    // surface itself role-gates individual tools (viewer can
-    // list, editor can draft / send).
-    { kind: "link", href: "/chat", label: locale === "ar" ? "المحادثة" : "Chat", icon: "message" },
+    { kind: "link", href: "/chat", label: locale === "ar" ? "Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø©" : "Chat", icon: "message" },
     { kind: "link", href: "/overview", label: overviewLabel, icon: "dashboard" },
-    // P16-E - the operator memory surface. Sits next to Chat
-    // because the two share a trust context (team-scoped,
-    // any-authenticated-user). Shows durable facts the assistant
-    // has been taught so the team can audit / curate them.
-    { kind: "link", href: "/memories", label: locale === "ar" ? "الذاكرة" : "Memories", icon: "list" },
+    { kind: "link", href: "/memories", label: locale === "ar" ? "Ø§Ù„Ø°Ø§ÙƒØ±Ø©" : "Memories", icon: "list" },
     { kind: "divider" },
-    { kind: "link", href: "/settings", label: locale === "ar" ? "الإعدادات" : "Settings", icon: "settings" },
-    { kind: "link", href: "/account/password", label: locale === "ar" ? "تغيير كلمة المرور" : "Change password", icon: "settings" },
-    { kind: "link", href: "/account/2fa", label: locale === "ar" ? "التحقق بخطوتين" : "Two-step sign-in", icon: "qr" },
+    { kind: "link", href: "/settings", label: locale === "ar" ? "Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª" : "Settings", icon: "settings" },
+    { kind: "link", href: "/account/password", label: locale === "ar" ? "ØªØºÙŠÙŠØ± ÙƒÙ„Ù…Ø© Ø§Ù„Ù…Ø±ÙˆØ±" : "Change password", icon: "settings" },
+    { kind: "link", href: "/account/2fa", label: locale === "ar" ? "Ø§Ù„ØªØ­Ù‚Ù‚ Ø¨Ø®Ø·ÙˆØªÙŠÙ†" : "Two-step sign-in", icon: "qr" },
   ];
-  if (isAdmin) {
-    items.push({ kind: "divider" });
-    items.push({ kind: "link", href: "/approvals", label: locale === "ar" ? "الموافقات" : "Approvals", icon: "circle-alert" });
-    items.push({ kind: "link", href: "/deliverability", label: locale === "ar" ? "قابلية الإرسال" : "Deliverability", icon: "warning" });
-    items.push({ kind: "link", href: "/unsubscribes", label: locale === "ar" ? "المنسحبون" : "Unsubscribes", icon: "eye-off" });
-    items.push({ kind: "link", href: "/users", label: locale === "ar" ? "الأشخاص" : "People", icon: "user-plus" });
+  if (canManageWorkspacePeople) {
+    items.push({ kind: "link", href: "/users", label: locale === "ar" ? "Ø§Ù„Ø£Ø´Ø®Ø§Øµ" : "People", icon: "user-plus" });
+  }
+  if (canManageWorkspaceOps) {
+    items.push({ kind: "link", href: "/approvals", label: locale === "ar" ? "Ø§Ù„Ù…ÙˆØ§ÙÙ‚Ø§Øª" : "Approvals", icon: "circle-alert" });
+    items.push({ kind: "link", href: "/deliverability", label: locale === "ar" ? "Ù‚Ø§Ø¨Ù„ÙŠØ© Ø§Ù„Ø¥Ø±Ø³Ø§Ù„" : "Deliverability", icon: "warning" });
     if (showTeams) {
-      items.push({ kind: "link", href: "/teams", label: locale === "ar" ? "الفرق" : "Teams", icon: "tag" });
+      items.push({ kind: "link", href: "/teams", label: locale === "ar" ? "Ø§Ù„ÙØ±Ù‚" : "Teams", icon: "tag" });
     }
-    items.push({ kind: "link", href: "/events", label: locale === "ar" ? "السجل" : "Events", icon: "list" });
+  }
+  if (isPlatformAdmin) {
+    items.push({ kind: "divider" });
+    items.push({ kind: "link", href: "/tenants", label: locale === "ar" ? "Ù…Ø³Ø§Ø­Ø§Øª Ø§Ù„Ø¹Ù…Ù„" : "Workspaces", icon: "dashboard" });
+    items.push({ kind: "link", href: "/unsubscribes", label: locale === "ar" ? "Ø§Ù„Ù…Ù†Ø³Ø­Ø¨ÙˆÙ†" : "Unsubscribes", icon: "eye-off" });
+    items.push({ kind: "link", href: "/events", label: locale === "ar" ? "Ø§Ù„Ø³Ø¬Ù„" : "Events", icon: "list" });
   }
   items.push({ kind: "divider" });
   items.push({
     kind: "action",
     action: signOutAction,
-    label: locale === "ar" ? "تسجيل الخروج" : "Sign out",
+    label: locale === "ar" ? "ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ø®Ø±ÙˆØ¬" : "Sign out",
     icon: "log-out",
     danger: true,
   });

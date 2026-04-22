@@ -1,7 +1,7 @@
 import { prisma } from "./db";
 import { sendCampaign } from "./campaigns";
 import { logAction } from "./audit";
-import { notifyAdmins } from "./notify";
+import { notifyTenantAdmins } from "./notify";
 
 export function approvalThreshold(): number {
   const raw = parseInt(process.env.APPROVAL_THRESHOLD ?? "100", 10);
@@ -42,28 +42,34 @@ export async function requestApproval(params: {
   });
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.campaignId },
-    select: { name: true },
+    select: { name: true, tenantId: true },
   });
   const requester = await prisma.user.findUnique({
     where: { id: params.requestedBy },
     select: { email: true, fullName: true },
   });
-  await notifyAdmins(
-    "approval.requested",
-    `Approval needed · ${campaign?.name ?? "Campaign"}`,
-    `${requester?.fullName ?? requester?.email ?? "An editor"} is asking to send ${params.recipientCount.toLocaleString()} ${params.channel === "both" ? "messages" : params.channel === "email" ? "emails" : "SMSs"} for "${campaign?.name ?? "a campaign"}".\n\nThe send is paused until an admin approves.`,
-    "/approvals",
-  );
+  if (campaign) {
+    await notifyTenantAdmins(
+      campaign.tenantId,
+      "approval.requested",
+      `Approval needed Â· ${campaign.name ?? "Campaign"}`,
+      `${requester?.fullName ?? requester?.email ?? "An editor"} is asking to send ${params.recipientCount.toLocaleString()} ${params.channel === "both" ? "messages" : params.channel === "email" ? "emails" : "SMSs"} for "${campaign.name ?? "a campaign"}".\n\nThe send is paused until a workspace admin approves.`,
+      "/approvals",
+    );
+  }
   return row;
 }
 
 export async function decideApproval(
   approvalId: string,
+  tenantId: string,
   decidedBy: string,
   decision: "approved" | "rejected",
   decisionNote?: string | null,
 ) {
-  const row = await prisma.sendApproval.findUnique({ where: { id: approvalId } });
+  const row = await prisma.sendApproval.findFirst({
+    where: { id: approvalId, campaign: { tenantId } },
+  });
   if (!row) return { ok: false as const, reason: "not_found" };
   if (row.status !== "pending") return { ok: false as const, reason: "already_decided" };
   await prisma.sendApproval.update({
@@ -82,7 +88,6 @@ export async function decideApproval(
     data: { recipients: row.recipientCount, channel: row.channel, note: decisionNote },
   });
   if (decision === "approved") {
-    // Fire the send with the stored parameters.
     await sendCampaign(row.campaignId, {
       channel: row.channel as "email" | "sms" | "both",
       onlyUnsent: true,
@@ -98,9 +103,9 @@ export async function pendingApproval(campaignId: string) {
   });
 }
 
-export async function listPendingApprovals() {
+export async function listPendingApprovalsForTenant(tenantId: string) {
   return prisma.sendApproval.findMany({
-    where: { status: "pending" },
+    where: { status: "pending", campaign: { tenantId } },
     include: { campaign: { select: { name: true, id: true } } },
     orderBy: { createdAt: "desc" },
   });

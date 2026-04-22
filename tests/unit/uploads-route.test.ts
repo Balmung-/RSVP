@@ -50,7 +50,9 @@ function makeDeps(overrides: Partial<UploadsDeps> = {}): {
   const baseStore = overrides.storeUpload;
   const baseExtract = overrides.extractFromUpload;
   const deps: UploadsDeps = {
-    requireEditor: overrides.requireEditor ?? (async () => ({ id: "user-editor-1" })),
+    requireEditor:
+      overrides.requireEditor ??
+      (async () => ({ id: "user-editor-1", activeTenantId: "tenant-1" })),
     readFormData: overrides.readFormData ?? ((r) => r.formData()),
     validateUpload: overrides.validateUpload ?? (() => null),
     storeUpload: async (p) => {

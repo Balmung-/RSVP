@@ -5,7 +5,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { applyReviewerDecision } from "@/lib/inbound";
 import { setFlash } from "@/lib/flash";
@@ -19,6 +19,7 @@ const fmt = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "
 async function decide(formData: FormData) {
   "use server";
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const id = String(formData.get("id"));
   const decision = String(formData.get("decision")) as
     | "apply_attending"
@@ -30,11 +31,11 @@ async function decide(formData: FormData) {
   // matched) stay open to any editor — they're not team-owned.
   const msg = await prisma.inboundMessage.findUnique({
     where: { id },
-    select: { invitee: { select: { campaign: { select: { teamId: true } } } } },
+    select: { invitee: { select: { campaign: { select: { tenantId: true, teamId: true } } } } },
   });
   if (msg?.invitee?.campaign) {
     const { canSeeCampaignRow } = await import("@/lib/teams");
-    if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), msg.invitee.campaign.teamId))) {
+    if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, msg.invitee.campaign.tenantId, msg.invitee.campaign.teamId))) {
       setFlash({ kind: "warn", text: "You don't have access to that campaign." });
       redirect("/inbox");
     }
@@ -55,6 +56,7 @@ export default async function InboxPage({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const status = searchParams.status === "all"
     ? undefined
@@ -75,7 +77,7 @@ export default async function InboxPage({
     : {
         OR: [
           { inviteeId: null },
-          { invitee: { campaign: await scopedCampaignWhere(me.id, false) } },
+          { invitee: { campaign: await scopedCampaignWhere(me.id, false, tenantId) } },
         ],
       };
 

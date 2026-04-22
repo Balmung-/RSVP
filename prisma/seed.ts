@@ -5,8 +5,19 @@ import { newRsvpToken } from "../src/lib/tokens";
 const prisma = new PrismaClient();
 
 async function main() {
+  const tenant = await prisma.tenant.upsert({
+    where: { slug: "seed-office" },
+    update: {},
+    create: {
+      name: "Seed Office",
+      slug: "seed-office",
+      locale: "ar",
+    },
+  });
+
   const c = await prisma.campaign.create({
     data: {
+      tenantId: tenant.id,
       name: "National Day Reception 2026",
       description: "Annual diplomatic reception.",
       venue: "Diplomatic Quarter, Riyadh",

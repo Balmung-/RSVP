@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { activeTenantIdOf, getCurrentUser, hasRole } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { rateLimit } from "@/lib/ratelimit";
 import { prisma } from "@/lib/db";
@@ -13,6 +13,8 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   const me = await getCurrentUser();
   if (!me) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const tenantId = activeTenantIdOf(me);
+  if (!tenantId) return NextResponse.json({ ok: false, error: "no_active_tenant" }, { status: 400 });
   // Per-user rate limit. Command palette typing fires this on every
   // keystroke via the UI debounce — 30/burst refilling two per second
   // is plenty for legit typing and shuts down scripted mining.
@@ -26,7 +28,7 @@ export async function GET(req: Request) {
 
   // Respect team scope on the campaign arm of the search so non-admin
   // editors don't discover team-B campaigns via name substring match.
-  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"));
+  const campaignScope = await scopedCampaignWhere(me.id, hasRole(me, "admin"), tenantId);
 
   const [campaigns, contacts] = await Promise.all([
     prisma.campaign.findMany({
@@ -47,6 +49,7 @@ export async function GET(req: Request) {
     }),
     prisma.contact.findMany({
       where: {
+        tenantId,
         archivedAt: null,
         OR: [
           { fullName: { contains: q, mode: "insensitive" } },

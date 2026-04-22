@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { Badge } from "@/components/Badge";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import {
   updateTeam,
   addMember,
@@ -25,8 +25,8 @@ export const dynamic = "force-dynamic";
 
 async function save(teamId: string, formData: FormData) {
   "use server";
-  await requireRole("admin");
-  const res = await updateTeam(teamId, {
+  const me = await requireRole("admin");
+  const res = await updateTeam(requireActiveTenantId(me), teamId, {
     name: String(formData.get("name") ?? ""),
     slug: String(formData.get("slug") ?? ""),
     color: String(formData.get("color") ?? ""),
@@ -40,43 +40,44 @@ async function save(teamId: string, formData: FormData) {
 
 async function addMemberAction(teamId: string, formData: FormData) {
   "use server";
-  await requireRole("admin");
+  const me = await requireRole("admin");
   const userId = String(formData.get("userId"));
   const roleRaw = String(formData.get("role") ?? "member");
   const role: TeamRole = (TEAM_ROLES as readonly string[]).includes(roleRaw) ? (roleRaw as TeamRole) : "member";
   if (!userId) redirect(`/teams/${teamId}`);
-  await addMember(teamId, userId, role);
+  const res = await addMember(requireActiveTenantId(me), teamId, userId, role);
+  if (!res.ok) redirect(`/teams/${teamId}?e=${res.reason}`);
   await logAction({ kind: "team.member_added", refType: "team", refId: teamId, data: { userId, role } });
   redirect(`/teams/${teamId}`);
 }
 
 async function removeMemberAction(teamId: string, formData: FormData) {
   "use server";
-  await requireRole("admin");
+  const me = await requireRole("admin");
   const userId = String(formData.get("userId"));
-  await removeMember(teamId, userId);
+  await removeMember(requireActiveTenantId(me), teamId, userId);
   await logAction({ kind: "team.member_removed", refType: "team", refId: teamId, data: { userId } });
   redirect(`/teams/${teamId}`);
 }
 
 async function archive(teamId: string, _fd: FormData) {
   "use server";
-  await requireRole("admin");
-  await archiveTeam(teamId);
+  const me = await requireRole("admin");
+  await archiveTeam(requireActiveTenantId(me), teamId);
   await logAction({ kind: "team.archived", refType: "team", refId: teamId });
   redirect(`/teams`);
 }
 async function unarchive(teamId: string, _fd: FormData) {
   "use server";
-  await requireRole("admin");
-  await unarchiveTeam(teamId);
+  const me = await requireRole("admin");
+  await unarchiveTeam(requireActiveTenantId(me), teamId);
   await logAction({ kind: "team.unarchived", refType: "team", refId: teamId });
   redirect(`/teams/${teamId}`);
 }
 async function remove(teamId: string, _fd: FormData) {
   "use server";
-  await requireRole("admin");
-  await deleteTeamRecord(teamId);
+  const me = await requireRole("admin");
+  await deleteTeamRecord(requireActiveTenantId(me), teamId);
   await logAction({ kind: "team.deleted", refType: "team", refId: teamId });
   setFlash({ kind: "warn", text: "Team deleted" });
   redirect(`/teams`);
@@ -100,23 +101,25 @@ export default async function TeamPage({
   if (!me) redirect("/login");
   if (!hasRole(me, "admin")) redirect("/");
   if (!teamsEnabled()) notFound();
+  const tenantId = requireActiveTenantId(me);
 
-  const [team, allUsers] = await Promise.all([
-    prisma.team.findUnique({
-      where: { id: params.id },
+  const [team, tenantUsers] = await Promise.all([
+    prisma.team.findFirst({
+      where: { id: params.id, tenantId },
       include: {
         memberships: { include: { user: true }, orderBy: [{ role: "asc" }, { createdAt: "asc" }] },
         _count: { select: { campaigns: true } },
       },
     }),
-    prisma.user.findMany({
-      where: { active: true },
-      select: { id: true, email: true, fullName: true },
-      orderBy: { email: "asc" },
+    prisma.tenantMembership.findMany({
+      where: { tenantId, user: { active: true } },
+      select: { user: { select: { id: true, email: true, fullName: true } } },
+      orderBy: { user: { email: "asc" } },
     }),
   ]);
   if (!team) notFound();
 
+  const allUsers = tenantUsers.map((row) => row.user);
   const memberIds = new Set(team.memberships.map((m) => m.userId));
   const addable = allUsers.filter((u) => !memberIds.has(u.id));
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;

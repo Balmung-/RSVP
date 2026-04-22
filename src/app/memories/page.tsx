@@ -5,7 +5,7 @@ import { Field } from "@/components/Field";
 import { Icon } from "@/components/Icon";
 import { Badge } from "@/components/Badge";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { teamIdsForUser } from "@/lib/teams";
 import {
   createMemoryForTeam,
@@ -109,6 +109,7 @@ async function deleteAction(formData: FormData): Promise<void> {
   "use server";
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const id = String(formData.get("id") ?? "").trim();
   const teamId = String(formData.get("teamId") ?? "").trim();
@@ -126,7 +127,7 @@ async function deleteAction(formData: FormData): Promise<void> {
   // per-request by the `teamIdsForUser` wrapper.
   const isEditor = hasRole(me, "editor");
   const isAdmin = hasRole(me, "admin");
-  const memberTeamIds = await teamIdsForUser(me.id);
+  const memberTeamIds = await teamIdsForUser(me.id, tenantId);
   const decision = decideMemoryMutateAuth({
     isEditor,
     isAdmin,
@@ -181,6 +182,7 @@ async function createAction(formData: FormData): Promise<void> {
   "use server";
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   // Step 1: form-shape parse. The helper handles missing team,
   // missing/whitespace body, and oversize body with distinct
@@ -211,7 +213,7 @@ async function createAction(formData: FormData): Promise<void> {
   // writing to.
   const isEditor = hasRole(me, "editor");
   const isAdmin = hasRole(me, "admin");
-  const memberTeamIds = await teamIdsForUser(me.id);
+  const memberTeamIds = await teamIdsForUser(me.id, tenantId);
   const decision = decideMemoryMutateAuth({
     isEditor,
     isAdmin,
@@ -247,6 +249,7 @@ async function createAction(formData: FormData): Promise<void> {
 export default async function MemoriesPage() {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const isAdmin = hasRole(me, "admin");
   // `isEditor` is true for editor AND admin; it drives whether
@@ -273,14 +276,14 @@ export default async function MemoriesPage() {
   let teamsById: Map<string, string | null>;
   if (isAdmin) {
     const allTeams = await prisma.team.findMany({
-      where: { archivedAt: null },
+      where: { tenantId, archivedAt: null },
       orderBy: [{ name: "asc" }],
       select: { id: true, name: true },
     });
     teamIdsInOrder = allTeams.map((t) => t.id);
     teamsById = new Map(allTeams.map((t) => [t.id, t.name]));
   } else {
-    const ids = await teamIdsForUser(me.id);
+    const ids = await teamIdsForUser(me.id, tenantId);
     teamIdsInOrder = ids;
     if (ids.length > 0) {
       const rows = await prisma.team.findMany({

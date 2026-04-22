@@ -74,6 +74,11 @@ function makeDeps(overrides: Partial<GatherDeps> = {}): GatherDeps {
   };
 }
 
+const GATHER_USER = {
+  id: "user-1",
+  activeTenantId: "tenant-1",
+} as const;
+
 // ---- pure helpers ----------------------------------------------
 
 test("toRenderedMemory: strips PrismaMemory to {kind, body, updatedAt}", () => {
@@ -171,7 +176,7 @@ test("gather: happy path — teamIds → per-team recall → named blocks (end-t
       return all.filter((t) => ids.includes(t.id));
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.equal(blocks.length, 2);
   assert.equal(blocks[0]!.teamId, "team-1");
   assert.equal(blocks[0]!.teamName, "Ministry Events");
@@ -210,7 +215,7 @@ test("gather: forwards opts.limitPerTeam and opts.policy to recallMemoriesForTea
     adminListMaxLimit: 250,
   };
   await gatherMemoriesForUserWith(
-    { id: "user-1" },
+    GATHER_USER,
     deps,
     { limitPerTeam: 3, policy: customPolicy },
   );
@@ -236,7 +241,7 @@ test("gather: never asks for memories outside teamIdsForUser (tenant isolation p
     },
     lookupTeamNames: async () => [],
   });
-  await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  await gatherMemoriesForUserWith(GATHER_USER, deps);
   // Exact match — the requested set is PRECISELY the user's teams.
   assert.deepEqual(
     Array.from(requestedTeamIds).sort(),
@@ -261,7 +266,7 @@ test("gather: teamIdsForUser returns [] → no memory calls, empty blocks", asyn
       return [];
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.deepEqual(blocks, []);
   assert.equal(recallCalls, 0, "no recall calls when teamIds is empty");
   assert.equal(lookupCalls, 0, "no name lookup when teamIds is empty");
@@ -289,7 +294,7 @@ test("gather: lookupTeamNames is called with exactly the teams that had rows", a
       return ids.map((id) => ({ id, name: `Name-${id}` }));
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.equal(blocks.length, 2);
   assert.deepEqual(
     blocks.map((b) => b.teamId),
@@ -316,7 +321,7 @@ test("gather: teamIdsForUser throws → returns [] (no memories, no crash)", asy
       throw new Error("should not be called when teamIds failed");
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.deepEqual(blocks, []);
 });
 
@@ -335,7 +340,7 @@ test("gather: one team's recall throws → that team drops, others ship", async 
     lookupTeamNames: async (ids) =>
       ids.map((id) => ({ id, name: `Name-${id}` })),
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   // team-broken dropped; the two ok teams ship.
   assert.equal(blocks.length, 2);
   assert.deepEqual(
@@ -362,7 +367,7 @@ test("gather: team-name lookup throws → memories ship with null teamName", asy
       throw new Error("team name lookup down");
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.equal(blocks.length, 2);
   for (const b of blocks) {
     assert.equal(b.teamName, null, "lookup failure → null (renderer substitutes)");
@@ -385,7 +390,7 @@ test("gather: ALL teams' recalls throw → empty blocks (no crash)", async () =>
       return [];
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.deepEqual(blocks, []);
   assert.equal(lookupCalls, 0, "no name lookup when no team has rows");
 });
@@ -399,10 +404,13 @@ test("gather: missing/empty user id → empty blocks (caller bug, fail closed)",
       throw new Error("should not be called");
     },
   });
-  const blocksEmpty = await gatherMemoriesForUserWith({ id: "" }, deps);
+  const blocksEmpty = await gatherMemoriesForUserWith(
+    { ...GATHER_USER, id: "" },
+    deps,
+  );
   assert.deepEqual(blocksEmpty, []);
   const blocksUndef = await gatherMemoriesForUserWith(
-    undefined as unknown as { id: string },
+    undefined as unknown as { id: string; activeTenantId: string | null },
     deps,
   );
   assert.deepEqual(blocksUndef, []);
@@ -418,7 +426,7 @@ test("gather: teamIdsForUser returns non-array → treated as empty", async () =
       throw new Error("should not be called");
     },
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.deepEqual(blocks, []);
 });
 
@@ -439,7 +447,7 @@ test("gather: block order mirrors teamIdsForUser order (not team-name alphabetic
         name: id === "team-z" ? "Alpha" : id === "team-a" ? "Omega" : "Middle",
       })),
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.deepEqual(
     blocks.map((b) => b.teamId),
     ["team-z", "team-a", "team-m"],
@@ -463,7 +471,7 @@ test("gather: each memory row is narrowed to {kind, body, updatedAt} (no prisma 
     ],
     lookupTeamNames: async () => [{ id: "team-1", name: "T1" }],
   });
-  const blocks = await gatherMemoriesForUserWith({ id: "user-1" }, deps);
+  const blocks = await gatherMemoriesForUserWith(GATHER_USER, deps);
   assert.equal(blocks.length, 1);
   const mem = blocks[0]!.memories[0]!;
   // Exactly these three keys — no id, teamId, sourceSessionId.

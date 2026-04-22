@@ -190,6 +190,7 @@ export const commitImportTool: ToolDef<Input> = {
         ? await runImport(
             {
               target: "contacts",
+              tenantId: ctx.user.activeTenantId!,
               text: ingest.extractedText,
               createdBy: ctx.user.id,
             },

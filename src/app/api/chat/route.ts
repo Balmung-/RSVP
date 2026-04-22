@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCurrentUser } from "@/lib/auth";
+import { activeTenantIdOf, getCurrentUser } from "@/lib/auth";
 import { rateLimit } from "@/lib/ratelimit";
 import { prisma } from "@/lib/db";
 import { readAdminLocale } from "@/lib/adminLocale";
@@ -122,6 +122,10 @@ export async function POST(req: Request) {
   if (!me) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  const tenantId = activeTenantIdOf(me);
+  if (!tenantId) {
+    return NextResponse.json({ ok: false, error: "no_active_tenant" }, { status: 400 });
+  }
 
   // Cheap per-user throttle. Chat is intentionally quieter than the
   // command palette — each request kicks off an LLM call plus
@@ -171,7 +175,7 @@ export async function POST(req: Request) {
   let sessionId = typeof body.sessionId === "string" ? body.sessionId : null;
   if (sessionId) {
     const existing = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId: me.id, archivedAt: null },
+      where: { id: sessionId, userId: me.id, tenantId, archivedAt: null },
       select: { id: true },
     });
     if (!existing) {
@@ -194,6 +198,7 @@ export async function POST(req: Request) {
     const created = await prisma.chatSession.create({
       data: {
         userId: me.id,
+        tenantId,
         title: derivedTitle,
       },
       select: { id: true },

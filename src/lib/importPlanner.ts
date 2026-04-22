@@ -50,6 +50,7 @@ export type ImportPlannerMode = "preview" | "commit";
 
 export type ContactsPlannerInputs = {
   target: "contacts";
+  tenantId: string;
   text: string;
   createdBy?: string | null;
 };
@@ -302,6 +303,7 @@ export async function runImport(
   // createMany and emit the audit row.
   if (inputs.target === "contacts") {
     const batch: Prisma.ContactCreateManyInput[] = fresh.map((n) => ({
+      tenantId: inputs.tenantId,
       fullName: n.fullName,
       title: n.title,
       organization: n.organization,

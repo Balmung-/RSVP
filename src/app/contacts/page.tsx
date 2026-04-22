@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { Pagination } from "@/components/Pagination";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, requireActiveTenantId } from "@/lib/auth";
 import { searchContacts, VIP_LABEL, type VipTier, resolveContactOptOuts, contactOptOutState } from "@/lib/contacts";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
 
@@ -24,7 +24,9 @@ export default async function ContactsPage({
 }: {
   searchParams: { page?: string; q?: string; tier?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const page = Math.max(1, parseInt(searchParams.page ?? "1", 10) || 1);
   const q = (searchParams.q ?? "").trim();
@@ -34,6 +36,7 @@ export default async function ContactsPage({
     : ("all" as const);
 
   const { total, rows } = await searchContacts({
+    tenantId,
     q,
     tier,
     skip: (page - 1) * PAGE_SIZE,
@@ -192,4 +195,3 @@ export default async function ContactsPage({
     </Shell>
   );
 }
-

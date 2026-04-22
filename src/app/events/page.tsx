@@ -5,7 +5,7 @@ import { Pagination } from "@/components/Pagination";
 import { Icon } from "@/components/Icon";
 import { FilterPill } from "@/components/FilterPill";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { requirePlatformAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +18,7 @@ export default async function EventsPage({
 }: {
   searchParams: { page?: string; kind?: string; actor?: string };
 }) {
-  const me = await getCurrentUser();
-  if (!me) redirect("/login");
-  if (!hasRole(me, "admin")) redirect("/");
+  await requirePlatformAdmin();
 
   const page = Math.max(1, parseInt(searchParams.page ?? "1", 10) || 1);
   const kindFilter = (searchParams.kind ?? "").trim();

@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { Pagination } from "@/components/Pagination";
 import { EmptyState } from "@/components/EmptyState";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { canSeeCampaign } from "@/lib/teams";
 import { phrase } from "@/lib/activity";
 import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
@@ -29,13 +29,14 @@ export default async function CampaignActivity({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.id },
-    select: { id: true, name: true, status: true },
+    select: { id: true, name: true, status: true, tenantId: true },
   });
   if (!campaign) notFound();
-  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), campaign.id))) notFound();
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), tenantId, campaign.id))) notFound();
 
   const page = Math.max(1, parseInt(searchParams.page ?? "1", 10) || 1);
   const locale = readAdminLocale();

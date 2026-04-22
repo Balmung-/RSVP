@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { scopedCampaignWhere } from "@/lib/teams";
 import { phrase, type ActivityRecord } from "@/lib/activity";
 import { vipWatch, VIP_LABEL, type VipTier } from "@/lib/contacts";
@@ -26,11 +26,12 @@ export const dynamic = "force-dynamic";
 export default async function Dashboard() {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
   const T = adminDict(locale);
   const isAdmin = hasRole(me, "admin");
-  const campaignScope = await scopedCampaignWhere(me.id, isAdmin);
+  const campaignScope = await scopedCampaignWhere(me.id, isAdmin, tenantId);
 
   // EventLog has no campaignId column - cap the scoped ID list so
   // the IN clause can't blow past Postgres's parameter ceiling.

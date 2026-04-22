@@ -89,9 +89,9 @@ export function buildMissingGovernmentTemplates(existingNames: Iterable<string>)
   return GOVERNMENT_TEMPLATE_PACK.filter((tpl) => !existing.has(tpl.name)).map((tpl) => ({ ...tpl }));
 }
 
-export async function loadGovernmentTemplatePack(createdBy?: string | null) {
+export async function loadGovernmentTemplatePack(tenantId: string, createdBy?: string | null) {
   const existing = await prisma.template.findMany({
-    where: { name: { in: GOVERNMENT_TEMPLATE_PACK.map((tpl) => tpl.name) } },
+    where: { tenantId, name: { in: GOVERNMENT_TEMPLATE_PACK.map((tpl) => tpl.name) } },
     select: { name: true },
   });
   const missing = buildMissingGovernmentTemplates(existing.map((row) => row.name));
@@ -101,6 +101,7 @@ export async function loadGovernmentTemplatePack(createdBy?: string | null) {
   const created = await prisma.template.createMany({
     data: missing.map((tpl) => ({
       name: tpl.name,
+      tenantId,
       kind: tpl.kind,
       locale: tpl.locale,
       subject: tpl.kind === "email" ? tpl.subject ?? null : null,
@@ -113,6 +114,7 @@ export async function loadGovernmentTemplatePack(createdBy?: string | null) {
 }
 
 export async function createTemplate(
+  tenantId: string,
   input: TemplateInput,
   createdBy?: string | null,
 ): Promise<TemplateResult> {
@@ -123,9 +125,10 @@ export async function createTemplate(
   if (!(TEMPLATE_KINDS as readonly string[]).includes(input.kind)) {
     return { ok: false, reason: "invalid_kind" };
   }
-  const row = await prisma.template.create({
-    data: {
-      name,
+    const row = await prisma.template.create({
+      data: {
+        tenantId,
+        name,
       kind: input.kind,
       locale: input.locale === "ar" ? "ar" : "en",
       subject: input.kind === "email" ? (input.subject ?? "").trim().slice(0, 300) || null : null,
@@ -138,6 +141,7 @@ export async function createTemplate(
 }
 
 export async function updateTemplate(
+  tenantId: string,
   id: string,
   input: TemplateInput,
 ): Promise<TemplateResult> {
@@ -146,6 +150,8 @@ export async function updateTemplate(
   if (!name) return { ok: false, reason: "missing_name" };
   if (!body) return { ok: false, reason: "missing_body" };
   try {
+    const existing = await prisma.template.findFirst({ where: { id, tenantId }, select: { id: true } });
+    if (!existing) return { ok: false, reason: "not_found" };
     await prisma.template.update({
       where: { id },
       data: {
@@ -159,26 +165,29 @@ export async function updateTemplate(
     });
     return { ok: true, templateId: id };
   } catch (e) {
-    if (isNotFound(e)) return { ok: false, reason: "not_found" };
     throw e;
   }
 }
 
-export async function archiveTemplate(id: string) {
-  await prisma.template.update({ where: { id }, data: { archivedAt: new Date() } });
+export async function archiveTemplate(tenantId: string, id: string) {
+  await prisma.template.updateMany({ where: { id, tenantId }, data: { archivedAt: new Date() } });
 }
 
-export async function unarchiveTemplate(id: string) {
-  await prisma.template.update({ where: { id }, data: { archivedAt: null } });
+export async function unarchiveTemplate(tenantId: string, id: string) {
+  await prisma.template.updateMany({ where: { id, tenantId }, data: { archivedAt: null } });
 }
 
-export async function deleteTemplateRecord(id: string) {
-  await prisma.template.delete({ where: { id } });
+export async function deleteTemplateRecord(tenantId: string, id: string) {
+  await prisma.template.deleteMany({ where: { id, tenantId } });
 }
 
-export async function listTemplates(opts: { kind?: TemplateKind; locale?: "en" | "ar"; includeArchived?: boolean } = {}) {
+export async function listTemplates(
+  tenantId: string,
+  opts: { kind?: TemplateKind; locale?: "en" | "ar"; includeArchived?: boolean } = {},
+) {
   return prisma.template.findMany({
     where: {
+      tenantId,
       ...(opts.includeArchived ? {} : { archivedAt: null }),
       ...(opts.kind ? { kind: opts.kind } : {}),
       ...(opts.locale ? { locale: opts.locale } : {}),
@@ -187,6 +196,6 @@ export async function listTemplates(opts: { kind?: TemplateKind; locale?: "en" |
   });
 }
 
-export async function getTemplate(id: string) {
-  return prisma.template.findUnique({ where: { id } });
+export async function getTemplate(tenantId: string, id: string) {
+  return prisma.template.findFirst({ where: { id, tenantId } });
 }

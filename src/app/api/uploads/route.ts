@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireRole } from "@/lib/auth";
+import { activeTenantIdOf, requireRole } from "@/lib/auth";
 import { storeUpload, validateUpload } from "@/lib/uploads";
 import { extractFromUpload } from "@/lib/ingest";
 import { uploadsHandler } from "./handler";
@@ -16,7 +16,9 @@ export async function POST(req: Request) {
   const { status, body } = await uploadsHandler(req, {
     requireEditor: async () => {
       const me = await requireRole("editor");
-      return { id: me.id };
+      const tenantId = activeTenantIdOf(me);
+      if (!tenantId) throw new Error("no_active_tenant");
+      return { id: me.id, activeTenantId: tenantId };
     },
     readFormData: (r) => r.formData(),
     validateUpload,

@@ -5,7 +5,7 @@ import { ContactForm } from "@/components/ContactForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { Badge } from "@/components/Badge";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, requireRole } from "@/lib/auth";
+import { getCurrentUser, requireActiveTenantId, requireRole } from "@/lib/auth";
 import {
   updateContact,
   archiveContact,
@@ -34,12 +34,12 @@ const ERROR_MSG: Record<string, string> = {
 
 async function save(contactId: string, formData: FormData) {
   "use server";
-  await requireRole("editor");
+  const me = await requireRole("editor");
   const tierRaw = String(formData.get("vipTier") ?? "standard");
   const vipTier: VipTier = (VIP_TIERS as readonly string[]).includes(tierRaw)
     ? (tierRaw as VipTier)
     : "standard";
-  const res = await updateContact(contactId, {
+  const res = await updateContact(requireActiveTenantId(me), contactId, {
     fullName: String(formData.get("fullName") ?? ""),
     title: String(formData.get("title") ?? ""),
     organization: String(formData.get("organization") ?? ""),
@@ -60,23 +60,23 @@ async function save(contactId: string, formData: FormData) {
 
 async function archive(contactId: string) {
   "use server";
-  await requireRole("editor");
-  await archiveContact(contactId);
+  const me = await requireRole("editor");
+  await archiveContact(requireActiveTenantId(me), contactId);
   setFlash({ kind: "info", text: "Contact archived" });
   redirect("/contacts");
 }
 
 async function unarchive(contactId: string) {
   "use server";
-  await requireRole("editor");
-  await unarchiveContact(contactId);
+  const me = await requireRole("editor");
+  await unarchiveContact(requireActiveTenantId(me), contactId);
   redirect(`/contacts/${contactId}/edit`);
 }
 
 async function remove(contactId: string) {
   "use server";
-  await requireRole("admin");
-  await deleteContactRecord(contactId);
+  const me = await requireRole("admin");
+  await deleteContactRecord(requireActiveTenantId(me), contactId);
   await logAction({ kind: "contact.deleted", refType: "contact", refId: contactId });
   setFlash({ kind: "warn", text: "Contact deleted" });
   redirect("/contacts");
@@ -84,9 +84,10 @@ async function remove(contactId: string) {
 
 async function optOut(contactId: string) {
   "use server";
-  await requireRole("editor");
-  const c = await prisma.contact.findUnique({
-    where: { id: contactId },
+  const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
+  const c = await prisma.contact.findFirst({
+    where: { id: contactId, tenantId },
     select: { email: true, phoneE164: true, fullName: true },
   });
   if (!c) redirect(`/contacts/${contactId}/edit`);
@@ -104,9 +105,10 @@ async function optOut(contactId: string) {
 
 async function optIn(contactId: string) {
   "use server";
-  await requireRole("editor");
-  const c = await prisma.contact.findUnique({
-    where: { id: contactId },
+  const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
+  const c = await prisma.contact.findFirst({
+    where: { id: contactId, tenantId },
     select: { email: true, phoneE164: true, fullName: true },
   });
   if (!c) redirect(`/contacts/${contactId}/edit`);
@@ -144,9 +146,10 @@ export default async function EditContact({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
-  const c = await prisma.contact.findUnique({
-    where: { id: params.id },
+  const c = await prisma.contact.findFirst({
+    where: { id: params.id, tenantId },
     include: {
       invitees: {
         include: { campaign: { select: { id: true, name: true, status: true } }, response: true },

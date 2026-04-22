@@ -46,7 +46,7 @@ const PREVIEW_CHARS = 80;
 
 // ---- Types --------------------------------------------------------
 
-export type ListSessionsUser = { id: string };
+export type ListSessionsUser = { id: string; activeTenantId: string | null };
 
 // The row shape the picker consumes. `title` may be null while a
 // session's title hasn't been derived yet (e.g. mid-first-turn race
@@ -107,6 +107,7 @@ export interface ListSessionsDeps {
   //     colocated with the schema)
   findSessions: (args: {
     userId: string;
+    tenantId: string;
     limit: number;
   }) => Promise<ListSessionsRow[]>;
 }
@@ -156,9 +157,17 @@ export async function listSessionsHandler(
     };
   }
 
+  if (!me.activeTenantId) {
+    return {
+      kind: "error",
+      status: 400,
+      body: { ok: false, error: "no_active_tenant" },
+    };
+  }
+
   const limit = parseLimit(req);
 
-  const rows = await deps.findSessions({ userId: me.id, limit });
+  const rows = await deps.findSessions({ userId: me.id, tenantId: me.activeTenantId, limit });
 
   const sessions: SessionListItem[] = rows.map((row) => ({
     id: row.id,

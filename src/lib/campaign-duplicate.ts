@@ -26,6 +26,7 @@ export async function duplicateCampaign(
   return prisma.$transaction(async (tx) => {
     const c = await tx.campaign.create({
       data: {
+        tenantId: src.tenantId,
         name,
         description: src.description,
         venue: src.venue,
@@ -34,6 +35,10 @@ export async function duplicateCampaign(
         templateEmail: src.templateEmail,
         templateSms: src.templateSms,
         subjectEmail: src.subjectEmail,
+        templateWhatsAppName: src.templateWhatsAppName,
+        templateWhatsAppLanguage: src.templateWhatsAppLanguage,
+        templateWhatsAppVariables: src.templateWhatsAppVariables,
+        whatsappDocumentUploadId: src.whatsappDocumentUploadId,
         eventAt: src.eventAt,
         rsvpDeadline: src.rsvpDeadline,
         brandColor: src.brandColor,

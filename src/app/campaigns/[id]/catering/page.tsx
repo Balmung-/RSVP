@@ -5,7 +5,7 @@ import { Stat } from "@/components/Stat";
 import { EmptyState } from "@/components/EmptyState";
 import { Icon } from "@/components/Icon";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
 import { parseOptions, type QuestionKind } from "@/lib/questions";
 
@@ -20,10 +20,11 @@ export const dynamic = "force-dynamic";
 export default async function CateringReport({ params }: { params: { id: string } }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, campaign.tenantId, campaign.teamId))) notFound();
 
   // Cap the attending query so a 50k-RSVP event doesn't stall the
   // render loading every row with relations. Catering reports over

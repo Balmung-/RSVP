@@ -55,58 +55,84 @@ function localHour(d: Date = new Date()): number {
 
 export type DigestOutcome =
   | { sent: false; reason: "disabled" | "too_early" | "already_sent" | "no_admins" }
-  | { sent: true; recipients: number; dateKey: string };
+  | { sent: true; recipients: number; tenants: number; dateKey: string };
 
 export async function maybeSendDailyDigest(now: Date = new Date()): Promise<DigestOutcome> {
   if (!enabled()) return { sent: false as const, reason: "disabled" };
   if (localHour(now) < digestHour()) return { sent: false as const, reason: "too_early" };
   const dateKey = localDateKey(now);
-  // Idempotency: look for a digest.sent event whose data carries this
-  // specific key-value pair. Narrowing by (1) kind, (2) a distinctive
-  // substring that includes the field name, and (3) a 36h lookback so
-  // yesterday's digest can never match eliminates the false-positive
-  // risk from a different event kind that happens to contain today's
-  // date elsewhere in its JSON.
   const dayStart = new Date(now.getTime() - 36 * 3600_000);
-  const already = await prisma.eventLog.findFirst({
+  const tenants = await prisma.tenant.findMany({
     where: {
-      kind: "digest.sent",
-      createdAt: { gte: dayStart },
-      data: { contains: `"dateKey":"${dateKey}"` },
+      archivedAt: null,
+      memberships: {
+        some: {
+          role: { in: ["owner", "admin"] },
+          user: { active: true, email: { not: "" } },
+        },
+      },
     },
-    select: { id: true },
+    select: { id: true, name: true },
   });
-  if (already) return { sent: false as const, reason: "already_sent" };
-
-  const admins = await prisma.user.findMany({
-    where: { role: "admin", active: true, email: { not: "" } },
-    select: { email: true, fullName: true },
-  });
-  if (admins.length === 0) return { sent: false as const, reason: "no_admins" };
-
-  const summary = await buildSummary(now);
-  const { subject, text, html } = renderDigest(summary, dateKey);
+  if (tenants.length === 0) return { sent: false as const, reason: "no_admins" };
 
   const provider = getEmailProvider();
-  await Promise.all(
-    admins.map((a) =>
-      provider
-        .send({ to: a.email, subject, html, text })
-        .catch((e) => {
-          // eslint-disable-next-line no-console
-          console.error("[digest] send failed", a.email, String(e).slice(0, 200));
-        }),
-    ),
-  );
+  let recipients = 0;
+  let sentTenants = 0;
 
-  await logAction({
-    kind: "digest.sent",
-    refType: "digest",
-    data: { dateKey, recipients: admins.length, ...summary.totals },
-    actorId: null,
-  });
+  for (const tenant of tenants) {
+    const already = await prisma.eventLog.findFirst({
+      where: {
+        kind: "digest.sent",
+        refType: "tenant",
+        refId: tenant.id,
+        createdAt: { gte: dayStart },
+        data: { contains: `"dateKey":"${dateKey}"` },
+      },
+      select: { id: true },
+    });
+    if (already) continue;
 
-  return { sent: true as const, recipients: admins.length, dateKey };
+    const admins = await prisma.tenantMembership.findMany({
+      where: {
+        tenantId: tenant.id,
+        role: { in: ["owner", "admin"] },
+        user: { active: true, email: { not: "" } },
+      },
+      select: {
+        user: { select: { email: true, fullName: true } },
+      },
+    });
+    if (admins.length === 0) continue;
+
+    const summary = await buildSummary(tenant.id, now);
+    const { subject, text, html } = renderDigest(summary, dateKey, tenant.name);
+
+    await Promise.all(
+      admins.map(({ user }) =>
+        provider
+          .send({ to: user.email, subject, html, text })
+          .catch((e) => {
+            // eslint-disable-next-line no-console
+            console.error("[digest] send failed", tenant.id, user.email, String(e).slice(0, 200));
+          }),
+      ),
+    );
+
+    await logAction({
+      kind: "digest.sent",
+      refType: "tenant",
+      refId: tenant.id,
+      data: { dateKey, tenantId: tenant.id, recipients: admins.length, ...summary.totals },
+      actorId: null,
+    });
+
+    recipients += admins.length;
+    sentTenants++;
+  }
+
+  if (sentTenants === 0) return { sent: false as const, reason: "already_sent" };
+  return { sent: true as const, recipients, tenants: sentTenants, dateKey };
 }
 
 // ---- summary gathering ----
@@ -118,20 +144,17 @@ type CampaignFailureRow = {
   sms: number;
 };
 
-async function buildSummary(now: Date) {
-  const since24h = new Date(now.getTime() - 24 * 3600_000);
-
+async function buildSummary(tenantId: string, now: Date) {
   // Shared liveFailures() handles the "failure minus later success"
   // filter that used to live here as a copy-pasted groupBy; this keeps
   // the digest's tally in lockstep with the /deliverability page and
   // the campaign workspace banner.
-  const [live, newUnsubs, pendingApprovals, inboxToReview, activeCampaignCount] =
+  const [live, pendingApprovals, inboxToReview, activeCampaignCount] =
     await Promise.all([
-      liveFailures(),
-      prisma.unsubscribe.count({ where: { createdAt: { gte: since24h } } }),
-      prisma.sendApproval.count({ where: { status: "pending" } }),
-      prisma.inboundMessage.count({ where: { status: "needs_review" } }),
-      prisma.campaign.count({ where: { status: { in: ["draft", "active", "sending"] } } }),
+      liveFailures({ campaignWhere: { tenantId } }),
+      prisma.sendApproval.count({ where: { status: "pending", campaign: { tenantId } } }),
+      prisma.inboundMessage.count({ where: { status: "needs_review", invitee: { campaign: { tenantId } } } }),
+      prisma.campaign.count({ where: { tenantId, status: { in: ["draft", "active", "sending"] } } }),
     ]);
 
   let liveEmail = 0;
@@ -152,7 +175,7 @@ async function buildSummary(now: Date) {
   let topCampaigns: CampaignFailureRow[] = [];
   if (perCampaign.size > 0) {
     const campaigns = await prisma.campaign.findMany({
-      where: { id: { in: Array.from(perCampaign.keys()) } },
+      where: { tenantId, id: { in: Array.from(perCampaign.keys()) } },
       select: { id: true, name: true },
     });
     topCampaigns = campaigns
@@ -170,7 +193,6 @@ async function buildSummary(now: Date) {
       liveEmail,
       liveSms,
       liveTotal: liveEmail + liveSms,
-      newUnsubs,
       pendingApprovals,
       inboxToReview,
       activeCampaignCount,
@@ -183,12 +205,13 @@ async function buildSummary(now: Date) {
 function renderDigest(
   summary: Awaited<ReturnType<typeof buildSummary>>,
   dateKey: string,
+  tenantName: string,
 ): { subject: string; text: string; html: string } {
   const brand = BRAND();
   const url = APP_URL().replace(/\/$/, "");
 
   const lines: string[] = [];
-  lines.push(`${brand} · Daily deliverability digest · ${dateKey}`);
+  lines.push(`${brand} · ${tenantName} · Daily deliverability digest · ${dateKey}`);
   lines.push("");
   lines.push(`Active campaigns: ${summary.totals.activeCampaignCount.toLocaleString()}`);
   lines.push(
@@ -197,7 +220,6 @@ function renderDigest(
         ? ` (${summary.totals.liveEmail} email · ${summary.totals.liveSms} SMS)`
         : ""),
   );
-  lines.push(`New unsubscribes (24h): ${summary.totals.newUnsubs.toLocaleString()}`);
   lines.push(`Pending approvals: ${summary.totals.pendingApprovals.toLocaleString()}`);
   lines.push(`Inbox items to review: ${summary.totals.inboxToReview.toLocaleString()}`);
 
@@ -221,7 +243,6 @@ function renderDigest(
   const rows = [
     row("Active campaigns", summary.totals.activeCampaignCount),
     row("Live send failures", summary.totals.liveTotal, summary.totals.liveTotal > 0 ? "fail" : undefined),
-    row("New unsubscribes (24h)", summary.totals.newUnsubs),
     row("Pending approvals", summary.totals.pendingApprovals, summary.totals.pendingApprovals > 0 ? "warn" : undefined),
     row("Inbox to review", summary.totals.inboxToReview, summary.totals.inboxToReview > 0 ? "warn" : undefined),
   ].join("");
@@ -239,7 +260,7 @@ function renderDigest(
 
   const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#fafafa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#141414;line-height:1.55">
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;padding:28px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 28px rgba(0,0,0,.06)">
-    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8e8e8a;margin-bottom:6px">${escape(brand)} · daily digest</div>
+    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8e8e8a;margin-bottom:6px">${escape(brand)} · ${escape(tenantName)} · daily digest</div>
     <div style="font-size:22px;font-weight:500;letter-spacing:-.01em;margin-bottom:18px">${escape(dateKey)}</div>
     <table role="presentation" style="width:100%;border-collapse:collapse;font-size:14px">
       ${rows}
@@ -250,8 +271,8 @@ function renderDigest(
 </body></html>`;
 
   const subject = summary.totals.liveTotal > 0
-    ? `[${brand}] Digest · ${summary.totals.liveTotal} failing · ${dateKey}`
-    : `[${brand}] Digest · all clear · ${dateKey}`;
+    ? `[${brand}] ${tenantName} · Digest · ${summary.totals.liveTotal} failing · ${dateKey}`
+    : `[${brand}] ${tenantName} · Digest · all clear · ${dateKey}`;
 
   return { subject, text, html };
 }

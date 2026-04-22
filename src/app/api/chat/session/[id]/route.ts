@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { getCurrentUser } from "@/lib/auth";
+import { activeTenantIdOf, getCurrentUser } from "@/lib/auth";
 import { buildToolCtx } from "@/lib/ai/ctx";
 import { refreshLiveSnapshotWidgets } from "@/lib/ai/live-snapshot-widgets";
 import { tryRefreshSummaryForSnapshot } from "@/lib/ai/workspace-summary";
@@ -24,11 +24,15 @@ export async function GET(
   { params }: { params: { id: string } },
 ) {
   const me = await getCurrentUser();
+  const tenantId = activeTenantIdOf(me);
+  if (me && !tenantId) {
+    return NextResponse.json({ ok: false, error: "no_active_tenant" }, { status: 400 });
+  }
   const result = await hydrateSessionHandler(params.id, {
     getCurrentUser: async () => me,
     findSession: (userId, sessionId) =>
       prisma.chatSession.findFirst({
-        where: { id: sessionId, userId, archivedAt: null },
+        where: { id: sessionId, userId, tenantId: tenantId ?? undefined, archivedAt: null },
         select: { id: true, createdAt: true, updatedAt: true },
       }),
     findMessages: (sessionId) =>

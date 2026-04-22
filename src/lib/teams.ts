@@ -26,6 +26,10 @@ export type TeamMutationResult =
   | { ok: true; teamId: string }
   | { ok: false; reason: "missing_name" | "duplicate" | "not_found" | "invalid_slug" };
 
+export type TeamMemberMutationResult =
+  | { ok: true }
+  | { ok: false; reason: "not_found" };
+
 function slugify(name: string): string {
   return name
     .toLowerCase()
@@ -36,7 +40,7 @@ function slugify(name: string): string {
     .slice(0, 50);
 }
 
-export async function createTeam(input: TeamInput): Promise<TeamMutationResult> {
+export async function createTeam(tenantId: string, input: TeamInput): Promise<TeamMutationResult> {
   const name = input.name.trim().slice(0, 100);
   if (!name) return { ok: false, reason: "missing_name" };
   const slug = input.slug?.trim() || slugify(name);
@@ -45,6 +49,7 @@ export async function createTeam(input: TeamInput): Promise<TeamMutationResult> 
   try {
     const row = await prisma.team.create({
       data: {
+        tenantId,
         name,
         slug,
         color,
@@ -58,13 +63,15 @@ export async function createTeam(input: TeamInput): Promise<TeamMutationResult> 
   }
 }
 
-export async function updateTeam(teamId: string, input: TeamInput): Promise<TeamMutationResult> {
+export async function updateTeam(tenantId: string, teamId: string, input: TeamInput): Promise<TeamMutationResult> {
   const name = input.name.trim().slice(0, 100);
   if (!name) return { ok: false, reason: "missing_name" };
   const slug = input.slug?.trim() || slugify(name);
   if (!/^[a-z0-9-]{1,50}$/.test(slug)) return { ok: false, reason: "invalid_slug" };
   const color = input.color && /^#[0-9A-Fa-f]{3,8}$/.test(input.color) ? input.color : null;
   try {
+    const existing = await prisma.team.findFirst({ where: { id: teamId, tenantId }, select: { id: true } });
+    if (!existing) return { ok: false, reason: "not_found" };
     await prisma.team.update({
       where: { id: teamId },
       data: {
@@ -82,21 +89,21 @@ export async function updateTeam(teamId: string, input: TeamInput): Promise<Team
   }
 }
 
-export async function archiveTeam(teamId: string) {
-  await prisma.team.update({ where: { id: teamId }, data: { archivedAt: new Date() } });
+export async function archiveTeam(tenantId: string, teamId: string) {
+  await prisma.team.updateMany({ where: { id: teamId, tenantId }, data: { archivedAt: new Date() } });
 }
 
-export async function unarchiveTeam(teamId: string) {
-  await prisma.team.update({ where: { id: teamId }, data: { archivedAt: null } });
+export async function unarchiveTeam(tenantId: string, teamId: string) {
+  await prisma.team.updateMany({ where: { id: teamId, tenantId }, data: { archivedAt: null } });
 }
 
-export async function deleteTeamRecord(teamId: string) {
-  await prisma.team.delete({ where: { id: teamId } });
+export async function deleteTeamRecord(tenantId: string, teamId: string) {
+  await prisma.team.deleteMany({ where: { id: teamId, tenantId } });
 }
 
-export async function listTeams(opts: { includeArchived?: boolean } = {}) {
+export async function listTeams(tenantId: string, opts: { includeArchived?: boolean } = {}) {
   return prisma.team.findMany({
-    where: opts.includeArchived ? {} : { archivedAt: null },
+    where: { tenantId, ...(opts.includeArchived ? {} : { archivedAt: null }) },
     orderBy: [{ name: "asc" }],
     include: {
       _count: { select: { memberships: true, campaigns: true } },
@@ -104,16 +111,35 @@ export async function listTeams(opts: { includeArchived?: boolean } = {}) {
   });
 }
 
-export async function addMember(teamId: string, userId: string, role: TeamRole) {
-  return prisma.teamMembership.upsert({
+export async function addMember(
+  tenantId: string,
+  teamId: string,
+  userId: string,
+  role: TeamRole,
+): Promise<TeamMemberMutationResult> {
+  const [team, membership] = await Promise.all([
+    prisma.team.findFirst({
+      where: { id: teamId, tenantId },
+      select: { id: true },
+    }),
+    prisma.tenantMembership.findUnique({
+      where: { tenantId_userId: { tenantId, userId } },
+      select: { tenantId: true },
+    }),
+  ]);
+  if (!team || !membership) return { ok: false, reason: "not_found" };
+  await prisma.teamMembership.upsert({
     where: { teamId_userId: { teamId, userId } },
     create: { teamId, userId, role },
     update: { role },
   });
+  return { ok: true };
 }
 
-export async function removeMember(teamId: string, userId: string) {
-  await prisma.teamMembership.deleteMany({ where: { teamId, userId } });
+export async function removeMember(tenantId: string, teamId: string, userId: string) {
+  await prisma.teamMembership.deleteMany({
+    where: { teamId, userId, team: { tenantId } },
+  });
 }
 
 export async function userTeams(userId: string) {
@@ -129,9 +155,10 @@ export async function userTeams(userId: string) {
 // along. Returns an empty array for users with no memberships —
 // callers decide whether to interpret that as "no results" or
 // "office-wide" (e.g. admins see everything; scoped views see nothing).
-export async function teamIdsForUser(userId: string): Promise<string[]> {
+export async function teamIdsForUser(userId: string, tenantId: string | null | undefined): Promise<string[]> {
+  if (!tenantId) return [];
   const rows = await prisma.teamMembership.findMany({
-    where: { userId },
+    where: { userId, team: { tenantId, archivedAt: null } },
     select: { teamId: true },
   });
   return rows.map((r) => r.teamId);
@@ -149,13 +176,20 @@ export async function teamIdsForUser(userId: string): Promise<string[]> {
 export async function scopedCampaignWhere(
   userId: string,
   isAdmin: boolean,
+  tenantId: string | null | undefined,
 ): Promise<Prisma.CampaignWhereInput> {
-  if (isAdmin || !teamsEnabled()) return {};
-  const ids = await teamIdsForUser(userId);
+  if (!tenantId) return { id: "__no_tenant__" };
+  if (isAdmin || !teamsEnabled()) return { tenantId };
+  const ids = await teamIdsForUser(userId, tenantId);
   return {
-    OR: [
-      { teamId: null },
-      ...(ids.length > 0 ? [{ teamId: { in: ids } }] : []),
+    AND: [
+      { tenantId },
+      {
+        OR: [
+          { teamId: null },
+          ...(ids.length > 0 ? [{ teamId: { in: ids } }] : []),
+        ],
+      },
     ],
   };
 }
@@ -166,16 +200,19 @@ export async function scopedCampaignWhere(
 export async function canSeeCampaign(
   userId: string,
   isAdmin: boolean,
+  tenantId: string | null | undefined,
   campaignId: string,
 ): Promise<boolean> {
-  if (isAdmin || !teamsEnabled()) return true;
+  if (!tenantId) return false;
   const c = await prisma.campaign.findUnique({
     where: { id: campaignId },
-    select: { teamId: true },
+    select: { teamId: true, tenantId: true },
   });
   if (!c) return false;
+  if (c.tenantId !== tenantId) return false;
+  if (isAdmin || !teamsEnabled()) return true;
   if (c.teamId === null) return true;
-  const ids = await teamIdsForUser(userId);
+  const ids = await teamIdsForUser(userId, tenantId);
   return ids.includes(c.teamId);
 }
 
@@ -185,10 +222,13 @@ export async function canSeeCampaign(
 export async function canSeeCampaignRow(
   userId: string,
   isAdmin: boolean,
+  tenantId: string | null | undefined,
+  campaignTenantId: string,
   teamId: string | null,
 ): Promise<boolean> {
+  if (!tenantId || campaignTenantId !== tenantId) return false;
   if (isAdmin || !teamsEnabled()) return true;
   if (teamId === null) return true;
-  const ids = await teamIdsForUser(userId);
+  const ids = await teamIdsForUser(userId, tenantId);
   return ids.includes(teamId);
 }

@@ -1,5 +1,5 @@
-import type { User } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
+import type { AuthUser } from "@/lib/auth";
 import type { WidgetKind, WidgetSlot } from "../widget-validate";
 
 // Contracts for the AI tool registry. Every capability the chat layer
@@ -29,7 +29,7 @@ export type ToolScope = "read" | "write" | "destructive";
 // See the Push 2 audit in `Agent chat.md` for the concrete leak we
 // caught with this mistake.
 export type ToolCtx = {
-  user: User;
+  user: AuthUser;
   isAdmin: boolean;
   locale: "en" | "ar";
   // Composable prisma WHERE fragment from scopedCampaignWhere().

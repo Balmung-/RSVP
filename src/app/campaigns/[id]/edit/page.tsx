@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { logAction } from "@/lib/audit";
 import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
@@ -18,11 +18,12 @@ export const dynamic = "force-dynamic";
 async function updateCampaign(id: string, formData: FormData) {
   "use server";
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const isAdmin = hasRole(me, "admin");
   // Must be able to see the campaign in the first place. Prevents
   // an editor POST-ing updates to a team-B campaignId by replaying
   // a bound action reference.
-  if (!(await canSeeCampaign(me.id, isAdmin, id))) redirect(`/campaigns`);
+  if (!(await canSeeCampaign(me.id, isAdmin, tenantId, id))) redirect(`/campaigns`);
 
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) redirect(`/campaigns/${id}/edit`);
@@ -42,7 +43,7 @@ async function updateCampaign(id: string, formData: FormData) {
     if (isAdmin) {
       teamPatch = { teamId: submitted };
     } else {
-      const allowed = new Set(await teamIdsForUser(me.id));
+      const allowed = new Set(await teamIdsForUser(me.id, tenantId));
       if (submitted === null || allowed.has(submitted)) {
         teamPatch = { teamId: submitted };
       }
@@ -70,6 +71,7 @@ async function updateCampaign(id: string, formData: FormData) {
     const owned = await prisma.fileUpload.findFirst({
       where: {
         id: whatsappDocumentUploadId,
+        tenantId,
         uploadedBy: me.id,
         contentType: PDF_MIME,
       },
@@ -106,10 +108,11 @@ async function updateCampaign(id: string, formData: FormData) {
 async function deleteCampaign(id: string) {
   "use server";
   const me = await requireRole("admin");
+  const tenantId = requireActiveTenantId(me);
   // Admins see every campaign, but run the check anyway so the action
   // still returns cleanly if the campaignId was spoofed to something
   // that doesn't exist (rather than throwing on delete).
-  if (!(await canSeeCampaign(me.id, true, id))) redirect(`/campaigns`);
+  if (!(await canSeeCampaign(me.id, true, tenantId, id))) redirect(`/campaigns`);
   const campaign = await prisma.campaign.findUnique({ where: { id }, select: { name: true } });
   await prisma.campaign.delete({ where: { id } });
   await logAction({
@@ -124,9 +127,10 @@ async function deleteCampaign(id: string) {
 export default async function EditCampaign({ params }: { params: { id: string } }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const c = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!c) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), c.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, c.tenantId, c.teamId))) notFound();
   const inviteeCount = await prisma.invitee.count({ where: { campaignId: c.id } });
   // P17-D.3 + D.4 + D.5 + D.6: resolve the attached WhatsApp PDF's
   // {id, filename} pair ONLY when the current viewer owns the
@@ -160,6 +164,7 @@ export default async function EditCampaign({ params }: { params: { id: string } 
     ? await prisma.fileUpload.findFirst({
         where: {
           id: c.whatsappDocumentUploadId,
+          tenantId,
           uploadedBy: me.id,
           contentType: PDF_MIME,
         },
@@ -173,11 +178,12 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   // and submits don't silently orphan it). Admins see every team.
   const teams = teamsEnabled()
     ? hasRole(me, "admin")
-      ? await prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+      ? await prisma.team.findMany({ where: { tenantId, archivedAt: null }, orderBy: { name: "asc" } })
       : await prisma.team.findMany({
           where: {
+            tenantId,
             archivedAt: null,
-            id: { in: [...new Set([...(await teamIdsForUser(me.id)), ...(c.teamId ? [c.teamId] : [])])] },
+            id: { in: [...new Set([...(await teamIdsForUser(me.id, tenantId)), ...(c.teamId ? [c.teamId] : [])])] },
           },
           orderBy: { name: "asc" },
         })

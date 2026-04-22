@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { ArrivalsBoard } from "@/components/ArrivalsBoard";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
@@ -13,9 +13,10 @@ const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 export default async function Arrivals({ params }: { params: { id: string } }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, campaign.tenantId, campaign.teamId))) notFound();
 
   // Server-render the first paint so the board isn't empty on load. Later
   // updates are pulled by the client via the ETag-aware JSON endpoint.

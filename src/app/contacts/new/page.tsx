@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { ContactForm } from "@/components/ContactForm";
-import { getCurrentUser, requireRole } from "@/lib/auth";
+import { getCurrentUser, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { createContact, VIP_TIERS, type VipTier } from "@/lib/contacts";
 import { setFlash } from "@/lib/flash";
 
@@ -24,6 +24,7 @@ async function add(formData: FormData) {
     ? (tierRaw as VipTier)
     : "standard";
   const res = await createContact(
+    requireActiveTenantId(me),
     {
       fullName: String(formData.get("fullName") ?? ""),
       title: String(formData.get("title") ?? ""),
@@ -48,6 +49,7 @@ async function add(formData: FormData) {
 export default async function NewContact({ searchParams }: { searchParams: { e?: string } }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  requireActiveTenantId(me);
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
 
   return (

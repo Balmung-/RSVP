@@ -1,6 +1,6 @@
 import { searchContacts, VIP_LABEL, type VipTier } from "@/lib/contacts";
 import { CONTACTS_TABLE_WIDGET_KEY } from "../widgetKeys";
-import type { ToolDef, ToolResult } from "./types";
+import type { ToolDef, ToolResult, ToolCtx } from "./types";
 
 // Text search across the contact book, optionally narrowed by VIP
 // tier. Matches the `searchContacts` helper used by
@@ -94,10 +94,12 @@ export const searchContactsTool: ToolDef<Input> = {
     }
     return out;
   },
-  async handler(input): Promise<ToolResult> {
+  async handler(input, ctx?: ToolCtx): Promise<ToolResult> {
+    if (!ctx?.user.activeTenantId) throw new Error("no_active_tenant");
     const tier = input.tier ?? "all";
     const limit = input.limit ?? DEFAULT_LIMIT;
     const { total, rows } = await searchContacts({
+      tenantId: ctx.user.activeTenantId,
       q: input.query,
       tier,
       includeArchived: input.include_archived ?? false,

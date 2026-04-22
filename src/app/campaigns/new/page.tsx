@@ -5,7 +5,7 @@ import { Shell } from "@/components/Shell";
 import { CampaignForm } from "@/components/CampaignForm";
 import { TemplatePicker } from "@/components/TemplatePicker";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole, hasRole, getCurrentUser } from "@/lib/auth";
+import { requireActiveTenantId, requireRole, hasRole, getCurrentUser } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
 import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
@@ -18,6 +18,7 @@ export const dynamic = "force-dynamic";
 async function createCampaign(formData: FormData) {
   "use server";
   const me = await requireRole("editor");
+  const tenantId = requireActiveTenantId(me);
   const name = String(formData.get("name") ?? "").trim().slice(0, 200);
   if (!name) return;
   const rawLocale = String(formData.get("locale") ?? "en").toLowerCase();
@@ -35,7 +36,7 @@ async function createCampaign(formData: FormData) {
     if (hasRole(me, "admin")) {
       teamId = teamIdRaw;
     } else {
-      const allowed = new Set(await teamIdsForUser(me.id));
+      const allowed = new Set(await teamIdsForUser(me.id, tenantId));
       teamId = allowed.has(teamIdRaw) ? teamIdRaw : null;
     }
   }
@@ -73,6 +74,7 @@ async function createCampaign(formData: FormData) {
   const c = await prisma.campaign.create({
     data: {
       name,
+      tenantId,
       description: String(formData.get("description") ?? "").trim().slice(0, 2000) || null,
       venue: String(formData.get("venue") ?? "").trim().slice(0, 200) || null,
       locale,
@@ -101,24 +103,25 @@ export default async function NewCampaign({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const isAdmin = hasRole(me, "admin");
   const [teams, templates] = await Promise.all([
     teamsEnabled()
       ? isAdmin
-        ? prisma.team.findMany({ where: { archivedAt: null }, orderBy: { name: "asc" } })
+        ? prisma.team.findMany({ where: { tenantId, archivedAt: null }, orderBy: { name: "asc" } })
         : prisma.team.findMany({
-            where: { archivedAt: null, id: { in: await teamIdsForUser(me.id) } },
+            where: { tenantId, archivedAt: null, id: { in: await teamIdsForUser(me.id, tenantId) } },
             orderBy: { name: "asc" },
           })
       : Promise.resolve([]),
-    listTemplates(),
+    listTemplates(tenantId),
   ]);
 
   // Prefill from a template if requested. We don't write anything — just
   // seed the form's defaultValues.
   let preset: Partial<Campaign> | null = null;
   if (searchParams.tpl) {
-    const tpl = await getTemplate(searchParams.tpl);
+    const tpl = await getTemplate(tenantId, searchParams.tpl);
     if (tpl) {
       preset = {
         locale: tpl.locale,

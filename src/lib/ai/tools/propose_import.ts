@@ -225,7 +225,12 @@ export const proposeImportTool: ToolDef<Input> = {
     const report: PlannerReport =
       input.target === "contacts"
         ? await runImport(
-            { target: "contacts", text: ingest.extractedText, createdBy: null },
+            {
+              target: "contacts",
+              tenantId: ctx.user.activeTenantId!,
+              text: ingest.extractedText,
+              createdBy: null,
+            },
             "preview",
           )
         : await runImport(

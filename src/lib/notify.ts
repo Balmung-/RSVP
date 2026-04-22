@@ -16,30 +16,26 @@ type NotifyKind =
 const APP_URL = () => process.env.APP_URL ?? "http://localhost:3000";
 const BRAND = () => process.env.APP_BRAND ?? "Einai";
 
-export async function notifyAdmins(
+async function notifyPeople(
+  recipients: Array<{ email: string; fullName: string | null }>,
   kind: NotifyKind,
   subject: string,
   body: string,
   linkHref?: string,
 ) {
-  try {
-    const admins = await prisma.user.findMany({
-      where: { role: "admin", active: true, email: { not: "" } },
-      select: { email: true, fullName: true },
-    });
-    if (admins.length === 0) return;
-    const provider = getEmailProvider();
-    const fullLink = linkHref ? `${APP_URL().replace(/\/$/, "")}${linkHref}` : null;
+  if (recipients.length === 0) return;
+  const provider = getEmailProvider();
+  const fullLink = linkHref ? `${APP_URL().replace(/\/$/, "")}${linkHref}` : null;
 
-    const text = [
-      body.trim(),
-      fullLink ? `\nOpen: ${fullLink}` : null,
-      `\n— ${BRAND()}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+  const text = [
+    body.trim(),
+    fullLink ? `\nOpen: ${fullLink}` : null,
+    `\nâ€” ${BRAND()}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-    const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#fafafa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#141414;line-height:1.55">
+  const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#fafafa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#141414;line-height:1.55">
   <div style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:14px;padding:28px 28px;box-shadow:0 1px 2px rgba(0,0,0,0.04),0 8px 28px rgba(0,0,0,0.06)">
     <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8e8e8a;margin-bottom:6px">${escape(kind)}</div>
     <div style="font-size:14px;line-height:20px;white-space:pre-wrap;color:#141414">${escape(body)}</div>
@@ -51,20 +47,74 @@ export async function notifyAdmins(
   </div>
 </body></html>`;
 
-    // Don't await each send — fire in parallel, catch individually.
-    await Promise.all(
-      admins.map((a) =>
-        provider
-          .send({ to: a.email, subject: `[${BRAND()}] ${subject}`, html, text })
-          .catch((err) => {
-            // eslint-disable-next-line no-console
-            console.error("[notify] admin send failed", a.email, String(err).slice(0, 200));
-          }),
-      ),
-    );
+  await Promise.all(
+    recipients.map((recipient) =>
+      provider
+        .send({
+          to: recipient.email,
+          subject: `[${BRAND()}] ${subject}`,
+          html,
+          text,
+        })
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error("[notify] admin send failed", recipient.email, String(err).slice(0, 200));
+        }),
+    ),
+  );
+}
+
+export async function notifyAdmins(
+  kind: NotifyKind,
+  subject: string,
+  body: string,
+  linkHref?: string,
+) {
+  try {
+    const admins = await prisma.user.findMany({
+      where: { role: "admin", active: true, email: { not: "" } },
+      select: { email: true, fullName: true },
+    });
+    await notifyPeople(admins, kind, subject, body, linkHref);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error("[notify] notifyAdmins failed", String(err).slice(0, 200));
+  }
+}
+
+export async function notifyTenantAdmins(
+  tenantId: string,
+  kind: NotifyKind,
+  subject: string,
+  body: string,
+  linkHref?: string,
+) {
+  try {
+    const admins = await prisma.tenantMembership.findMany({
+      where: {
+        tenantId,
+        role: { in: ["owner", "admin"] },
+        user: { active: true, email: { not: "" } },
+      },
+      select: {
+        user: {
+          select: {
+            email: true,
+            fullName: true,
+          },
+        },
+      },
+    });
+    await notifyPeople(
+      admins.map((membership) => membership.user),
+      kind,
+      subject,
+      body,
+      linkHref,
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[notify] notifyTenantAdmins failed", String(err).slice(0, 200));
   }
 }
 
@@ -77,7 +127,7 @@ function escape(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// VIP escalation — fired once per first-time RSVP submission when the
+// VIP escalation â€” fired once per first-time RSVP submission when the
 // invitee's linked Contact carries a non-standard vipTier. Louder than
 // the generic rsvp.high_value path: tier-prefixed subject (so a royal
 // arrival rises to the top of an admin's inbox), and a details block
@@ -104,7 +154,7 @@ export async function notifyVipResponse(params: {
     vip: "VIP",
     standard: "",
   };
-  const urgency = params.tier === "royal" ? "Urgent · " : "";
+  const urgency = params.tier === "royal" ? "Urgent Â· " : "";
   const verb = params.attending
     ? `is attending${params.guests > 0 ? ` (+${params.guests})` : ""}`
     : "has declined";
@@ -125,7 +175,7 @@ export async function notifyVipResponse(params: {
   if (params.message) notes.push(`Note from guest:\n${params.message}`);
 
   const body = [headline, notes.length > 0 ? "\n\n" + notes.join("\n\n") : ""].join("");
-  const subject = `${urgency}${tierLabel[params.tier]} RSVP · ${params.inviteeName}`;
+  const subject = `${urgency}${tierLabel[params.tier]} RSVP Â· ${params.inviteeName}`;
 
   await notifyAdmins(
     "rsvp.vip",

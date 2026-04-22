@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
 import { buildArrivalsFeed } from "@/lib/arrivals";
 import { KioskBoard } from "@/components/KioskBoard";
@@ -17,13 +17,14 @@ const TZ = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
 export default async function KioskPage({ params }: { params: { id: string } }) {
   const me = await getCurrentUser();
   if (!me) redirect(`/login?returnTo=${encodeURIComponent(`/kiosk/${params.id}`)}`);
+  const tenantId = requireActiveTenantId(me);
 
   const campaign = await prisma.campaign.findUnique({
     where: { id: params.id },
-    select: { id: true, name: true, status: true, teamId: true },
+    select: { id: true, name: true, status: true, tenantId: true, teamId: true },
   });
   if (!campaign) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, campaign.tenantId, campaign.teamId))) notFound();
 
   // Kiosk tablets sit at the door, 50 rows is plenty on screen.
   const initial = await buildArrivalsFeed(params.id, { take: 50 });

@@ -123,7 +123,12 @@ test("parity: contacts — preview counters equal commit counters on an empty DB
     ["Carol", ""],
     ["Dan", "dan@example.com"],
   ]);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   const deps = makeDeps(store);
@@ -167,7 +172,12 @@ test("parity: contacts — preview-then-commit-twice converges", async () => {
     ["Alice", "alice@example.com"],
     ["Bob", "bob@example.com"],
   ]);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   const deps = makeDeps(store);
@@ -262,7 +272,12 @@ test("commit with all-existing dupes: no createMany, no audit — EventLog stays
     ["Alice", "alice@example.com"],
     ["Bob", "bob@example.com"],
   ]);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   // First commit seeds the store with both rows + writes one audit.
@@ -340,7 +355,12 @@ test("commit-only: preview does not write rows or audit, commit does both", asyn
     ["Alice", "alice@example.com"],
     ["Bob", "bob@example.com"],
   ]);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   const deps = makeDeps(store);
@@ -394,7 +414,12 @@ test("capped: total reports pre-cap row count; capped flag fires", async () => {
     lines.push([`User${i}`, `user${i}@example.com`]);
   }
   const text = csv(lines);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   const deps = makeDeps(store);
@@ -428,7 +453,12 @@ test("empty after normalise: no deps calls, but report shape is still valid", as
     ["Nameless", ""],
     ["", "bad@example.com"],
   ]);
-  const inputs: PlannerInputs = { target: "contacts", text, createdBy: null };
+  const inputs: PlannerInputs = {
+    target: "contacts",
+    tenantId: "tenant-1",
+    text,
+    createdBy: null,
+  };
 
   const store = makeStore();
   const baseDeps = makeDeps(store);
@@ -474,12 +504,12 @@ test("mixed-target parity: same csv, both targets, per-target parity holds", asy
   // that the counters match on empty DB.
   {
     const preview = await runImport(
-      { target: "contacts", text, createdBy: null },
+      { target: "contacts", tenantId: "tenant-1", text, createdBy: null },
       "preview",
       makeDeps(makeStore()),
     );
     const commit = await runImport(
-      { target: "contacts", text, createdBy: null },
+      { target: "contacts", tenantId: "tenant-1", text, createdBy: null },
       "commit",
       makeDeps(makeStore()),
     );

@@ -4,7 +4,7 @@ import { Shell } from "@/components/Shell";
 import { Icon } from "@/components/Icon";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
-import { getCurrentUser, hasRole, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { listTemplates, loadGovernmentTemplatePack, type TemplateKind } from "@/lib/templates";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
 import { setFlash } from "@/lib/flash";
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 async function loadStarters() {
   "use server";
   const me = await requireRole("editor");
-  const res = await loadGovernmentTemplatePack(me.id);
+  const res = await loadGovernmentTemplatePack(requireActiveTenantId(me), me.id);
   await logAction({
     kind: "template.starter_pack_loaded",
     actorId: me.id,
@@ -39,10 +39,11 @@ export default async function TemplatesPage({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
 
   const kind = searchParams.kind === "email" || searchParams.kind === "sms" ? (searchParams.kind as TemplateKind) : undefined;
   const locale = searchParams.locale === "ar" || searchParams.locale === "en" ? searchParams.locale : undefined;
-  const templates = await listTemplates({ kind, locale });
+  const templates = await listTemplates(tenantId, { kind, locale });
 
   const canWrite = hasRole(me, "editor");
 

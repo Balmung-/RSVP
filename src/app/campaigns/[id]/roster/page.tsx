@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { canSeeCampaignRow } from "@/lib/teams";
 import { PrintButton } from "@/components/PrintButton";
 
@@ -26,9 +26,10 @@ export default async function Roster({
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
   const campaign = await prisma.campaign.findUnique({ where: { id: params.id } });
   if (!campaign) notFound();
-  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), campaign.teamId))) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, campaign.tenantId, campaign.teamId))) notFound();
   // Print roster caps at 5000 rows — a paper roster beyond that is
   // unreadable anyway, and without a cap we'd load and render the
   // entire invitee table into memory for big events.

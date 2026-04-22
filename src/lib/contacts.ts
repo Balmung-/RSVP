@@ -70,6 +70,7 @@ function normalize(input: ContactInput) {
 }
 
 export async function createContact(
+  tenantId: string,
   input: ContactInput,
   createdBy?: string | null,
 ): Promise<ContactMutationResult> {
@@ -79,7 +80,7 @@ export async function createContact(
   const key = dedupKey(n.data.email, n.data.phoneE164);
   try {
     const row = await prisma.contact.create({
-      data: { ...n.data, dedupKey: key, createdBy: createdBy ?? null },
+      data: { tenantId, ...n.data, dedupKey: key, createdBy: createdBy ?? null },
     });
     return { ok: true, contactId: row.id };
   } catch (e) {
@@ -89,17 +90,18 @@ export async function createContact(
 }
 
 export async function updateContact(
+  tenantId: string,
   contactId: string,
   input: ContactInput,
 ): Promise<ContactMutationResult> {
-  const existing = await prisma.contact.findUnique({ where: { id: contactId } });
+  const existing = await prisma.contact.findFirst({ where: { id: contactId, tenantId } });
   if (!existing) return { ok: false, reason: "not_found" };
   const n = normalize(input);
   if ("error" in n && n.error) return { ok: false, reason: n.error };
   if (!("ok" in n)) return { ok: false, reason: "missing_name" };
   const key = dedupKey(n.data.email, n.data.phoneE164);
   try {
-    await prisma.contact.update({ where: { id: contactId }, data: { ...n.data, dedupKey: key } });
+    await prisma.contact.updateMany({ where: { id: contactId, tenantId }, data: { ...n.data, dedupKey: key } });
     return { ok: true, contactId };
   } catch (e) {
     if (isUniqueViolation(e)) return { ok: false, reason: "duplicate" };
@@ -107,22 +109,22 @@ export async function updateContact(
   }
 }
 
-export async function archiveContact(contactId: string) {
-  await prisma.contact.update({
-    where: { id: contactId },
+export async function archiveContact(tenantId: string, contactId: string) {
+  await prisma.contact.updateMany({
+    where: { id: contactId, tenantId },
     data: { archivedAt: new Date() },
   });
 }
 
-export async function unarchiveContact(contactId: string) {
-  await prisma.contact.update({
-    where: { id: contactId },
+export async function unarchiveContact(tenantId: string, contactId: string) {
+  await prisma.contact.updateMany({
+    where: { id: contactId, tenantId },
     data: { archivedAt: null },
   });
 }
 
-export async function deleteContactRecord(contactId: string) {
-  await prisma.contact.delete({ where: { id: contactId } });
+export async function deleteContactRecord(tenantId: string, contactId: string) {
+  await prisma.contact.deleteMany({ where: { id: contactId, tenantId } });
 }
 
 // Find, filter, search. Admin UI consumer.
@@ -162,6 +164,7 @@ export function contactOptOutState(
 }
 
 export async function searchContacts(params: {
+  tenantId: string;
   q?: string;
   tier?: VipTier | "all";
   includeArchived?: boolean;
@@ -169,6 +172,7 @@ export async function searchContacts(params: {
   take?: number;
 }) {
   const where: Prisma.ContactWhereInput = {
+    tenantId: params.tenantId,
     ...(params.includeArchived ? {} : { archivedAt: null }),
     ...(params.tier && params.tier !== "all" ? { vipTier: params.tier } : {}),
     ...(params.q && params.q.trim()
@@ -266,11 +270,12 @@ export type ContactImportReport = {
 };
 
 export async function importContacts(
+  tenantId: string,
   text: string,
   createdBy?: string | null,
 ): Promise<ContactImportReport> {
   const r = await runImport(
-    { target: "contacts", text, createdBy: createdBy ?? null },
+    { target: "contacts", tenantId, text, createdBy: createdBy ?? null },
     "commit",
   );
   return {

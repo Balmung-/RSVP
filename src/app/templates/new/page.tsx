@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { TemplateForm } from "@/components/TemplateForm";
-import { requireRole } from "@/lib/auth";
+import { requireActiveTenantId, requireRole } from "@/lib/auth";
 import { createTemplate, TEMPLATE_KINDS, type TemplateKind } from "@/lib/templates";
 import { setFlash } from "@/lib/flash";
 import { logAction } from "@/lib/audit";
@@ -17,6 +17,7 @@ async function create(formData: FormData) {
   const localeRaw = String(formData.get("locale") ?? "en");
   const locale: "en" | "ar" = localeRaw === "ar" ? "ar" : "en";
   const res = await createTemplate(
+    requireActiveTenantId(me),
     {
       name: String(formData.get("name") ?? ""),
       kind,
@@ -45,7 +46,8 @@ const ERROR_MSG: Record<string, string> = {
 };
 
 export default async function NewTemplate({ searchParams }: { searchParams: { e?: string } }) {
-  await requireRole("editor");
+  const me = await requireRole("editor");
+  requireActiveTenantId(me);
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
   return (
     <Shell

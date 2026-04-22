@@ -48,6 +48,7 @@ export function validateUpload(file: { type: string; size: number }, kind: Uploa
 }
 
 export async function storeUpload(params: {
+  tenantId: string;
   filename: string;
   contentType: string;
   size: number;
@@ -57,6 +58,7 @@ export async function storeUpload(params: {
   const row = await prisma.fileUpload.create({
     data: {
       filename: params.filename.slice(0, 200),
+      tenantId: params.tenantId,
       contentType: params.contentType,
       size: params.size,
       contents: params.contents,

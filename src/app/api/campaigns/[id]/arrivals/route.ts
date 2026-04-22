@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { activeTenantIdOf, getCurrentUser, hasRole } from "@/lib/auth";
 import { canSeeCampaign } from "@/lib/teams";
 import { buildArrivalsFeed } from "@/lib/arrivals";
 
@@ -14,7 +14,9 @@ export const runtime = "nodejs";
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   const me = await getCurrentUser();
   if (!me) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), params.id))) {
+  const tenantId = activeTenantIdOf(me);
+  if (!tenantId) return NextResponse.json({ ok: false, error: "no_active_tenant" }, { status: 400 });
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), tenantId, params.id))) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { getCurrentUser, hasRole } from "@/lib/auth";
+import { activeTenantIdOf, getCurrentUser, hasRole } from "@/lib/auth";
 import { canSeeCampaign } from "@/lib/teams";
 import { logAction } from "@/lib/audit";
 import { csvRow } from "@/lib/contact";
@@ -14,9 +14,11 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   const me = await getCurrentUser();
   if (!me) return new NextResponse("Unauthorized", { status: 401 });
   if (!hasRole(me, "editor")) return new NextResponse("Forbidden", { status: 403 });
+  const tenantId = activeTenantIdOf(me);
+  if (!tenantId) return new NextResponse("No active tenant", { status: 400 });
   // Team isolation — a team-scoped editor shouldn't be able to walk
   // out with a CSV for a campaign they can't see in the UI.
-  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), params.id))) {
+  if (!(await canSeeCampaign(me.id, hasRole(me, "admin"), tenantId, params.id))) {
     return new NextResponse("Not Found", { status: 404 });
   }
 
