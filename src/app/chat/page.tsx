@@ -30,6 +30,7 @@ export const dynamic = "force-dynamic";
 export default async function ChatPage() {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
+  if (!me.activeTenantId) redirect("/tenants");
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
   const tz = process.env.APP_TIMEZONE ?? "Asia/Riyadh";
