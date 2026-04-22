@@ -31,8 +31,14 @@ fi
 if [ -n "${DATABASE_URL:-}" ]; then
   echo "[start] running prisma db push..."
   if ! node ./node_modules/prisma/build/index.js db push --accept-data-loss --skip-generate 2>&1; then
-    echo "[start] prisma db push failed - aborting boot"
-    exit 1
+    if [ "${DB_PUSH_FORCE_RESET_ON_FAILURE:-false}" = "true" ]; then
+      echo "[start] prisma db push failed - retrying with --force-reset"
+      node ./node_modules/prisma/build/index.js db push --force-reset --accept-data-loss --skip-generate 2>&1
+    else
+      echo "[start] prisma db push failed - aborting boot"
+      echo "[start] set DB_PUSH_FORCE_RESET_ON_FAILURE=true for one test-only deploy if you need an automatic reset"
+      exit 1
+    fi
   fi
 else
   echo "[start] DATABASE_URL unset — skipping prisma db push"
