@@ -98,6 +98,12 @@ test("normalizeLabel: lowercases, trims, snake-cases spaces and dashes", () => {
   assert.equal(normalizeLabel("Phone Number"), "phone_number");
 });
 
+test("normalizeLabel: Arabic labels canonicalize to import fields", () => {
+  assert.equal(normalizeLabel("الاسم"), "name");
+  assert.equal(normalizeLabel("البريد الإلكتروني"), "email");
+  assert.equal(normalizeLabel("رقم الجوال"), "phone");
+});
+
 // ---- detectHeader ----
 
 test("detectHeader: accepts a real header row", () => {
@@ -116,7 +122,17 @@ test("detectHeader: synthesises col_N when first row looks like data", () => {
     ["Bob", "b@x.com", "+15559999999"],
   ];
   const { header, bodyRows } = detectHeader(rows);
-  assert.deepEqual(header, ["col_1", "col_2", "col_3"]);
+  assert.deepEqual(header, ["name", "email", "phone"]);
+  assert.equal(bodyRows.length, 2);
+});
+
+test("detectHeader: headerless name + phone rows infer canonical columns", () => {
+  const rows = [
+    ["عامر حسن", "564519292"],
+    ["ريان الجعفر", "503982771"],
+  ];
+  const { header, bodyRows } = detectHeader(rows);
+  assert.deepEqual(header, ["name", "phone"]);
   assert.equal(bodyRows.length, 2);
 });
 
@@ -333,6 +349,22 @@ test("reviewIngest: phone-only matching on contact row", async () => {
   assert.ok(profile);
   assert.equal(profile.sample[0].rowStatus, "existing_match");
   assert.equal(profile.sample[0].matchId, "contact_alice");
+});
+
+test("reviewIngest: Arabic invitee headers parse without missing-field issues", async () => {
+  const text = [
+    "الاسم,رقم الجوال",
+    "عامر حسن,564519292",
+    "ريان الجعفر,503982771",
+  ].join("\n");
+  const profile = await reviewIngest(
+    { text, targetHint: "invitees" },
+    fakeDeps(),
+  );
+  assert.ok(profile);
+  assert.equal(profile.target, "invitees");
+  assert.equal(profile.totals.with_issues, 0);
+  assert.deepEqual(profile.columns, ["name", "phone"]);
 });
 
 test("reviewIngest: returns null for prose with no delimiter", async () => {

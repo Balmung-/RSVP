@@ -536,3 +536,46 @@ test("mixed-target parity: same csv, both targets, per-target parity holds", asy
     assert.equal(preview.invalid, commit.invalid);
   }
 });
+
+test("invitees import: Arabic headers with phone-only rows create invitees", async () => {
+  const text = [
+    "الاسم,رقم الجوال",
+    "عامر حسن,564519292",
+    "ريان الجعفر,503982771",
+  ].join("\n");
+
+  const report = await runImport(
+    {
+      target: "invitees",
+      text,
+      campaignId: "camp_ar",
+    },
+    "preview",
+    makeDeps(makeStore()),
+  );
+
+  assert.equal(report.total, 2);
+  assert.equal(report.invalid, 0);
+  assert.equal(report.willCreate, 2);
+});
+
+test("invitees import: headerless name + phone rows create invitees", async () => {
+  const text = [
+    "عامر حسن,564519292",
+    "ريان الجعفر,503982771",
+  ].join("\n");
+
+  const report = await runImport(
+    {
+      target: "invitees",
+      text,
+      campaignId: "camp_headless",
+    },
+    "preview",
+    makeDeps(makeStore()),
+  );
+
+  assert.equal(report.total, 2);
+  assert.equal(report.invalid, 0);
+  assert.equal(report.willCreate, 2);
+});

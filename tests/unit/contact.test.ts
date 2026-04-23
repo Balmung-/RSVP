@@ -118,6 +118,11 @@ test("normalizePhone: empty string → null (short-circuit)", () => {
   assert.equal(normalizePhone(""), null);
 });
 
+test("normalizePhone: Saudi local mobile falls back to E.164 when parser path is unavailable", () => {
+  assert.equal(normalizePhone("564519292"), "+966564519292");
+  assert.equal(normalizePhone("0564519292"), "+966564519292");
+});
+
 // ---------------------------------------------------------------
 // dedupKey
 // ---------------------------------------------------------------
@@ -308,6 +313,29 @@ test("parseContactsText: tab delimiter auto-detected", () => {
 test("parseContactsText: header lowercased + whitespace → underscore", () => {
   const rows = parseContactsText("Full Name,Email Address\nAlice,a@x.com");
   assert.deepEqual(rows, [{ full_name: "Alice", email_address: "a@x.com" }]);
+});
+
+test("parseContactsText: Arabic headers canonicalize to import fields", () => {
+  const rows = parseContactsText(
+    "الاسم,البريد الإلكتروني,رقم الجوال\nعامر حسن,aamer@example.com,564519292",
+  );
+  assert.deepEqual(rows, [
+    {
+      name: "عامر حسن",
+      email: "aamer@example.com",
+      phone: "564519292",
+    },
+  ]);
+});
+
+test("parseContactsText: headerless name + phone rows infer canonical fields", () => {
+  const rows = parseContactsText(
+    "عامر حسن,564519292\nريان الجعفر,503982771",
+  );
+  assert.deepEqual(rows, [
+    { name: "عامر حسن", phone: "564519292" },
+    { name: "ريان الجعفر", phone: "503982771" },
+  ]);
 });
 
 test("parseContactsText: data cells trimmed", () => {

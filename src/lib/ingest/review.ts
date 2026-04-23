@@ -170,6 +170,33 @@ const METADATA_MARKERS = new Set([
   "description",
 ]);
 
+const HEADER_ALIASES: Record<string, string> = {
+  "الاسم": "name",
+  "الاسم_الكامل": "full_name",
+  "البريد_الالكتروني": "email",
+  "البريد_الإلكتروني": "email",
+  "الايميل": "email",
+  "الإيميل": "email",
+  "الجوال": "phone",
+  "رقم_الجوال": "phone",
+  "الهاتف": "phone",
+  "رقم_الهاتف": "phone",
+  "الموبايل": "phone",
+  "رقم_الموبايل": "phone",
+  "المنظمة": "organization",
+  "الجهة": "organization",
+  "الشركة": "organization",
+  "المسمى_الوظيفي": "title",
+  "المنصب": "title",
+  "الوظيفة": "title",
+  "ملاحظات": "notes",
+  "الملاحظات": "notes",
+  "اللغة": "locale",
+  "ضيوف": "guests",
+  "عدد_الضيوف": "guests",
+  "الفئة": "tier",
+};
+
 // ---- delimiter + line parsing -------------------------------------
 
 // Score each candidate delimiter by how many of the first N non-blank
@@ -282,7 +309,43 @@ export function parseCsvLine(line: string, delimiter: "," | "\t"): string[] {
 // ---- header / row helpers -----------------------------------------
 
 export function normalizeLabel(raw: string): string {
-  return raw.toLowerCase().trim().replace(/[\s-]+/g, "_");
+  const normalized = raw.toLowerCase().trim().replace(/[\s-]+/g, "_");
+  return HEADER_ALIASES[normalized] ?? normalized;
+}
+
+function looksLikeEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function looksLikePhone(value: string): boolean {
+  return /\+?\d{6,}/.test(value.replace(/[^\d+]/g, ""));
+}
+
+function inferHeaderFromFirstRow(first: string[]): string[] {
+  const inferred = first.map((_, i) => `col_${i + 1}`);
+  let sawTextCandidate = false;
+
+  for (let i = 0; i < first.length; i += 1) {
+    const value = first[i]!.trim();
+    if (value.length === 0) continue;
+
+    if (looksLikeEmail(value) && !inferred.includes("email")) {
+      inferred[i] = "email";
+      continue;
+    }
+    if (looksLikePhone(value) && !inferred.includes("phone")) {
+      inferred[i] = "phone";
+      continue;
+    }
+
+    if (!inferred.includes("name")) {
+      inferred[i] = "name";
+      sawTextCandidate = true;
+    }
+  }
+
+  const hasContact = inferred.includes("email") || inferred.includes("phone");
+  return hasContact && sawTextCandidate ? inferred : first.map((_, i) => `col_${i + 1}`);
 }
 
 // Decide whether the first row is a header. Rules:
@@ -313,8 +376,8 @@ export function detectHeader(
     (cell) => /@/.test(cell) || /\+?\d{6,}/.test(cell),
   );
   if (looksLikeData) {
-    const synthetic = first.map((_, i) => `col_${i + 1}`);
-    return { header: synthetic, bodyRows: rows };
+    const inferred = inferHeaderFromFirstRow(first);
+    return { header: inferred, bodyRows: rows };
   }
 
   return { header: normalized, bodyRows: rows.slice(1) };
