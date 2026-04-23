@@ -21,6 +21,7 @@ import {
   deleteInvitee,
   findDuplicates,
   liveFailureCount,
+  type SendCampaignChannel,
 } from "@/lib/campaigns";
 import { listStages, runStageNow, addStandardReminder } from "@/lib/stages";
 import { duplicateCampaign } from "@/lib/campaign-duplicate";
@@ -56,6 +57,7 @@ import {
 } from "@/lib/approvals";
 import { canSeeCampaignRow } from "@/lib/teams";
 import { buildArrivalsFeed } from "@/lib/arrivals";
+import { hasWhatsAppTemplate, isChannelProviderEnabled } from "@/lib/channel-availability";
 
 export const dynamic = "force-dynamic";
 
@@ -72,12 +74,15 @@ async function sendAction(formData: FormData) {
   "use server";
   const me = await requireRole("editor");
   const id = String(formData.get("id"));
-  const channel = String(formData.get("channel") ?? "both") as "email" | "sms" | "both";
+  const channel = String(formData.get("channel") ?? "both") as SendCampaignChannel;
+  if (!["email", "sms", "whatsapp", "both", "all"].includes(channel)) {
+    redirect(`/campaigns/${id}`);
+  }
 
   // Compute recipient count for the chosen channel. Same predicate as the
   // header's pre-send summary so the approval threshold check is honest.
   const [emailCount, smsCount] = await Promise.all([
-    channel === "sms"
+    channel === "sms" || channel === "whatsapp"
       ? Promise.resolve(0)
       : prisma.invitee.count({
           where: {
@@ -86,7 +91,7 @@ async function sendAction(formData: FormData) {
             NOT: { invitations: { some: { channel: "email", status: { in: ["sent", "delivered"] } } } },
           },
         }),
-    channel === "email"
+    channel === "email" || channel === "whatsapp"
       ? Promise.resolve(0)
       : prisma.invitee.count({
           where: {
@@ -96,7 +101,17 @@ async function sendAction(formData: FormData) {
           },
         }),
   ]);
-  const recipients = emailCount + smsCount;
+  const whatsappCount =
+    channel === "email" || channel === "sms" || channel === "both"
+      ? 0
+      : await prisma.invitee.count({
+          where: {
+            campaignId: id,
+            phoneE164: { not: null },
+            NOT: { invitations: { some: { channel: "whatsapp", status: { in: ["sent", "delivered"] } } } },
+          },
+        });
+  const recipients = emailCount + smsCount + whatsappCount;
 
   // Admin bypasses the approval gate — their click IS the approval.
   const myRole = me.role as "admin" | "editor" | "viewer";
@@ -137,8 +152,8 @@ async function singleResend(campaignId: string, formData: FormData) {
   "use server";
   await requireRole("editor");
   const inviteeId = String(formData.get("inviteeId"));
-  const channel = String(formData.get("channel")) as "email" | "sms";
-  if (channel !== "email" && channel !== "sms") redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
+  const channel = String(formData.get("channel")) as "email" | "sms" | "whatsapp";
+  if (channel !== "email" && channel !== "sms" && channel !== "whatsapp") redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
   await resendSingle(campaignId, inviteeId, channel);
   redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
 }
@@ -155,8 +170,8 @@ async function bulkResend(campaignId: string, formData: FormData) {
   "use server";
   await requireRole("editor");
   const ids = formData.getAll("id").map(String).filter(Boolean);
-  const channel = String(formData.get("channel")) as "email" | "sms";
-  if (ids.length === 0 || (channel !== "email" && channel !== "sms")) redirect(`/campaigns/${campaignId}`);
+  const channel = String(formData.get("channel")) as "email" | "sms" | "whatsapp";
+  if (ids.length === 0 || (channel !== "email" && channel !== "sms" && channel !== "whatsapp")) redirect(`/campaigns/${campaignId}`);
   await resendSelection(campaignId, ids, { channels: [channel], onlyUnsent: false });
   redirect(`/campaigns/${campaignId}`);
 }
@@ -317,9 +332,24 @@ export default async function CampaignWorkspace({
   const stats = await campaignStats(campaign.id);
 
   // Send summary for the pre-send confirmation modal.
-  const [withEmail, withPhone, alreadyEmailSent, alreadySmsSent] = await Promise.all([
-    prisma.invitee.count({ where: { campaignId: campaign.id, email: { not: null } } }),
-    prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } }),
+  const emailEnabled = isChannelProviderEnabled("email");
+  const smsEnabled = isChannelProviderEnabled("sms");
+  const whatsappEnabled =
+    isChannelProviderEnabled("whatsapp") &&
+    hasWhatsAppTemplate({
+      templateWhatsAppName: campaign.templateWhatsAppName,
+      templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+    });
+  const [withEmail, withSms, withWhatsApp, alreadyEmailSent, alreadySmsSent, alreadyWhatsAppSent] = await Promise.all([
+    emailEnabled
+      ? prisma.invitee.count({ where: { campaignId: campaign.id, email: { not: null } } })
+      : Promise.resolve(0),
+    smsEnabled
+      ? prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } })
+      : Promise.resolve(0),
+    whatsappEnabled
+      ? prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } })
+      : Promise.resolve(0),
     prisma.invitee.count({
       where: {
         campaignId: campaign.id,
@@ -332,13 +362,21 @@ export default async function CampaignWorkspace({
         invitations: { some: { channel: "sms", status: { in: ["sent", "delivered"] } } },
       },
     }),
+    prisma.invitee.count({
+      where: {
+        campaignId: campaign.id,
+        invitations: { some: { channel: "whatsapp", status: { in: ["sent", "delivered"] } } },
+      },
+    }),
   ]);
   const sendSummary = {
     invited: stats.total,
     withEmail,
-    withPhone,
+    withSms,
+    withWhatsApp,
     alreadyEmailSent,
     alreadySmsSent,
+    alreadyWhatsAppSent,
   };
 
   const pendingApprovalRow = await pendingApproval(campaign.id);
@@ -621,7 +659,18 @@ async function loadForTab(
   ]);
 
   if (tab === "invitees") {
-    const { rows, totalInvitees, page, searchQuery } = await loadInviteesRows(campaignId, sp);
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: {
+        id: true,
+        templateWhatsAppName: true,
+        templateWhatsAppLanguage: true,
+      },
+    });
+    if (!campaign) {
+      return { rows: [], totalInvitees: 0, page: 1, searchQuery: sp.q ?? "", duplicatesCount: 0, scheduleCount, contentCount };
+    }
+    const { rows, totalInvitees, page, searchQuery } = await loadInviteesRows(campaign, sp);
     const dups = await findDuplicates(campaignId);
     return { rows, totalInvitees, page, searchQuery, duplicatesCount: dups.length, scheduleCount, contentCount };
   }
@@ -651,11 +700,22 @@ async function loadForTab(
   return { scheduleCount, contentCount };
 }
 
-async function loadInviteesRows(campaignId: string, sp: { page?: string; q?: string }) {
+async function loadInviteesRows(
+  campaign: { id: string; templateWhatsAppName: string | null; templateWhatsAppLanguage: string | null },
+  sp: { page?: string; q?: string },
+) {
+  const emailEnabled = isChannelProviderEnabled("email");
+  const smsEnabled = isChannelProviderEnabled("sms");
+  const whatsappEnabled =
+    isChannelProviderEnabled("whatsapp") &&
+    hasWhatsAppTemplate({
+      templateWhatsAppName: campaign.templateWhatsAppName,
+      templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+    });
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
   const q = (sp.q ?? "").trim();
   const where = {
-    campaignId,
+    campaignId: campaign.id,
     ...(q
       ? {
           OR: [
@@ -685,8 +745,12 @@ async function loadInviteesRows(campaignId: string, sp: { page?: string; q?: str
     email: i.email,
     phoneE164: i.phoneE164,
     guestsAllowed: i.guestsAllowed,
+    emailAvailable: emailEnabled && !!i.email,
+    smsAvailable: smsEnabled && !!i.phoneE164,
+    whatsappAvailable: whatsappEnabled && !!i.phoneE164,
     emailSent: i.invitations.some((x) => x.channel === "email" && x.status !== "failed"),
     smsSent: i.invitations.some((x) => x.channel === "sms" && x.status !== "failed"),
+    whatsappSent: i.invitations.some((x) => x.channel === "whatsapp" && x.status !== "failed"),
     response: i.response
       ? { attending: i.response.attending, guestsCount: i.response.guestsCount }
       : null,

@@ -1,9 +1,6 @@
 import type { Invitee } from "@prisma/client";
 import { Field } from "./Field";
 
-// Shared between /invitees/new and /invitees/[id]/edit.
-// The form emits raw strings — validation + normalization live in the action.
-
 export function InviteeForm({
   invitee,
   action,
@@ -55,7 +52,7 @@ export function InviteeForm({
           placeholder="name@example.gov.sa"
         />
       </Field>
-      <Field label="Phone">
+      <Field label="Phone" hint="Used for SMS and WhatsApp.">
         <input
           name="phone"
           className="field"
@@ -68,7 +65,7 @@ export function InviteeForm({
         <select name="locale" className="field" defaultValue={invitee?.locale ?? ""}>
           <option value="">Default (campaign)</option>
           <option value="en">English</option>
-          <option value="ar">العربية</option>
+          <option value="ar">Arabic</option>
         </select>
       </Field>
       <Field label="Guests allowed">
@@ -106,4 +103,3 @@ export function InviteeForm({
     </form>
   );
 }
-

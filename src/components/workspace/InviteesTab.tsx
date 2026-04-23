@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Stat } from "@/components/Stat";
 import { Pagination } from "@/components/Pagination";
 import { InviteeTable } from "@/components/InviteeTable";
-import type { Campaign, Invitation, Invitee, Response as RsvpResponse } from "@prisma/client";
+import type { Campaign } from "@prisma/client";
 
 type TableRow = {
   id: string;
@@ -12,8 +12,12 @@ type TableRow = {
   email: string | null;
   phoneE164: string | null;
   guestsAllowed: number;
+  emailAvailable: boolean;
+  smsAvailable: boolean;
+  whatsappAvailable: boolean;
   emailSent: boolean;
   smsSent: boolean;
+  whatsappSent: boolean;
   response: { attending: boolean; guestsCount: number } | null;
 };
 
@@ -112,7 +116,7 @@ export function InviteesTab({
               Add invitee
             </Link>
             <Link href={`/campaigns/${campaign.id}/import`} className="btn-ghost text-xs">
-              Import CSV
+              Import file
             </Link>
           </div>
         ) : null}

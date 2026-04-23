@@ -5,11 +5,6 @@ import { SendDialog } from "@/components/SendDialog";
 import { Icon, type IconName } from "@/components/Icon";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
 
-// Single horizontal plane: status dot + title + quiet metadata + three
-// inline stats + primary action + kebab. One through-line, no stacked
-// bands. The status tag and meta collapse inline so the whole header
-// reads across in one glance.
-
 const statusColor: Record<string, string> = {
   draft: "bg-ink-300",
   active: "bg-signal-live",
@@ -34,9 +29,11 @@ export async function CampaignHeader({
   sendSummary: {
     invited: number;
     withEmail: number;
-    withPhone: number;
+    withSms: number;
+    withWhatsApp: number;
     alreadyEmailSent: number;
     alreadySmsSent: number;
+    alreadyWhatsAppSent: number;
   };
   duplicateAction: () => Promise<void>;
   canWrite: boolean;
@@ -62,27 +59,27 @@ export async function CampaignHeader({
   ].filter(Boolean) as string[];
 
   return (
-    <div className="pb-5 flex items-center gap-6 min-w-0">
-      <div className="min-w-0 flex-1 flex items-center gap-3">
+    <div className="flex min-w-0 items-center gap-6 pb-5">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
         <span
-          className={`h-2 w-2 rounded-full shrink-0 ${statusColor[campaign.status] ?? "bg-ink-300"} ${campaign.status === "sending" ? "animate-pulse" : ""}`}
+          className={`h-2 w-2 shrink-0 rounded-full ${statusColor[campaign.status] ?? "bg-ink-300"} ${campaign.status === "sending" ? "animate-pulse" : ""}`}
           aria-hidden
           title={statusLabel}
         />
         <h1
-          className="text-ink-900 truncate min-w-0"
+          className="min-w-0 truncate text-ink-900"
           style={{ fontSize: "24px", lineHeight: "30px", letterSpacing: "-0.015em", fontWeight: 500 }}
         >
           {campaign.name}
         </h1>
         {metaBits.length > 0 ? (
-          <span className="hidden md:inline text-mini text-ink-500 tabular-nums truncate">
-            {metaBits.join(" · ")}
+          <span className="hidden truncate text-mini tabular-nums text-ink-500 md:inline">
+            {metaBits.join(" - ")}
           </span>
         ) : null}
       </div>
 
-      <div className="hidden lg:flex items-center gap-5 text-body text-ink-600 tabular-nums shrink-0">
+      <div className="hidden shrink-0 items-center gap-5 text-body tabular-nums text-ink-600 lg:flex">
         <InlineStat label={T.invited} value={invited} />
         <Divider />
         <InlineStat label={T.responded} value={responded} />
@@ -90,7 +87,7 @@ export async function CampaignHeader({
         <InlineStat label={T.headcount} value={headcount} emphasize />
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex shrink-0 items-center gap-2">
         <SendDialog
           campaignId={campaign.id}
           summary={sendSummary}
@@ -111,7 +108,7 @@ export async function CampaignHeader({
                 <MenuRow icon="send" label="Send test message" />
               </MenuItem>
               <MenuItem as="link" href={`/campaigns/${campaign.id}/import`}>
-                <MenuRow icon="upload" label="Import CSV" />
+                <MenuRow icon="upload" label="Import file" />
               </MenuItem>
               <form action={duplicateAction}>
                 <MenuItem as="button">
@@ -140,7 +137,7 @@ export async function CampaignHeader({
             <>
               <MenuSeparator />
               <MenuItem as="link" href={`/campaigns/${campaign.id}/edit`} danger>
-                <MenuRow icon="trash" label="Delete campaign…" />
+                <MenuRow icon="trash" label="Delete campaign..." />
               </MenuItem>
             </>
           ) : null}
@@ -153,7 +150,7 @@ export async function CampaignHeader({
 export function CampaignHeaderCrumb({ campaign }: { campaign: Campaign }) {
   return (
     <span>
-      <Link href="/campaigns" className="hover:text-ink-900 transition-colors">Campaigns</Link>
+      <Link href="/campaigns" className="transition-colors hover:text-ink-900">Campaigns</Link>
       <span className="mx-1.5 text-ink-300">/</span>
       <span className="truncate">{campaign.name}</span>
     </span>
@@ -164,7 +161,7 @@ function InlineStat({ label, value, emphasize }: { label: string; value: number;
   return (
     <span className="inline-flex items-baseline gap-1.5">
       <span className="text-micro uppercase text-ink-400">{label}</span>
-      <span className={emphasize ? "text-ink-900 font-medium" : ""}>{value.toLocaleString()}</span>
+      <span className={emphasize ? "font-medium text-ink-900" : ""}>{value.toLocaleString()}</span>
     </span>
   );
 }

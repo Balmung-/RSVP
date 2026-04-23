@@ -13,8 +13,12 @@ type Row = {
   email: string | null;
   phoneE164: string | null;
   guestsAllowed: number;
+  emailAvailable: boolean;
+  smsAvailable: boolean;
+  whatsappAvailable: boolean;
   emailSent: boolean;
   smsSent: boolean;
+  whatsappSent: boolean;
   response: { attending: boolean; guestsCount: number } | null;
 };
 
@@ -43,11 +47,19 @@ export function InviteeTable({
       return next;
     });
   }
+
   function toggleAll() {
     setSelected(allSelected ? new Set() : new Set(invitees.map((i) => i.id)));
   }
 
   const selectedArr = useMemo(() => Array.from(selected), [selected]);
+  const selectedRows = useMemo(
+    () => invitees.filter((invitee) => selected.has(invitee.id)),
+    [invitees, selected],
+  );
+  const canBulkEmail = selectedRows.some((invitee) => invitee.emailAvailable);
+  const canBulkSms = selectedRows.some((invitee) => invitee.smsAvailable);
+  const canBulkWhatsApp = selectedRows.some((invitee) => invitee.whatsappAvailable);
 
   return (
     <>
@@ -81,57 +93,58 @@ export function InviteeTable({
                 </td>
               </tr>
             ) : (
-              invitees.map((i) => {
-                const checked = selected.has(i.id);
-                const isOpen = selectedInviteeId === i.id;
-                const r = i.response;
-                const tone = r ? (r.attending ? "live" : "fail") : "wait";
-                const label = r ? (r.attending ? "attending" : "declined") : "pending";
+              invitees.map((invitee) => {
+                const checked = selected.has(invitee.id);
+                const isOpen = selectedInviteeId === invitee.id;
+                const response = invitee.response;
+                const tone = response ? (response.attending ? "live" : "fail") : "wait";
+                const label = response ? (response.attending ? "attending" : "declined") : "pending";
                 return (
-                  <tr
-                    key={i.id}
-                    className={clsx(isOpen && "bg-ink-50")}
-                  >
+                  <tr key={invitee.id} className={clsx(isOpen && "bg-ink-50")}>
                     <td onClick={(e) => e.stopPropagation()}>
-                      <label className="sr-only" htmlFor={`sel-${i.id}`}>Select {i.fullName}</label>
+                      <label className="sr-only" htmlFor={`sel-${invitee.id}`}>
+                        Select {invitee.fullName}
+                      </label>
                       <input
-                        id={`sel-${i.id}`}
+                        id={`sel-${invitee.id}`}
                         type="checkbox"
                         checked={checked}
-                        onChange={() => toggle(i.id)}
+                        onChange={() => toggle(invitee.id)}
                         className="accent-ink-900"
                       />
                     </td>
                     <td>
-                      <Link
-                        href={`${baseHref}invitee=${i.id}`}
-                        className="block"
-                      >
-                        <div className="font-medium text-ink-900 hover:underline">{i.fullName}</div>
-                        {i.title || i.organization ? (
-                          <div className="text-xs text-ink-400 mt-0.5">
-                            {[i.title, i.organization].filter(Boolean).join(" · ")}
+                      <Link href={`${baseHref}invitee=${invitee.id}`} className="block">
+                        <div className="font-medium text-ink-900 hover:underline">{invitee.fullName}</div>
+                        {invitee.title || invitee.organization ? (
+                          <div className="mt-0.5 text-xs text-ink-400">
+                            {[invitee.title, invitee.organization].filter(Boolean).join(" - ")}
                           </div>
                         ) : null}
                       </Link>
                     </td>
                     <td className="text-ink-600">
-                      {i.email ?? <span className="text-ink-300">—</span>}
+                      {invitee.email ?? <span className="text-ink-300">--</span>}
                     </td>
-                    <td className="text-ink-600 tabular-nums">
-                      {i.phoneE164 ?? <span className="text-ink-300">—</span>}
+                    <td className="tabular-nums text-ink-600">
+                      {invitee.phoneE164 ?? <span className="text-ink-300">--</span>}
                     </td>
                     <td>
                       <div className="flex items-center gap-2 text-xs text-ink-500">
-                        <span className={i.emailSent ? "text-signal-live" : "text-ink-300"}>email</span>
-                        <span className="text-ink-300">·</span>
-                        <span className={i.smsSent ? "text-signal-live" : "text-ink-300"}>sms</span>
+                        {renderChannel(invitee.emailAvailable, invitee.emailSent, "email")}
+                        {renderSeparator(invitee.emailAvailable, invitee.smsAvailable || invitee.whatsappAvailable)}
+                        {renderChannel(invitee.smsAvailable, invitee.smsSent, "sms")}
+                        {renderSeparator(invitee.smsAvailable, invitee.whatsappAvailable)}
+                        {renderChannel(invitee.whatsappAvailable, invitee.whatsappSent, "whatsapp")}
+                        {!invitee.emailAvailable && !invitee.smsAvailable && !invitee.whatsappAvailable ? (
+                          <span className="text-ink-300">--</span>
+                        ) : null}
                       </div>
                     </td>
                     <td><Badge tone={tone}>{label}</Badge></td>
                     <td className="text-right tabular-nums text-ink-600">
-                      {r?.attending ? r.guestsCount : 0}
-                      <span className="text-ink-300"> / {i.guestsAllowed}</span>
+                      {response?.attending ? response.guestsCount : 0}
+                      <span className="text-ink-300"> / {invitee.guestsAllowed}</span>
                     </td>
                   </tr>
                 );
@@ -145,7 +158,7 @@ export function InviteeTable({
         <div
           role="toolbar"
           aria-label="Bulk actions"
-          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 rounded-full bg-ink-900 text-ink-0 pl-5 pr-3 py-2 shadow-lift"
+          className="fixed bottom-8 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-ink-900 py-2 pl-5 pr-3 text-ink-0 shadow-lift"
         >
           <span className="text-sm tabular-nums">{selected.size} selected</span>
           <span className="h-4 w-px bg-ink-700" />
@@ -153,32 +166,48 @@ export function InviteeTable({
             {selectedArr.map((id) => (
               <input key={id} type="hidden" name="id" value={id} />
             ))}
-            <button
-              name="channel"
-              value="email"
-              className="rounded-full bg-ink-700 hover:bg-ink-600 px-3 py-1 text-xs transition-colors"
-              type="submit"
-            >
-              Resend email
-            </button>
-            <button
-              name="channel"
-              value="sms"
-              className="rounded-full bg-ink-700 hover:bg-ink-600 px-3 py-1 text-xs transition-colors"
-              type="submit"
-            >
-              Resend SMS
-            </button>
+            {canBulkEmail ? (
+              <button
+                name="channel"
+                value="email"
+                className="rounded-full bg-ink-700 px-3 py-1 text-xs transition-colors hover:bg-ink-600"
+                type="submit"
+              >
+                Resend email
+              </button>
+            ) : null}
+            {canBulkSms ? (
+              <button
+                name="channel"
+                value="sms"
+                className="rounded-full bg-ink-700 px-3 py-1 text-xs transition-colors hover:bg-ink-600"
+                type="submit"
+              >
+                Resend SMS
+              </button>
+            ) : null}
+            {canBulkWhatsApp ? (
+              <button
+                name="channel"
+                value="whatsapp"
+                className="rounded-full bg-ink-700 px-3 py-1 text-xs transition-colors hover:bg-ink-600"
+                type="submit"
+              >
+                Resend WhatsApp
+              </button>
+            ) : null}
           </form>
           <form action={deleteBulkAction}>
             {selectedArr.map((id) => (
               <input key={id} type="hidden" name="id" value={id} />
             ))}
             <button
-              className="rounded-full text-signal-fail hover:bg-ink-800 px-3 py-1 text-xs transition-colors"
+              className="rounded-full px-3 py-1 text-xs text-signal-fail transition-colors hover:bg-ink-800"
               type="submit"
               onClick={(e) => {
-                if (!window.confirm(`Delete ${selected.size} invitee${selected.size === 1 ? "" : "s"}? Responses and invitation history are deleted too.`)) e.preventDefault();
+                if (!window.confirm(`Delete ${selected.size} invitee${selected.size === 1 ? "" : "s"}? Responses and invitation history are deleted too.`)) {
+                  e.preventDefault();
+                }
               }}
             >
               Delete
@@ -187,7 +216,7 @@ export function InviteeTable({
           <button
             type="button"
             onClick={() => setSelected(new Set())}
-            className="rounded-full hover:bg-ink-800 px-3 py-1 text-xs transition-colors ml-1"
+            className="ml-1 rounded-full px-3 py-1 text-xs transition-colors hover:bg-ink-800"
           >
             Clear
           </button>
@@ -195,4 +224,14 @@ export function InviteeTable({
       ) : null}
     </>
   );
+}
+
+function renderChannel(active: boolean, sent: boolean, label: string) {
+  if (!active) return null;
+  return <span className={sent ? "text-signal-live" : "text-ink-500"}>{label}</span>;
+}
+
+function renderSeparator(leftActive: boolean, rightActive: boolean) {
+  if (!leftActive || !rightActive) return null;
+  return <span className="text-ink-300">-</span>;
 }
