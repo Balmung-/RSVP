@@ -3,7 +3,7 @@
 // `classify()` AND an extractor. Anything else falls into
 // `unsupported` (image/binary/etc.) — it still gets a FileIngest row
 // so callers can tell "we looked at it" from "we never processed it".
-export type ExtractKind = "text_plain" | "pdf" | "docx" | "unsupported";
+export type ExtractKind = "text_plain" | "pdf" | "docx" | "xlsx" | "unsupported";
 
 export type ExtractResult =
   | { ok: true; kind: ExtractKind; text: string; bytes: number }
@@ -29,5 +29,7 @@ export function classify(contentType: string): ExtractKind {
   if (ct.startsWith("text/tab-separated-values")) return "text_plain";
   if (ct === "application/pdf") return "pdf";
   if (ct === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
+  if (ct === "application/vnd.ms-excel") return "xlsx";
+  if (ct === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") return "xlsx";
   return "unsupported";
 }

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { textPlainExtractor } from "../../src/lib/ingest/text-plain";
 import { pdfExtractor, _setPdfParseForTests } from "../../src/lib/ingest/pdf";
 import { docxExtractor, _setMammothExtractForTests } from "../../src/lib/ingest/docx";
+import { xlsxExtractor, _setXlsxForTests } from "../../src/lib/ingest/xlsx";
 import { classify } from "../../src/lib/ingest/types";
 
 // P5 — Ingest extractor unit tests.
@@ -36,6 +37,14 @@ test("classify: .docx mime is docx", () => {
   assert.equal(
     classify("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
     "docx",
+  );
+});
+
+test("classify: spreadsheet mimes are xlsx", () => {
+  assert.equal(classify("application/vnd.ms-excel"), "xlsx");
+  assert.equal(
+    classify("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "xlsx",
   );
 });
 
@@ -229,5 +238,74 @@ test("docx: missing value coerces to empty text", async () => {
     }
   } finally {
     _setMammothExtractForTests(null);
+  }
+});
+
+// --- xlsx (fake xlsx) --------------------------------------------
+
+test("xlsx: returns first non-empty sheet as csv text", async () => {
+  _setXlsxForTests({
+    read: () => ({
+      SheetNames: ["Empty", "Guests"],
+      Sheets: {
+        Empty: { name: "Empty" },
+        Guests: { name: "Guests" },
+      },
+    }),
+    utils: {
+      sheet_to_csv: (sheet: unknown) => {
+        const name = (sheet as { name?: string }).name;
+        if (name === "Empty") return "";
+        return "name,email\nAlice,alice@example.com";
+      },
+    },
+  });
+  try {
+    const result = await xlsxExtractor.extract(Buffer.from([0x50, 0x4b]));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.kind, "xlsx");
+      assert.equal(result.text, "name,email\nAlice,alice@example.com");
+      assert.equal(result.bytes, Buffer.byteLength(result.text, "utf8"));
+    }
+  } finally {
+    _setXlsxForTests(null);
+  }
+});
+
+test("xlsx: no sheets yields empty text", async () => {
+  _setXlsxForTests({
+    read: () => ({ SheetNames: [], Sheets: {} }),
+    utils: { sheet_to_csv: () => "" },
+  });
+  try {
+    const result = await xlsxExtractor.extract(Buffer.from([0x50, 0x4b]));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.kind, "xlsx");
+      assert.equal(result.text, "");
+      assert.equal(result.bytes, 0);
+    }
+  } finally {
+    _setXlsxForTests(null);
+  }
+});
+
+test("xlsx: parser throw becomes structured failure", async () => {
+  _setXlsxForTests({
+    read: () => {
+      throw new Error("bad workbook");
+    },
+    utils: { sheet_to_csv: () => "" },
+  });
+  try {
+    const result = await xlsxExtractor.extract(Buffer.from([0x50, 0x4b]));
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, "xlsx");
+      assert.match(result.error, /bad workbook/);
+    }
+  } finally {
+    _setXlsxForTests(null);
   }
 });

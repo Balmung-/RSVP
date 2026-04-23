@@ -570,6 +570,7 @@ const FILE_DIGEST_KINDS = [
   "text_plain",
   "pdf",
   "docx",
+  "xlsx",
   "unsupported",
   "failed",
 ] as const;

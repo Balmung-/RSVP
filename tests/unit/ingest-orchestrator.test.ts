@@ -31,7 +31,7 @@ type UploadRow = { id: string; contentType: string; contents: Buffer };
 
 function fakeDeps(opts: {
   upload?: UploadRow | null;
-  extractors?: Partial<Record<"text_plain" | "pdf" | "docx", Extractor>>;
+  extractors?: Partial<Record<"text_plain" | "pdf" | "docx" | "xlsx", Extractor>>;
 }): { deps: IngestDeps; upserts: UpsertCall[] } {
   const upserts: UpsertCall[] = [];
   const db: IngestDb = {
@@ -61,6 +61,15 @@ function fakeDeps(opts: {
 function stubExtractor(kind: "text_plain" | "pdf" | "docx", result: ExtractResult): Extractor {
   return {
     kind,
+    async extract() {
+      return result;
+    },
+  };
+}
+
+function stubSpreadsheetExtractor(result: ExtractResult): Extractor {
+  return {
+    kind: "xlsx",
     async extract() {
       return result;
     },
@@ -170,6 +179,30 @@ test("orchestrator: DOCX success persists status=extracted with docx kind", asyn
   assert.equal(upserts[0].status, "extracted");
   assert.equal(upserts[0].kind, "docx");
   assert.equal(upserts[0].extractedText, "docx body");
+});
+
+test("orchestrator: XLSX success persists status=extracted with xlsx kind", async () => {
+  const { deps, upserts } = fakeDeps({
+    upload: {
+      id: "up_4b",
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      contents: Buffer.from([0x50, 0x4b]),
+    },
+    extractors: {
+      xlsx: stubSpreadsheetExtractor({
+        ok: true,
+        kind: "xlsx",
+        text: "name,email\nAlice,alice@example.com",
+        bytes: 34,
+      }),
+    },
+  });
+  const result = await extractFromUploadWith("up_4b", deps);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.kind, "xlsx");
+  assert.equal(upserts[0].status, "extracted");
+  assert.equal(upserts[0].kind, "xlsx");
+  assert.equal(upserts[0].extractedText, "name,email\nAlice,alice@example.com");
 });
 
 // --- failure branch ------------------------------------------------

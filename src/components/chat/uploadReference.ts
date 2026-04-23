@@ -68,6 +68,8 @@ function shortKind(kind: string): string {
       return "pdf";
     case "docx":
       return "docx";
+    case "xlsx":
+      return "xlsx";
     default:
       return kind;
   }

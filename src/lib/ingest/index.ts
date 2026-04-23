@@ -2,6 +2,7 @@ import { prisma } from "../db";
 import { textPlainExtractor } from "./text-plain";
 import { pdfExtractor } from "./pdf";
 import { docxExtractor } from "./docx";
+import { xlsxExtractor } from "./xlsx";
 import { classify, type ExtractKind, type Extractor } from "./types";
 
 // Extractor registry. The orchestrator hits exactly one by looking
@@ -11,6 +12,7 @@ const DEFAULT_EXTRACTORS: Record<Exclude<ExtractKind, "unsupported">, Extractor>
   text_plain: textPlainExtractor,
   pdf: pdfExtractor,
   docx: docxExtractor,
+  xlsx: xlsxExtractor,
 };
 
 export type IngestOutcome =

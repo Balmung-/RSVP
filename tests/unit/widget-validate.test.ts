@@ -1234,8 +1234,8 @@ test("validateWidget: file_digest accepts null preview / char / line on failed",
   assert.ok(out);
 });
 
-test("validateWidget: file_digest rejects unknown kind", () => {
-  assert.equal(
+test("validateWidget: file_digest accepts xlsx kind", () => {
+  assert.deepEqual(
     validateWidget({
       widgetKey: "file.digest.ing-3",
       kind: "file_digest",
@@ -1254,7 +1254,24 @@ test("validateWidget: file_digest rejects unknown kind", () => {
         extractionError: null,
       },
     }),
-    null,
+    {
+      widgetKey: "file.digest.ing-3",
+      kind: "file_digest",
+      slot: "secondary",
+      props: {
+        fileUploadId: "u",
+        ingestId: "i",
+        filename: "f",
+        kind: "xlsx",
+        status: "extracted",
+        bytesExtracted: 0,
+        preview: null,
+        charCount: null,
+        lineCount: null,
+        extractedAt: "2026-04-19T00:00:00Z",
+        extractionError: null,
+      },
+    },
   );
 });
 
