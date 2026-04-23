@@ -24,6 +24,9 @@ export interface Extractor {
 export function classify(contentType: string): ExtractKind {
   const ct = contentType.toLowerCase();
   if (ct.startsWith("text/plain")) return "text_plain";
+  if (ct.startsWith("text/csv")) return "text_plain";
+  if (ct.startsWith("application/csv")) return "text_plain";
+  if (ct.startsWith("text/tab-separated-values")) return "text_plain";
   if (ct === "application/pdf") return "pdf";
   if (ct === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
   return "unsupported";

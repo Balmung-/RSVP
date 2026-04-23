@@ -18,6 +18,9 @@ export const DOC_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "text/csv",
+  "application/csv",
+  "text/tab-separated-values",
   "text/plain",
 ]);
 
@@ -32,6 +35,33 @@ export function isPdfUploadContentType(contentType: string | null | undefined): 
 
 export function acceptForKind(kind: UploadKind): string {
   return kind === "image" ? Array.from(IMAGE_MIMES).join(",") : [...IMAGE_MIMES, ...DOC_MIMES].join(",");
+}
+
+export function normalizeUploadContentType(
+  contentType: string | null | undefined,
+  filename: string | null | undefined,
+): string {
+  const ct = (contentType ?? "").trim().toLowerCase();
+  if (ct.length > 0 && ct !== "application/octet-stream") return ct;
+
+  const lower = (filename ?? "").trim().toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".pdf")) return PDF_MIME;
+  if (lower.endsWith(".doc")) return "application/msword";
+  if (lower.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (lower.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lower.endsWith(".csv")) return "text/csv";
+  if (lower.endsWith(".tsv")) return "text/tab-separated-values";
+  if (lower.endsWith(".txt")) return "text/plain";
+  return "";
 }
 
 export function validateUpload(file: { type: string; size: number }, kind: UploadKind): string | null {

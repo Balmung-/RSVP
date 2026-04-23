@@ -1,5 +1,6 @@
 import type { IngestOutcome } from "@/lib/ingest";
 import type { UploadKind } from "@/lib/uploads";
+import { normalizeUploadContentType } from "@/lib/uploads";
 
 // Pure handler for POST /api/uploads. All side effects are funneled
 // through the `UploadsDeps` bag so tests can substitute fakes without
@@ -69,14 +70,15 @@ export async function uploadsHandler(req: Request, deps: UploadsDeps): Promise<U
     return { status: 400, body: { ok: false, error: "no_file" } };
   }
 
-  const err = deps.validateUpload({ type: file.type, size: file.size }, kind);
+  const normalizedContentType = normalizeUploadContentType(file.type, file.name);
+  const err = deps.validateUpload({ type: normalizedContentType, size: file.size }, kind);
   if (err) return { status: 400, body: { ok: false, error: err } };
 
   const buf = Buffer.from(await file.arrayBuffer());
   const saved = await deps.storeUpload({
     tenantId: me.activeTenantId,
     filename: file.name || "upload",
-    contentType: file.type,
+    contentType: normalizedContentType,
     size: file.size,
     contents: buf,
     uploadedBy: me.id,

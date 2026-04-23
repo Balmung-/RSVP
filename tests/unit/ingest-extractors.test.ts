@@ -21,6 +21,13 @@ test("classify: text/plain is text_plain", () => {
   assert.equal(classify("text/plain; charset=utf-8"), "text_plain");
 });
 
+test("classify: csv-like text types are text_plain", () => {
+  assert.equal(classify("text/csv"), "text_plain");
+  assert.equal(classify("text/csv; charset=utf-8"), "text_plain");
+  assert.equal(classify("application/csv"), "text_plain");
+  assert.equal(classify("text/tab-separated-values"), "text_plain");
+});
+
 test("classify: application/pdf is pdf", () => {
   assert.equal(classify("application/pdf"), "pdf");
 });

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { uploadsHandler, type UploadsDeps } from "../../src/app/api/uploads/handler";
 import type { IngestOutcome } from "../../src/lib/ingest";
+import { normalizeUploadContentType, validateUpload } from "../../src/lib/uploads";
 
 // P5-followup — route-level pins for POST /api/uploads.
 //
@@ -113,6 +114,37 @@ test("uploads: validateUpload rejection → 400 with returned message", async ()
   }
   assert.equal(stores.length, 0);
   assert.equal(extracts.length, 0);
+});
+
+test("uploads: validateUpload accepts csv-like document mimes", () => {
+  assert.equal(validateUpload({ type: "text/csv", size: 128 }, "doc"), null);
+  assert.equal(
+    validateUpload({ type: "text/tab-separated-values", size: 128 }, "doc"),
+    null,
+  );
+});
+
+test("uploads: normalizeUploadContentType infers spreadsheet/csv mime from filename", () => {
+  assert.equal(normalizeUploadContentType("", "guests.csv"), "text/csv");
+  assert.equal(normalizeUploadContentType("", "guests.tsv"), "text/tab-separated-values");
+  assert.equal(normalizeUploadContentType("", "guests.xls"), "application/vnd.ms-excel");
+  assert.equal(
+    normalizeUploadContentType("", "guests.xlsx"),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+});
+
+test("uploads: handler stores normalized csv contentType when browser omits mime", async () => {
+  const { deps, stores } = makeDeps({
+    validateUpload,
+  });
+  const res = await uploadsHandler(
+    makeReq(new File(["name,email"], "guests.csv", { type: "" }), "doc"),
+    deps,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(stores.length, 1);
+  assert.equal(stores[0].contentType, "text/csv");
 });
 
 // --- happy: extraction success -----------------------------------
