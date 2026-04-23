@@ -39,11 +39,18 @@ import type {
 //     mediaId (or link) must already exist at send time. The
 //     /media upload seam is P17-B.
 //
-// Response shape: Taqnyat proxies Meta's response envelope. Success
-// carries a `messages: [{id}]` array (Meta's WAMID). We accept that
-// as the primary identifier, with `messageId` / `requestId` /
-// top-level `id` as tolerant fallbacks in case Taqnyat flattens it
-// on their side.
+// Response shape: Taqnyat is not perfectly consistent here.
+//
+// In practice/documentation we've now seen three success carriers:
+//   - Meta-style envelope:         `messages: [{ id: "wamid..." }]`
+//   - Taqnyat flattened wrapper:   `statuses: [{ message_id: "wamid..." }]`
+//   - Single-object status field:  `statuses: { message_id: "wamid..." }`
+//
+// Older tolerant fallbacks (`messageId` / `requestId` / top-level
+// `id`) are still kept, but the documented `statuses.*.message_id`
+// carriers must be treated as first-class. Without them, a real
+// successful send can be misclassified as failed even though the API
+// returned 200 OK.
 //
 // Number normalization is shared with the SMS adapter — Taqnyat
 // documents the same `+`/`00`-stripped format for both channels.
@@ -78,6 +85,9 @@ export function taqnyatWhatsApp(
       });
       const j = (await res.json().catch(() => ({}))) as {
         messages?: Array<{ id?: string }>;
+        statuses?:
+          | Array<{ message_id?: string | number; messageId?: string | number; id?: string | number }>
+          | { message_id?: string | number; messageId?: string | number; id?: string | number };
         messageId?: string | number;
         requestId?: string | number;
         id?: string | number;
@@ -236,6 +246,9 @@ function documentRefEnvelope(
 
 function extractId(j: {
   messages?: Array<{ id?: string }>;
+  statuses?:
+    | Array<{ message_id?: string | number; messageId?: string | number; id?: string | number }>
+    | { message_id?: string | number; messageId?: string | number; id?: string | number };
   messageId?: string | number;
   requestId?: string | number;
   id?: string | number;
@@ -243,6 +256,19 @@ function extractId(j: {
   // Primary: Meta's envelope `messages: [{id: "wamid.xxx"}]`.
   const first = j.messages?.[0]?.id;
   if (first && String(first).length > 0) return String(first);
+  // Taqnyat's own documented response shape uses `statuses` carrying
+  // `message_id`. Accept both the array and singleton-object forms.
+  const statusEntry = Array.isArray(j.statuses) ? j.statuses[0] : j.statuses;
+  const statusCandidates = [
+    statusEntry?.message_id,
+    statusEntry?.messageId,
+    statusEntry?.id,
+  ];
+  for (const c of statusCandidates) {
+    if (c === undefined || c === null) continue;
+    const s = String(c);
+    if (s.length > 0) return s;
+  }
   for (const c of [j.messageId, j.requestId, j.id]) {
     if (c === undefined || c === null) continue;
     const s = String(c);

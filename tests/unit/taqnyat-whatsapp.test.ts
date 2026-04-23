@@ -536,6 +536,51 @@ test("send: extracts Meta envelope `messages[0].id` as providerId", async () => 
   }
 });
 
+test("send: accepts documented `statuses[0].message_id` success shape", async () => {
+  const restore = installFakeFetch({
+    status: 200,
+    responseJson: {
+      type: "whatsapp",
+      statuses: [{ message_id: "wamid.status_array" }],
+    },
+  });
+  try {
+    const provider = taqnyatWhatsApp({ token: "tok" });
+    const res = await provider.send({
+      kind: "text",
+      to: "+966500000000",
+      text: "x",
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal(res.providerId, "wamid.status_array");
+  } finally {
+    restore();
+  }
+});
+
+test("send: accepts documented singleton `statuses.message_id` success shape", async () => {
+  const restore = installFakeFetch({
+    status: 200,
+    responseJson: {
+      type: "template",
+      statuses: { message_id: "wamid.status_object" },
+    },
+  });
+  try {
+    const provider = taqnyatWhatsApp({ token: "tok" });
+    const res = await provider.send({
+      kind: "template",
+      to: "+966500000000",
+      templateName: "hello_world",
+      languageCode: "ar",
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal(res.providerId, "wamid.status_object");
+  } finally {
+    restore();
+  }
+});
+
 test("send: falls back to top-level `messageId` if Meta envelope is absent", async () => {
   const restore = installFakeFetch({
     status: 200,
