@@ -12,6 +12,7 @@ import { listTemplates, getTemplate } from "@/lib/templates";
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
 import { PDF_MIME } from "@/lib/uploads";
+import { applyCampaignTemplatePrefill } from "@/lib/campaign-template-prefill";
 
 export const dynamic = "force-dynamic";
 
@@ -26,10 +27,6 @@ async function createCampaign(formData: FormData) {
   const rawColor = String(formData.get("brandColor") ?? "").trim();
   const brandColor = /^#[0-9A-Fa-f]{3,8}$/.test(rawColor) ? rawColor : null;
 
-  // Mirror the edit-path guard: non-admins can only create a campaign
-  // in a team they belong to (or office-wide). Admins pass through.
-  // Otherwise an editor could orphan a new campaign into a team they
-  // don't see by picking a team ID from another editor's session.
   const teamIdRaw = String(formData.get("teamId") ?? "").trim();
   let teamId: string | null = null;
   if (teamIdRaw && teamsEnabled()) {
@@ -41,22 +38,6 @@ async function createCampaign(formData: FormData) {
     }
   }
 
-  // P17-D.1 + D.4: read the four WhatsApp-campaign fields (template
-  // name / language / variables + PDF upload FK) off the form. Parser
-  // is pure + DB-free; the FK resolution happens here so the
-  // dangling-or-unauthorized-upload-id case degrades to a silent null
-  // rather than tripping Prisma's FK constraint. See
-  // `src/lib/campaign-whatsapp-form.ts` for the full design-calls
-  // block.
-  //
-  // P17-D.4: the FK check also scopes on `uploadedBy = me.id` so an
-  // editor can only bind *their own* upload cuid to a campaign.
-  // Without this scope, any editor who learns another operator's
-  // upload id could attach another operator's PDF to their own
-  // campaign.
-  // Team-shared upload reuse is out of scope for the pilot — it
-  // needs an explicit ownership model on FileUpload beyond the
-  // single `uploadedBy` column.
   const wa = parseWhatsAppCampaignFields(formData);
   let whatsappDocumentUploadId: string | null = wa.whatsappDocumentUploadId;
   if (whatsappDocumentUploadId !== null) {
@@ -99,7 +80,7 @@ async function createCampaign(formData: FormData) {
 export default async function NewCampaign({
   searchParams,
 }: {
-  searchParams: { tpl?: string };
+  searchParams: { tpl?: string; emailTpl?: string; smsTpl?: string };
 }) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
@@ -117,27 +98,63 @@ export default async function NewCampaign({
     listTemplates(tenantId),
   ]);
 
-  // Prefill from a template if requested. We don't write anything — just
-  // seed the form's defaultValues.
-  let preset: Partial<Campaign> | null = null;
-  if (searchParams.tpl) {
-    const tpl = await getTemplate(tenantId, searchParams.tpl);
-    if (tpl) {
-      preset = {
-        locale: tpl.locale,
-        subjectEmail: tpl.kind === "email" ? tpl.subject ?? null : null,
-        templateEmail: tpl.kind === "email" ? tpl.body : null,
-        templateSms: tpl.kind === "sms" ? tpl.body : null,
-      };
-    }
-  }
+  const selectedEmailId = searchParams.emailTpl ?? null;
+  const selectedSmsId = searchParams.smsTpl ?? null;
+  const legacyTpl = searchParams.tpl ? await getTemplate(tenantId, searchParams.tpl) : null;
+  const [emailTemplate, smsTemplate] = await Promise.all([
+    selectedEmailId
+      ? getTemplate(tenantId, selectedEmailId)
+      : legacyTpl?.kind === "email"
+        ? Promise.resolve(legacyTpl)
+        : Promise.resolve(null),
+    selectedSmsId
+      ? getTemplate(tenantId, selectedSmsId)
+      : legacyTpl?.kind === "sms"
+        ? Promise.resolve(legacyTpl)
+        : Promise.resolve(null),
+  ]);
+  const emailLibraryTemplate =
+    emailTemplate?.kind === "email"
+      ? {
+          kind: "email" as const,
+          subject: emailTemplate.subject,
+          body: emailTemplate.body,
+        }
+      : null;
+  const smsLibraryTemplate =
+    smsTemplate?.kind === "sms"
+      ? {
+          kind: "sms" as const,
+          subject: smsTemplate.subject,
+          body: smsTemplate.body,
+        }
+      : null;
+
+  const preset = applyCampaignTemplatePrefill<Partial<Campaign>>(
+    emailTemplate?.kind === "email" ? { locale: emailTemplate.locale } : null,
+    emailLibraryTemplate,
+    smsLibraryTemplate,
+  );
+  const emailTemplates = templates.filter((template) => template.kind === "email");
+  const smsTemplates = templates.filter((template) => template.kind === "sms");
+  const emailBaseHref = `/campaigns/new${selectedSmsId ? `?smsTpl=${encodeURIComponent(selectedSmsId)}` : ""}`;
+  const smsBaseHref = `/campaigns/new${selectedEmailId ? `?emailTpl=${encodeURIComponent(selectedEmailId)}` : ""}`;
 
   return (
     <Shell title="New campaign" crumb={<Link href="/campaigns">Campaigns</Link>}>
       <TemplatePicker
-        templates={templates}
-        selected={searchParams.tpl ?? null}
-        baseHref="/campaigns/new"
+        templates={emailTemplates}
+        selected={selectedEmailId ?? (legacyTpl?.kind === "email" ? legacyTpl.id : null)}
+        baseHref={emailBaseHref}
+        label="Apply email copy from library"
+        paramKey="emailTpl"
+      />
+      <TemplatePicker
+        templates={smsTemplates}
+        selected={selectedSmsId ?? (legacyTpl?.kind === "sms" ? legacyTpl.id : null)}
+        baseHref={smsBaseHref}
+        label="Apply SMS copy from library"
+        paramKey="smsTpl"
       />
       <CampaignForm
         campaign={preset}

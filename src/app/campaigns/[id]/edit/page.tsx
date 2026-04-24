@@ -12,6 +12,9 @@ import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
 import { resolveOwnedWhatsAppUpload } from "@/lib/campaign-whatsapp-render";
 import { PDF_MIME } from "@/lib/uploads";
+import { listTemplates, getTemplate } from "@/lib/templates";
+import { TemplatePicker } from "@/components/TemplatePicker";
+import { applyCampaignTemplatePrefill } from "@/lib/campaign-template-prefill";
 
 export const dynamic = "force-dynamic";
 
@@ -124,7 +127,13 @@ async function deleteCampaign(id: string) {
   redirect("/");
 }
 
-export default async function EditCampaign({ params }: { params: { id: string } }) {
+export default async function EditCampaign({
+  params,
+  searchParams,
+}: {
+  params: { id: string };
+  searchParams: { tpl?: string; emailTpl?: string; smsTpl?: string };
+}) {
   const me = await getCurrentUser();
   if (!me) redirect("/login");
   const tenantId = requireActiveTenantId(me);
@@ -176,18 +185,61 @@ export default async function EditCampaign({ params }: { params: { id: string } 
   // Non-admins see only teams they belong to (plus the current team of
   // the campaign so the picker still reflects its actual assignment
   // and submits don't silently orphan it). Admins see every team.
-  const teams = teamsEnabled()
-    ? hasRole(me, "admin")
-      ? await prisma.team.findMany({ where: { tenantId, archivedAt: null }, orderBy: { name: "asc" } })
-      : await prisma.team.findMany({
-          where: {
-            tenantId,
-            archivedAt: null,
-            id: { in: [...new Set([...(await teamIdsForUser(me.id, tenantId)), ...(c.teamId ? [c.teamId] : [])])] },
-          },
-          orderBy: { name: "asc" },
-        })
-    : [];
+  const [teams, templates] = await Promise.all([
+    teamsEnabled()
+      ? hasRole(me, "admin")
+        ? prisma.team.findMany({ where: { tenantId, archivedAt: null }, orderBy: { name: "asc" } })
+        : prisma.team.findMany({
+            where: {
+              tenantId,
+              archivedAt: null,
+              id: { in: [...new Set([...(await teamIdsForUser(me.id, tenantId)), ...(c.teamId ? [c.teamId] : [])])] },
+            },
+            orderBy: { name: "asc" },
+          })
+      : Promise.resolve([]),
+    listTemplates(tenantId),
+  ]);
+  const selectedEmailId = searchParams.emailTpl ?? null;
+  const selectedSmsId = searchParams.smsTpl ?? null;
+  const legacyTpl = searchParams.tpl ? await getTemplate(tenantId, searchParams.tpl) : null;
+  const [emailTemplate, smsTemplate] = await Promise.all([
+    selectedEmailId
+      ? getTemplate(tenantId, selectedEmailId)
+      : legacyTpl?.kind === "email"
+        ? Promise.resolve(legacyTpl)
+        : Promise.resolve(null),
+    selectedSmsId
+      ? getTemplate(tenantId, selectedSmsId)
+      : legacyTpl?.kind === "sms"
+        ? Promise.resolve(legacyTpl)
+        : Promise.resolve(null),
+  ]);
+  const emailLibraryTemplate =
+    emailTemplate?.kind === "email"
+      ? {
+          kind: "email" as const,
+          subject: emailTemplate.subject,
+          body: emailTemplate.body,
+        }
+      : null;
+  const smsLibraryTemplate =
+    smsTemplate?.kind === "sms"
+      ? {
+          kind: "sms" as const,
+          subject: smsTemplate.subject,
+          body: smsTemplate.body,
+        }
+      : null;
+  const formCampaign = applyCampaignTemplatePrefill(
+    safeCampaign,
+    emailLibraryTemplate,
+    smsLibraryTemplate,
+  );
+  const emailTemplates = templates.filter((template) => template.kind === "email");
+  const smsTemplates = templates.filter((template) => template.kind === "sms");
+  const emailBaseHref = `/campaigns/${c.id}/edit${selectedSmsId ? `?smsTpl=${encodeURIComponent(selectedSmsId)}` : ""}`;
+  const smsBaseHref = `/campaigns/${c.id}/edit${selectedEmailId ? `?emailTpl=${encodeURIComponent(selectedEmailId)}` : ""}`;
   const bound = updateCampaign.bind(null, c.id);
   const boundDelete = deleteCampaign.bind(null, c.id);
 
@@ -204,8 +256,22 @@ export default async function EditCampaign({ params }: { params: { id: string } 
         </span>
       }
     >
+      <TemplatePicker
+        templates={emailTemplates}
+        selected={selectedEmailId ?? (legacyTpl?.kind === "email" ? legacyTpl.id : null)}
+        baseHref={emailBaseHref}
+        label="Apply email copy from library"
+        paramKey="emailTpl"
+      />
+      <TemplatePicker
+        templates={smsTemplates}
+        selected={selectedSmsId ?? (legacyTpl?.kind === "sms" ? legacyTpl.id : null)}
+        baseHref={smsBaseHref}
+        label="Apply SMS copy from library"
+        paramKey="smsTpl"
+      />
       <CampaignForm
-        campaign={safeCampaign}
+        campaign={formCampaign}
         action={bound}
         submitLabel="Save changes"
         cancelHref={`/campaigns/${c.id}`}

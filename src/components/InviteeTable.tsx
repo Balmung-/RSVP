@@ -130,11 +130,9 @@ export function InviteeTable({
                       {invitee.phoneE164 ?? <span className="text-ink-300">--</span>}
                     </td>
                     <td>
-                      <div className="flex items-center gap-2 text-xs text-ink-500">
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         {renderChannel(invitee.emailAvailable, invitee.emailSent, "email")}
-                        {renderSeparator(invitee.emailAvailable, invitee.smsAvailable || invitee.whatsappAvailable)}
                         {renderChannel(invitee.smsAvailable, invitee.smsSent, "sms")}
-                        {renderSeparator(invitee.smsAvailable, invitee.whatsappAvailable)}
                         {renderChannel(invitee.whatsappAvailable, invitee.whatsappSent, "whatsapp")}
                         {!invitee.emailAvailable && !invitee.smsAvailable && !invitee.whatsappAvailable ? (
                           <span className="text-ink-300">--</span>
@@ -228,10 +226,5 @@ export function InviteeTable({
 
 function renderChannel(active: boolean, sent: boolean, label: string) {
   if (!active) return null;
-  return <span className={sent ? "text-signal-live" : "text-ink-500"}>{label}</span>;
-}
-
-function renderSeparator(leftActive: boolean, rightActive: boolean) {
-  if (!leftActive || !rightActive) return null;
-  return <span className="text-ink-300">-</span>;
+  return <Badge tone={sent ? "live" : "muted"}>{label}</Badge>;
 }

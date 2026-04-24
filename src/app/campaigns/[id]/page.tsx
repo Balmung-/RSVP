@@ -5,6 +5,7 @@ import { Tabs, type TabItem } from "@/components/Tabs";
 import { InviteePanel } from "@/components/InviteePanel";
 import { ArrivalsBoard } from "@/components/ArrivalsBoard";
 import { CampaignHeader, CampaignHeaderCrumb } from "@/components/workspace/CampaignHeader";
+import { CampaignMessageSetup } from "@/components/workspace/CampaignMessageSetup";
 import { CampaignPulse } from "@/components/workspace/CampaignPulse";
 import { AttentionStrip, type AttentionItem } from "@/components/workspace/AttentionStrip";
 import { campaignPulse } from "@/lib/pulse";
@@ -58,6 +59,7 @@ import {
 import { canSeeCampaignRow } from "@/lib/teams";
 import { buildArrivalsFeed } from "@/lib/arrivals";
 import { hasWhatsAppTemplate, isChannelProviderEnabled } from "@/lib/channel-availability";
+import { buildCampaignChannelReadiness } from "@/lib/channel-readiness";
 
 export const dynamic = "force-dynamic";
 
@@ -340,16 +342,9 @@ export default async function CampaignWorkspace({
       templateWhatsAppName: campaign.templateWhatsAppName,
       templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
     });
-  const [withEmail, withSms, withWhatsApp, alreadyEmailSent, alreadySmsSent, alreadyWhatsAppSent] = await Promise.all([
-    emailEnabled
-      ? prisma.invitee.count({ where: { campaignId: campaign.id, email: { not: null } } })
-      : Promise.resolve(0),
-    smsEnabled
-      ? prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } })
-      : Promise.resolve(0),
-    whatsappEnabled
-      ? prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } })
-      : Promise.resolve(0),
+  const [inviteesWithEmail, inviteesWithPhone, alreadyEmailSent, alreadySmsSent, alreadyWhatsAppSent] = await Promise.all([
+    prisma.invitee.count({ where: { campaignId: campaign.id, email: { not: null } } }),
+    prisma.invitee.count({ where: { campaignId: campaign.id, phoneE164: { not: null } } }),
     prisma.invitee.count({
       where: {
         campaignId: campaign.id,
@@ -369,6 +364,9 @@ export default async function CampaignWorkspace({
       },
     }),
   ]);
+  const withEmail = emailEnabled ? inviteesWithEmail : 0;
+  const withSms = smsEnabled ? inviteesWithPhone : 0;
+  const withWhatsApp = whatsappEnabled ? inviteesWithPhone : 0;
   const sendSummary = {
     invited: stats.total,
     withEmail,
@@ -378,6 +376,16 @@ export default async function CampaignWorkspace({
     alreadySmsSent,
     alreadyWhatsAppSent,
   };
+  const messageSetup = buildCampaignChannelReadiness({
+    campaign,
+    providers: {
+      emailEnabled,
+      smsEnabled,
+      whatsappEnabled: isChannelProviderEnabled("whatsapp"),
+    },
+    inviteesWithEmail,
+    inviteesWithPhone,
+  });
 
   const pendingApprovalRow = await pendingApproval(campaign.id);
   const pendingRequester = pendingApprovalRow
@@ -482,6 +490,11 @@ export default async function CampaignWorkspace({
       <Tabs active={tab} items={tabsItems} />
 
       <div className="pt-8">
+        <CampaignMessageSetup
+          campaignId={campaign.id}
+          channels={messageSetup}
+          canWrite={canWrite}
+        />
         {tab === "invitees" ? (
           <InviteesTab
             campaign={campaign}

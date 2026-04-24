@@ -12,6 +12,7 @@ import { Drawer } from "./Drawer";
 import { Badge } from "./Badge";
 import { ConfirmButton } from "./ConfirmButton";
 import { hasWhatsAppTemplate, isChannelProviderEnabled } from "@/lib/channel-availability";
+import { buildInviteeChannelReadiness } from "@/lib/channel-readiness";
 
 // Right drawer for a single invitee. Read-only summary up top; write actions
 // are stacked in the footer. Opens whenever `?invitee=<id>` is in the URL.
@@ -79,6 +80,15 @@ export function InviteePanel({
     smsAvailable ? "sms" : null,
     whatsappAvailable ? "whatsapp" : null,
   ].filter((value): value is string => value !== null);
+  const channelReadiness = buildInviteeChannelReadiness({
+    campaign,
+    invitee,
+    providers: {
+      emailEnabled: isChannelProviderEnabled("email"),
+      smsEnabled: isChannelProviderEnabled("sms"),
+      whatsappEnabled: isChannelProviderEnabled("whatsapp"),
+    },
+  });
 
   return (
     <Drawer
@@ -128,7 +138,7 @@ export function InviteePanel({
               href={`/campaigns/${campaign.id}/invitees/${invitee.id}/edit`}
               className="btn-ghost text-xs"
             >
-              Edit details
+              Add or edit contact info
             </Link>
             <form action={resendAction} className="inline-flex flex-wrap gap-2">
               <input type="hidden" name="inviteeId" value={invitee.id} />
@@ -160,6 +170,29 @@ export function InviteePanel({
         <Kv label="Channels" value={channels.length > 0 ? channels.join(" - ") : "--"} />
         <Kv label="Added" value={fmt.format(invitee.createdAt)} />
         <Kv label="Tags" value={invitee.tags || "--"} />
+      </section>
+
+      <section className="mt-6">
+        <div className="mb-2 text-[11px] uppercase tracking-wider text-ink-400">Available send options</div>
+        <div className="grid grid-cols-1 gap-2">
+          {channelReadiness.map((channel) => (
+            <div
+              key={channel.channel}
+              className="flex items-start justify-between gap-3 rounded-lg border border-ink-100 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="text-sm text-ink-900">{channel.label}</div>
+                <div className="mt-0.5 text-xs text-ink-500">{channel.reason}</div>
+                {channel.detail ? (
+                  <div className="mt-0.5 truncate text-xs text-ink-400">{channel.detail}</div>
+                ) : null}
+              </div>
+              <Badge tone={channel.ready ? "live" : "hold"}>
+                {channel.ready ? "ready" : "unavailable"}
+              </Badge>
+            </div>
+          ))}
+        </div>
       </section>
 
       {invitee.notes ? (

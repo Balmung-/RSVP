@@ -128,7 +128,7 @@ export function CampaignForm({
       </details>
       <details className="col-span-2 group" open={!!(campaign?.subjectEmail || campaign?.templateEmail || campaign?.templateSms)}>
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
-          Templates - override defaults
+          Email & SMS message copy
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Field label="Email subject" className="col-span-2">
@@ -158,6 +158,10 @@ export function CampaignForm({
               defaultValue={campaign?.templateSms ?? ""}
             />
           </Field>
+          <p className="col-span-2 text-xs text-ink-400">
+            Reusable library templates can be applied above this form. What you save here is what the
+            campaign will actually send.
+          </p>
           <p className="col-span-2 text-xs text-ink-400">
             Tokens: <code>{"{{name}}"}</code> <code>{"{{title}}"}</code> <code>{"{{campaign}}"}</code>{" "}
             <code>{"{{venue}}"}</code> <code>{"{{eventAt}}"}</code> <code>{"{{rsvpUrl}}"}</code>{" "}
@@ -194,7 +198,7 @@ export function CampaignForm({
         }
       >
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
-          WhatsApp template - approved Meta template + positional params
+          WhatsApp message setup
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Field label="Template name">

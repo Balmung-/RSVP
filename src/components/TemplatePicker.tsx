@@ -2,39 +2,34 @@ import Link from "next/link";
 import type { Template } from "@prisma/client";
 import { Icon } from "./Icon";
 
-// Compact chooser for loading a template into a form. Rendered above the
-// form; each entry is a link that sets ?tpl=<id> on the current page.
-// The page re-fetches the template and prefills the form.
+// Compact chooser for loading library copy into a campaign form.
+// The picker only manipulates query params; the page re-reads the
+// selected template and seeds the form defaults on the server.
 
 export function TemplatePicker({
   templates,
   selected,
   baseHref,
   label = "Start from a template",
+  paramKey = "tpl",
 }: {
   templates: Template[];
   selected?: string | null;
   baseHref: string;
   label?: string;
+  paramKey?: string;
 }) {
   if (templates.length === 0) return null;
   return (
-    <details
-      className="panel-quiet mb-4 max-w-3xl"
-      open={!!selected}
-    >
+    <details className="panel-quiet mb-4 max-w-3xl" open={!!selected}>
       <summary className="cursor-pointer flex items-center gap-2 px-5 py-3 text-body text-ink-700 select-none hover:bg-ink-50 rounded-t-[14px]">
         <Icon name="file-text" size={14} className="text-ink-500" />
         {label}
-        {selected ? (
-          <span className="text-mini text-ink-400 ms-2">
-            · loaded
-          </span>
-        ) : null}
+        {selected ? <span className="text-mini text-ink-400 ms-2">loaded</span> : null}
       </summary>
       <ul className="border-t border-ink-100 divide-y divide-ink-100">
         {templates.map((t) => {
-          const href = withParam(baseHref, "tpl", t.id);
+          const href = withParam(baseHref, paramKey, t.id);
           const isSelected = selected === t.id;
           return (
             <li key={t.id}>
@@ -62,7 +57,7 @@ export function TemplatePicker({
       </ul>
       {selected ? (
         <div className="px-5 py-3 border-t border-ink-100 text-end">
-          <Link href={stripParam(baseHref, "tpl")} className="btn btn-ghost text-mini">
+          <Link href={stripParam(baseHref, paramKey)} className="btn btn-ghost text-mini">
             Clear
           </Link>
         </div>
