@@ -3,8 +3,9 @@ import { notFound, redirect } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { InviteeForm } from "@/components/InviteeForm";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { updateInvitee } from "@/lib/campaigns";
+import { canSeeCampaignRow } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -49,18 +50,24 @@ export default async function EditInvitee({
   params: { id: string; inviteeId: string };
   searchParams: { e?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
+  if (!hasRole(me, "editor")) redirect(`/campaigns/${params.id}`);
+
   const [c, i] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: params.id } }),
     prisma.invitee.findUnique({ where: { id: params.inviteeId } }),
   ]);
   if (!c || !i || i.campaignId !== c.id) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, c.tenantId, c.teamId))) notFound();
+
   const action = save.bind(null, c.id, i.id);
   const error = searchParams.e ? ERROR_MSG[searchParams.e] : null;
 
   return (
     <Shell
-      title={`Edit — ${i.fullName}`}
+      title={`Edit - ${i.fullName}`}
       crumb={
         <span>
           <Link href="/campaigns" className="hover:underline">Campaigns</Link>

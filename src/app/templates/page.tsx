@@ -49,8 +49,8 @@ export default async function TemplatesPage({
 
   return (
     <Shell
-      title="Templates"
-      crumb="Reusable messages"
+      title="Email & SMS templates"
+      crumb="Reusable outbound copy"
       actions={
         canWrite ? (
           <div className="flex items-center gap-2">
@@ -111,11 +111,12 @@ export default async function TemplatesPage({
       {templates.length === 0 ? (
         <EmptyState
           icon="file-text"
-          title="No templates yet"
+          title="No email or SMS templates yet"
           action={canWrite ? { label: "Create one", href: "/templates/new" } : undefined}
         >
-          Save your house style once. Every campaign and stage can load a
-          template to seed its subject and body - tweak from there.
+          This library only stores reusable email and SMS copy. WhatsApp
+          template name, language, and PDF attachment are configured per
+          campaign in the campaign form.
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-5xl">

@@ -4,8 +4,9 @@ import { Shell } from "@/components/Shell";
 import { StageForm } from "@/components/StageForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { prisma } from "@/lib/db";
-import { isAuthed, requireRole } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { parseLocalInput } from "@/lib/time";
+import { canSeeCampaignRow } from "@/lib/teams";
 import {
   updateStage,
   deleteStage,
@@ -65,19 +66,25 @@ export default async function EditStage({
   params: { id: string; stageId: string };
   searchParams: { e?: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
+  if (!hasRole(me, "editor")) redirect(`/campaigns/${params.id}`);
+
   const [c, s] = await Promise.all([
     prisma.campaign.findUnique({ where: { id: params.id } }),
     prisma.campaignStage.findUnique({ where: { id: params.stageId } }),
   ]);
   if (!c || !s || s.campaignId !== c.id) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, c.tenantId, c.teamId))) notFound();
+
   const bound = save.bind(null, c.id, s.id);
   const boundDelete = remove.bind(null, c.id, s.id);
   const error =
     searchParams.e === "invalid"
       ? "Pick at least one channel and a valid fire time."
       : searchParams.e === "locked"
-        ? "This stage moved to running or completed while you were editing — changes were not saved."
+        ? "This stage moved to running or completed while you were editing - changes were not saved."
         : searchParams.e === "running"
           ? "This stage is running right now; wait for it to finish before deleting."
           : null;

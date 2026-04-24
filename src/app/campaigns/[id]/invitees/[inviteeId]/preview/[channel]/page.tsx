@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
-import { isAuthed } from "@/lib/auth";
+import { getCurrentUser, hasRole, requireActiveTenantId } from "@/lib/auth";
 import { buildVars, renderEmail, renderSms } from "@/lib/preview";
 import { decideWhatsAppMessage } from "@/lib/providers/whatsapp/sendPlan";
 import { hasWhatsAppTemplate, isChannelProviderEnabled } from "@/lib/channel-availability";
+import { canSeeCampaignRow } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,10 @@ export default async function Preview({
 }: {
   params: { id: string; inviteeId: string; channel: string };
 }) {
-  if (!(await isAuthed())) redirect("/login");
+  const me = await getCurrentUser();
+  if (!me) redirect("/login");
+  const tenantId = requireActiveTenantId(me);
+
   if (params.channel !== "email" && params.channel !== "sms" && params.channel !== "whatsapp") notFound();
 
   const [campaign, invitee] = await Promise.all([
@@ -21,6 +25,7 @@ export default async function Preview({
     prisma.invitee.findUnique({ where: { id: params.inviteeId } }),
   ]);
   if (!campaign || !invitee || invitee.campaignId !== campaign.id) notFound();
+  if (!(await canSeeCampaignRow(me.id, hasRole(me, "admin"), tenantId, campaign.tenantId, campaign.teamId))) notFound();
 
   const previewLinks = buildPreviewLinks({
     email: isChannelProviderEnabled("email") && !!invitee.email,
