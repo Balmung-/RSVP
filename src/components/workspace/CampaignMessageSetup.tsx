@@ -20,6 +20,10 @@ export function CampaignMessageSetup({
             Email and SMS use the campaign's own copy. WhatsApp uses the campaign's approved template,
             language, and optional PDF header. This is the source of truth before send.
           </p>
+          <p className="mt-1 max-w-2xl text-mini text-ink-500">
+            The Templates page is only for reusable email and SMS copy. WhatsApp is chosen inside
+            campaign edit under <span className="font-medium text-ink-700">WhatsApp message setup</span>.
+          </p>
         </div>
         {canWrite ? (
           <Link href={`/campaigns/${campaignId}/edit`} className="btn-ghost text-xs shrink-0">

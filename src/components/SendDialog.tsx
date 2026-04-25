@@ -45,6 +45,14 @@ export function SendDialog({
   const isSending = status === "sending" || pending;
 
   if (!canWrite) return null;
+  if (!hasSendableOptions) {
+    return (
+      <Link href={editHref} className="btn btn-primary">
+        <Icon name="send" size={14} />
+        Fix message setup
+      </Link>
+    );
+  }
 
   const selected = countBySelection(channel, summary);
   const total = selected.email + selected.sms + selected.whatsapp;
@@ -56,12 +64,16 @@ export function SendDialog({
         className="btn btn-primary"
         disabled={isSending || summary.invited === 0}
         onClick={() => {
-          setChannel((current) => (options.some((option) => option.value === current) ? current : options[0].value));
+          setChannel((current) =>
+            options.some((option) => option.value === current)
+              ? current
+              : options[0]?.value ?? "all",
+          );
           setOpen(true);
         }}
       >
         <Icon name="send" size={14} />
-        {isSending ? "Sending..." : hasSendableOptions ? "Send invitations" : "Fix message setup"}
+        {isSending ? "Sending..." : "Send invitations"}
       </button>
 
       <Modal
