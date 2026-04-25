@@ -4,7 +4,11 @@ export type ApprovedWhatsAppTemplate = {
   templateName: string;
   language: string;
   kind: "document";
-  variableCount: number;
+  requiresDocument: boolean;
+  autoVariables: ReadonlyArray<{
+    label: string;
+    expression: string;
+  }>;
   note?: string;
 };
 
@@ -19,10 +23,18 @@ export const APPROVED_WHATSAPP_TEMPLATES: ApprovedWhatsAppTemplate[] = [
     templateName: "moather2026_moather2026",
     language: "ar",
     kind: "document",
-    variableCount: 0,
+    requiresDocument: true,
+    autoVariables: [],
     note: "Approved Taqnyat / Meta template for invitation PDFs.",
   },
 ];
+
+export function serializeApprovedWhatsAppVariables(
+  template: ApprovedWhatsAppTemplate,
+): string | null {
+  if (template.autoVariables.length === 0) return null;
+  return JSON.stringify(template.autoVariables.map((variable) => variable.expression));
+}
 
 export function findApprovedWhatsAppTemplateById(
   id: string | null | undefined,

@@ -10,11 +10,13 @@ import { logAction } from "@/lib/audit";
 import { teamsEnabled, canSeeCampaign, canSeeCampaignRow, teamIdsForUser } from "@/lib/teams";
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
+import { validateWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-validate";
 import { resolveOwnedWhatsAppUpload } from "@/lib/campaign-whatsapp-render";
 import { PDF_MIME } from "@/lib/uploads";
 import { listTemplates, getTemplate } from "@/lib/templates";
 import { TemplatePicker } from "@/components/TemplatePicker";
 import { applyCampaignTemplatePrefill } from "@/lib/campaign-template-prefill";
+import { setFlash } from "@/lib/flash";
 
 export const dynamic = "force-dynamic";
 
@@ -81,6 +83,18 @@ async function updateCampaign(id: string, formData: FormData) {
       select: { id: true },
     });
     if (!owned) whatsappDocumentUploadId = null;
+  }
+  const whatsappValidation = validateWhatsAppCampaignFields({
+    ...wa,
+    whatsappDocumentUploadId,
+  });
+  if (!whatsappValidation.ok) {
+    setFlash({
+      kind: "warn",
+      text: whatsappValidation.text,
+      detail: whatsappValidation.detail,
+    });
+    redirect(`/campaigns/${id}/edit`);
   }
 
   await prisma.campaign.update({

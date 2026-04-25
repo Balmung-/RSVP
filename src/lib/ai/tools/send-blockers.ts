@@ -317,11 +317,18 @@ export function computeBlockers(args: {
   if (
     wantsWhatsApp &&
     whatsAppTemplateConfigured &&
-    approvedWhatsAppTemplate?.variableCount !== 0 &&
+    approvedWhatsAppTemplate?.autoVariables.length !== 0 &&
     campaign.templateWhatsAppVariables !== null &&
     !isParsableWhatsAppVars(campaign.templateWhatsAppVariables)
   ) {
     blockers.push("template_vars_malformed");
+  }
+  if (
+    wantsWhatsApp &&
+    approvedWhatsAppTemplate?.requiresDocument &&
+    !campaign.whatsappDocumentUploadId
+  ) {
+    blockers.push("no_whatsapp_document");
   }
   // P17-C.5 / P17-G — doc-header readiness blocker. Gated on ALL of:
   //

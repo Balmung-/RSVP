@@ -1,4 +1,5 @@
 import { hasWhatsAppTemplate } from "./channel-availability";
+import { findApprovedWhatsAppTemplateByPair } from "./whatsapp-template-catalog";
 
 export type ProviderFlags = {
   emailEnabled: boolean;
@@ -33,15 +34,7 @@ export function buildInviteeChannelReadiness(args: {
   providers: ProviderFlags;
 }): ChannelReadiness[] {
   const { campaign, invitee, providers } = args;
-  const whatsAppConfigured = hasWhatsAppTemplate({
-    templateWhatsAppName: campaign.templateWhatsAppName,
-    templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
-  });
-  const whatsAppReason = describeWhatsAppConfigReason(
-    campaign.templateWhatsAppName,
-    campaign.templateWhatsAppLanguage,
-    "Campaign",
-  );
+  const whatsapp = describeWhatsAppReadiness(campaign, providers.whatsappEnabled);
 
   return [
     {
@@ -73,21 +66,13 @@ export function buildInviteeChannelReadiness(args: {
     {
       channel: "whatsapp",
       label: "WhatsApp",
-      ready: providers.whatsappEnabled && !!invitee.phoneE164 && whatsAppConfigured,
+      ready: providers.whatsappEnabled && !!invitee.phoneE164 && whatsapp.ready,
       reason: !providers.whatsappEnabled
         ? "Provider is off"
         : !invitee.phoneE164
           ? "No phone on this invitee"
-          : !whatsAppConfigured
-            ? whatsAppReason
-            : "Ready to send",
-      detail: whatsAppConfigured
-        ? joinBits([
-            campaign.templateWhatsAppName?.trim() || null,
-            campaign.templateWhatsAppLanguage?.trim() || null,
-            campaign.whatsappDocumentUploadId ? "PDF attached" : "No PDF attached",
-          ])
-        : invitee.phoneE164,
+          : whatsapp.reason,
+      detail: whatsapp.ready ? whatsapp.detail : invitee.phoneE164,
     },
   ];
 }
@@ -99,15 +84,7 @@ export function buildCampaignChannelReadiness(args: {
   inviteesWithPhone: number;
 }): ChannelReadiness[] {
   const { campaign, providers, inviteesWithEmail, inviteesWithPhone } = args;
-  const whatsAppConfigured = hasWhatsAppTemplate({
-    templateWhatsAppName: campaign.templateWhatsAppName,
-    templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
-  });
-  const whatsAppReason = describeWhatsAppConfigReason(
-    campaign.templateWhatsAppName,
-    campaign.templateWhatsAppLanguage,
-    "Template",
-  );
+  const whatsapp = describeWhatsAppReadiness(campaign, providers.whatsappEnabled);
 
   return [
     {
@@ -119,7 +96,10 @@ export function buildCampaignChannelReadiness(args: {
         : !hasBody(campaign.templateEmail)
           ? "Campaign email copy is missing"
           : "Ready",
-      detail: inviteesWithEmail > 0 ? `${inviteesWithEmail.toLocaleString()} invitees have email` : "No invitees have email yet",
+      detail:
+        inviteesWithEmail > 0
+          ? `${inviteesWithEmail.toLocaleString()} invitees have email`
+          : "No invitees have email yet",
     },
     {
       channel: "sms",
@@ -130,38 +110,76 @@ export function buildCampaignChannelReadiness(args: {
         : !hasBody(campaign.templateSms)
           ? "Campaign SMS copy is missing"
           : "Ready",
-      detail: inviteesWithPhone > 0 ? `${inviteesWithPhone.toLocaleString()} invitees have phone` : "No invitees have phone yet",
+      detail:
+        inviteesWithPhone > 0
+          ? `${inviteesWithPhone.toLocaleString()} invitees have phone`
+          : "No invitees have phone yet",
     },
     {
       channel: "whatsapp",
       label: "WhatsApp",
-      ready: providers.whatsappEnabled && whatsAppConfigured,
-      reason: !providers.whatsappEnabled
-        ? "Provider is off"
-        : !whatsAppConfigured
-          ? whatsAppReason
-          : "Ready",
+      ready: providers.whatsappEnabled && whatsapp.ready,
+      reason: !providers.whatsappEnabled ? "Provider is off" : whatsapp.reason,
       detail: joinBits([
-        inviteesWithPhone > 0 ? `${inviteesWithPhone.toLocaleString()} invitees have phone` : "No invitees have phone yet",
-        campaign.templateWhatsAppName?.trim() || null,
-        campaign.templateWhatsAppLanguage?.trim() || null,
-        campaign.whatsappDocumentUploadId ? "PDF attached" : "No PDF attached",
+        inviteesWithPhone > 0
+          ? `${inviteesWithPhone.toLocaleString()} invitees have phone`
+          : "No invitees have phone yet",
+        whatsapp.detail,
       ]),
     },
   ];
 }
 
-function describeWhatsAppConfigReason(
-  name: string | null,
-  language: string | null,
-  subject: "Campaign" | "Template",
-): string {
-  const hasName = !!name && name.trim().length > 0;
-  const hasLanguage = !!language && language.trim().length > 0;
-  if (!hasName && !hasLanguage) return `${subject} name and language are required`;
-  if (!hasName) return `${subject} name is required`;
-  if (!hasLanguage) return `${subject} language is required`;
-  return "Ready";
+function describeWhatsAppReadiness(
+  campaign: CampaignChannelConfig,
+  providerEnabled: boolean,
+): { ready: boolean; reason: string; detail: string | null } {
+  const configured = hasWhatsAppTemplate({
+    templateWhatsAppName: campaign.templateWhatsAppName,
+    templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
+  });
+  const approvedTemplate = configured
+    ? findApprovedWhatsAppTemplateByPair(
+        campaign.templateWhatsAppName,
+        campaign.templateWhatsAppLanguage,
+      )
+    : null;
+
+  if (!providerEnabled) {
+    return { ready: false, reason: "Provider is off", detail: null };
+  }
+  if (!configured) {
+    return {
+      ready: false,
+      reason: "Choose an approved WhatsApp template",
+      detail: "Open Edit message setup to select the campaign's WhatsApp template.",
+    };
+  }
+  if (approvedTemplate?.requiresDocument && !campaign.whatsappDocumentUploadId) {
+    return {
+      ready: false,
+      reason: "Invitation PDF is required",
+      detail: `${approvedTemplate.label} uses a PDF document header.`,
+    };
+  }
+
+  const detail = approvedTemplate
+    ? joinBits([
+        approvedTemplate.label,
+        approvedTemplate.language,
+        approvedTemplate.requiresDocument
+          ? campaign.whatsappDocumentUploadId
+            ? "PDF attached"
+            : "PDF missing"
+          : null,
+      ])
+    : joinBits([
+        campaign.templateWhatsAppName?.trim() || null,
+        campaign.templateWhatsAppLanguage?.trim() || null,
+        campaign.whatsappDocumentUploadId ? "PDF attached" : null,
+      ]);
+
+  return { ready: true, reason: "Ready", detail };
 }
 
 function hasBody(value: string | null): boolean {

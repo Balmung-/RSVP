@@ -17,8 +17,8 @@ export function CampaignMessageSetup({
         <div>
           <h2 className="text-sub text-ink-900">Message setup</h2>
           <p className="mt-1 max-w-2xl text-body text-ink-500">
-            Email and SMS use the campaign's own copy. WhatsApp uses the campaign's approved template,
-            language, and optional PDF header. This is the source of truth before send.
+            Email and SMS use the campaign's own copy. WhatsApp uses an approved provider template plus
+            any required PDF header. This is the source of truth before send.
           </p>
           <p className="mt-1 max-w-2xl text-mini text-ink-500">
             The Templates page is only for reusable email and SMS copy. WhatsApp is chosen inside

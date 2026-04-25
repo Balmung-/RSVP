@@ -11,7 +11,7 @@ test("campaign readiness marks provider-off SMS as setup needed instead of ready
     campaign: {
       templateEmail: "hello",
       templateSms: "hi",
-      templateWhatsAppName: "approved_template",
+      templateWhatsAppName: "moather2026_moather2026",
       templateWhatsAppLanguage: "ar",
       whatsappDocumentUploadId: "file_123",
     },
@@ -31,12 +31,12 @@ test("campaign readiness marks provider-off SMS as setup needed instead of ready
   );
 });
 
-test("invitee readiness makes phone-only contact WhatsApp-ready when SMS is off", () => {
+test("invitee readiness makes phone-only contact WhatsApp-ready when approved template + PDF are configured", () => {
   const channels = buildInviteeChannelReadiness({
     campaign: {
       templateEmail: null,
       templateSms: null,
-      templateWhatsAppName: "approved_template",
+      templateWhatsAppName: "moather2026_moather2026",
       templateWhatsAppLanguage: "ar",
       whatsappDocumentUploadId: "file_123",
     },
@@ -51,17 +51,15 @@ test("invitee readiness makes phone-only contact WhatsApp-ready when SMS is off"
     },
   });
 
-  assert.equal(channels.find((channel) => channel.channel === "email")?.ready, false);
-  assert.equal(channels.find((channel) => channel.channel === "sms")?.ready, false);
   assert.equal(channels.find((channel) => channel.channel === "whatsapp")?.ready, true);
   assert.match(
     channels.find((channel) => channel.channel === "whatsapp")?.detail ?? "",
-    /approved_template/,
+    /Invitation PDF \(AR\)/,
   );
 });
 
-test("invitee readiness explains missing WhatsApp template instead of hiding the channel reason", () => {
-  const channels = buildInviteeChannelReadiness({
+test("campaign readiness explains missing approved WhatsApp template", () => {
+  const channels = buildCampaignChannelReadiness({
     campaign: {
       templateEmail: "hello",
       templateSms: "hi",
@@ -69,32 +67,30 @@ test("invitee readiness explains missing WhatsApp template instead of hiding the
       templateWhatsAppLanguage: null,
       whatsappDocumentUploadId: null,
     },
-    invitee: {
-      email: "person@example.com",
-      phoneE164: "+966501234567",
-    },
     providers: {
       emailEnabled: true,
       smsEnabled: true,
       whatsappEnabled: true,
     },
+    inviteesWithEmail: 3,
+    inviteesWithPhone: 5,
   });
 
   assert.equal(channels.find((channel) => channel.channel === "whatsapp")?.ready, false);
   assert.equal(
     channels.find((channel) => channel.channel === "whatsapp")?.reason,
-    "Campaign name and language are required",
+    "Choose an approved WhatsApp template",
   );
 });
 
-test("campaign readiness pinpoints a missing WhatsApp language when the template name exists", () => {
+test("campaign readiness marks approved document template incomplete when PDF is missing", () => {
   const channels = buildCampaignChannelReadiness({
     campaign: {
       templateEmail: null,
       templateSms: null,
       templateWhatsAppName: "moather2026_moather2026",
-      templateWhatsAppLanguage: null,
-      whatsappDocumentUploadId: "file_123",
+      templateWhatsAppLanguage: "ar",
+      whatsappDocumentUploadId: null,
     },
     providers: {
       emailEnabled: false,
@@ -105,8 +101,9 @@ test("campaign readiness pinpoints a missing WhatsApp language when the template
     inviteesWithPhone: 5,
   });
 
+  assert.equal(channels.find((channel) => channel.channel === "whatsapp")?.ready, false);
   assert.equal(
     channels.find((channel) => channel.channel === "whatsapp")?.reason,
-    "Template language is required",
+    "Invitation PDF is required",
   );
 });

@@ -11,8 +11,10 @@ import { teamsEnabled, teamIdsForUser } from "@/lib/teams";
 import { listTemplates, getTemplate } from "@/lib/templates";
 import { safeBrandUrl } from "@/lib/attachments";
 import { parseWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-form";
+import { validateWhatsAppCampaignFields } from "@/lib/campaign-whatsapp-validate";
 import { PDF_MIME } from "@/lib/uploads";
 import { applyCampaignTemplatePrefill } from "@/lib/campaign-template-prefill";
+import { setFlash } from "@/lib/flash";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +52,18 @@ async function createCampaign(formData: FormData) {
       select: { id: true },
     });
     if (!owned) whatsappDocumentUploadId = null;
+  }
+  const whatsappValidation = validateWhatsAppCampaignFields({
+    ...wa,
+    whatsappDocumentUploadId,
+  });
+  if (!whatsappValidation.ok) {
+    setFlash({
+      kind: "warn",
+      text: whatsappValidation.text,
+      detail: whatsappValidation.detail,
+    });
+    redirect("/campaigns/new");
   }
 
   const c = await prisma.campaign.create({

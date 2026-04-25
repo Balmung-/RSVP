@@ -224,6 +224,7 @@ test("approved zero-var template: malformed stale vars are ignored", async () =>
         templateWhatsAppName: "moather2026_moather2026",
         templateWhatsAppLanguage: "ar",
         templateWhatsAppVariables: "{stale-json",
+        whatsappDocumentUploadId: "upl-approved-doc",
       }),
     }),
   );
@@ -583,12 +584,11 @@ test("doc header: plain template (no upload id) → headerDocument absent (key n
   );
 });
 
-test("doc header: empty-string upload id → headerDocument absent (length-0 is not configured)", async () => {
-  // Mirrors the predicate's length-0 discipline. An empty string in
-  // the FK column — which could happen via a botched admin edit or a
-  // future form-submit bug — must be treated as "not configured,"
-  // not as "configured but with id=''". The planner degrades to the
-  // plain template path rather than building a `/api/files/` URL.
+test("doc header: empty-string upload id → reason:no_whatsapp_document", async () => {
+  // The approved invitation template REQUIRES a document header. A
+  // length-0 FK is treated as "not configured", so the planner must
+  // refuse the send rather than silently downgrade to a plain
+  // template send that Meta would not match to the approved shape.
   const r = decideWhatsAppMessage(
     mkInput({
       campaign: mkCampaign({
@@ -598,14 +598,9 @@ test("doc header: empty-string upload id → headerDocument absent (length-0 is 
       }),
     }),
   );
-  assert.equal(r.ok, true);
-  if (!r.ok) return;
-  assert.equal(r.message.kind, "template");
-  if (r.message.kind !== "template") return;
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(r.message, "headerDocument"),
-    false,
-  );
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "no_whatsapp_document");
 });
 
 test("doc header: upload id present but templateName null → reason:no_template (doc can't rescue missing template)", async () => {

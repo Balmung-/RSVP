@@ -2,13 +2,8 @@ import Link from "next/link";
 import type { Campaign, Team } from "@prisma/client";
 import { toLocalInput } from "@/lib/time";
 import { FileInput } from "./FileInput";
-import { WhatsAppDocumentInput } from "./WhatsAppDocumentInput";
 import { Field } from "./Field";
-import {
-  APPROVED_WHATSAPP_TEMPLATES,
-  findApprovedWhatsAppTemplateByName,
-  findApprovedWhatsAppTemplateByPair,
-} from "@/lib/whatsapp-template-catalog";
+import { WhatsAppCampaignSetup } from "./WhatsAppCampaignSetup";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
 // The submit action is whatever the caller binds - we just collect fields.
@@ -34,21 +29,6 @@ export function CampaignForm({
    */
   whatsappDocumentFilename?: string | null;
 }) {
-  const selectedWhatsAppTemplate = findApprovedWhatsAppTemplateByPair(
-    campaign?.templateWhatsAppName ?? null,
-    campaign?.templateWhatsAppLanguage ?? null,
-  );
-  const inferredWhatsAppTemplate =
-    selectedWhatsAppTemplate ??
-    findApprovedWhatsAppTemplateByName(campaign?.templateWhatsAppName ?? null);
-  const defaultWhatsAppTemplate =
-    inferredWhatsAppTemplate ??
-    (APPROVED_WHATSAPP_TEMPLATES.length === 1 ? APPROVED_WHATSAPP_TEMPLATES[0] : null);
-  const showWhatsAppAdvanced =
-    !!campaign?.templateWhatsAppVariables ||
-    (!!campaign?.templateWhatsAppName &&
-      !!campaign?.templateWhatsAppLanguage &&
-      !inferredWhatsAppTemplate);
   return (
     <form action={action} className="panel max-w-3xl p-10 grid grid-cols-2 gap-6">
       <Field label="Name" className="col-span-2">
@@ -210,9 +190,9 @@ export function CampaignForm({
         className="col-span-2 group"
         open={
           !!(
-            selectedWhatsAppTemplate ||
+            campaign?.templateWhatsAppName ||
+            campaign?.templateWhatsAppLanguage ||
             campaign?.templateWhatsAppVariables ||
-            showWhatsAppAdvanced ||
             campaign?.whatsappDocumentUploadId
           )
         }
@@ -220,76 +200,13 @@ export function CampaignForm({
         <summary className="cursor-pointer text-sm text-ink-500 select-none py-2">
           WhatsApp message setup
         </summary>
-        <div className="mt-4 grid grid-cols-2 gap-6">
-          <Field label="Approved WhatsApp template" className="col-span-2">
-            <select
-              name="templateWhatsAppPreset"
-              className="field"
-              defaultValue={defaultWhatsAppTemplate?.id ?? ""}
-            >
-              <option value="">Select approved template</option>
-              {APPROVED_WHATSAPP_TEMPLATES.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <p className="col-span-2 text-xs text-ink-400">
-            Taqnyat being enabled means WhatsApp can send. Each campaign
-            still chooses which approved WhatsApp template it should use.
-            The picker above fills the exact approved Meta name and language
-            for you.
-          </p>
-          <details className="col-span-2 group" open={showWhatsAppAdvanced}>
-            <summary className="cursor-pointer text-xs text-ink-500 select-none py-1">
-              Advanced WhatsApp fields
-            </summary>
-            <div className="mt-3 grid grid-cols-2 gap-6">
-              <Field label="Template name">
-                <input
-                  name="templateWhatsAppName"
-                  className="field"
-                  maxLength={200}
-                  defaultValue={campaign?.templateWhatsAppName ?? ""}
-                  placeholder="moather2026_moather2026"
-                />
-              </Field>
-              <Field label="Language">
-                <input
-                  name="templateWhatsAppLanguage"
-                  className="field"
-                  maxLength={10}
-                  defaultValue={campaign?.templateWhatsAppLanguage ?? ""}
-                  placeholder="ar"
-                />
-              </Field>
-              <Field label="Positional variables (JSON array)" className="col-span-2">
-                <textarea
-                  name="templateWhatsAppVariables"
-                  rows={2}
-                  className="field font-mono text-xs"
-                  maxLength={2000}
-                  defaultValue={campaign?.templateWhatsAppVariables ?? ""}
-                  placeholder={'["{{name}}", "{{venue}}"]'}
-                />
-              </Field>
-              <p className="col-span-2 text-xs text-ink-400">
-                Only use the advanced fields if you need a template that is not
-                in the approved picker yet. Variables are a JSON array in the
-                template's positional order.
-              </p>
-            </div>
-          </details>
-          <div className="col-span-2">
-            <WhatsAppDocumentInput
-              name="whatsappDocumentUploadId"
-              defaultValue={campaign?.whatsappDocumentUploadId ?? ""}
-              defaultFilename={whatsappDocumentFilename ?? ""}
-              hint="PDF attached as the template header on send. Leave empty for templates without a document header."
-            />
-          </div>
-        </div>
+        <WhatsAppCampaignSetup
+          templateName={campaign?.templateWhatsAppName ?? null}
+          templateLanguage={campaign?.templateWhatsAppLanguage ?? null}
+          templateVariables={campaign?.templateWhatsAppVariables ?? null}
+          whatsappDocumentUploadId={campaign?.whatsappDocumentUploadId ?? null}
+          whatsappDocumentFilename={whatsappDocumentFilename ?? null}
+        />
       </details>
       <div className="col-span-2 flex items-center justify-end gap-3 pt-2">
         <Link href={cancelHref} className="btn-ghost">Cancel</Link>

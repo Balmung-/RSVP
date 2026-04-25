@@ -90,7 +90,13 @@ export type WhatsAppPlanResult =
   //                            operator's configuration is broken;
   //                            caller should refuse the whole send
   //                            rather than silently drop variables.
-  | { ok: false; reason: "no_template" | "template_vars_malformed" };
+  | {
+      ok: false;
+      reason:
+        | "no_template"
+        | "template_vars_malformed"
+        | "no_whatsapp_document";
+    };
 
 export function decideWhatsAppMessage(
   input: WhatsAppPlanInput,
@@ -111,10 +117,13 @@ export function decideWhatsAppMessage(
       campaign.templateWhatsAppName,
       campaign.templateWhatsAppLanguage,
     );
+    if (approvedTemplate?.requiresDocument && !campaign.whatsappDocumentUploadId) {
+      return { ok: false, reason: "no_whatsapp_document" };
+    }
     let variables: string[] | undefined;
     if (
       campaign.templateWhatsAppVariables !== null &&
-      approvedTemplate?.variableCount !== 0
+      approvedTemplate?.autoVariables.length !== 0
     ) {
       const parsed = tryParseStringArray(campaign.templateWhatsAppVariables);
       if (!parsed.ok) {
