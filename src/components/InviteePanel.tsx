@@ -299,7 +299,9 @@ function ChannelHistory({ label, items }: { label: string; items: Invitation[] }
                 <div>
                   <Badge tone={tone}>{invitation.status}</Badge>
                   {invitation.error ? (
-                    <div className="mt-1 max-w-[14rem] truncate text-ink-400">{invitation.error}</div>
+                    <div className="mt-1 max-w-[16rem] whitespace-pre-wrap break-words text-ink-400">
+                      {invitation.error}
+                    </div>
                   ) : null}
                 </div>
                 <div className="tabular-nums text-ink-400">{fmt.format(invitation.createdAt)}</div>

@@ -156,6 +156,11 @@ export type SendCampaignChannel =
   | "whatsapp"
   | "both"
   | "all";
+export type DispatchFailureReason = {
+  channel: "email" | "sms" | "whatsapp";
+  error: string;
+  count: number;
+};
 
 // Channel-selector resolver. The surface is a single function so
 // callers don't each re-derive the set from the group semantics.
@@ -189,7 +194,15 @@ export async function sendCampaign(
     data: { status: "sending" },
   });
   if (acquired.count === 0) {
-    return { locked: true as const, email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0 };
+    return {
+      locked: true as const,
+      email: 0,
+      sms: 0,
+      whatsapp: 0,
+      skipped: 0,
+      failed: 0,
+      failureReasons: [] as DispatchFailureReason[],
+    };
   }
 
   const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
@@ -232,6 +245,7 @@ export async function sendCampaign(
   }
 
   let email = 0, sms = 0, whatsapp = 0, failed = 0;
+  const failureCounts = new Map<string, DispatchFailureReason>();
 
   try {
     const results = await mapConcurrent(jobs, 5, async (job) => {
@@ -247,6 +261,17 @@ export async function sendCampaign(
         else whatsapp++;
       } else {
         failed++;
+        const error = (r.error ?? "unknown error").slice(0, 300);
+        const key = `${jobs[k].channel}:${error}`;
+        const existing = failureCounts.get(key);
+        if (existing) existing.count++;
+        else {
+          failureCounts.set(key, {
+            channel: jobs[k].channel,
+            error,
+            count: 1,
+          });
+        }
       }
     }
   } finally {
@@ -259,7 +284,15 @@ export async function sendCampaign(
     });
   }
 
-  return { locked: false as const, email, sms, whatsapp, skipped, failed };
+  return {
+    locked: false as const,
+    email,
+    sms,
+    whatsapp,
+    skipped,
+    failed,
+    failureReasons: [...failureCounts.values()],
+  };
 }
 
 // Create / update a single invitee via the admin UI. Returns the row or an
@@ -404,9 +437,9 @@ export async function resendSelection(
   campaignId: string,
   inviteeIds: string[],
   opts: { channels: ResendChannel[]; onlyUnsent: boolean },
-): Promise<{ email: number; sms: number; whatsapp: number; skipped: number; failed: number }> {
+): Promise<{ email: number; sms: number; whatsapp: number; skipped: number; failed: number; failureReasons: DispatchFailureReason[] }> {
   const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
-  if (!campaign) return { email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0 };
+  if (!campaign) return { email: 0, sms: 0, whatsapp: 0, skipped: 0, failed: 0, failureReasons: [] };
   const invitees = await prisma.invitee.findMany({
     where: { campaignId, id: { in: inviteeIds } },
     include: { invitations: true },
@@ -437,6 +470,7 @@ export async function resendSelection(
     return sendWhatsApp(campaign, job.invitee);
   });
   let email = 0, sms = 0, whatsapp = 0, failed = 0;
+  const failureCounts = new Map<string, DispatchFailureReason>();
   for (let k = 0; k < jobs.length; k++) {
     const res = results[k];
     if (res.ok) {
@@ -445,9 +479,20 @@ export async function resendSelection(
       else whatsapp++;
     } else {
       failed++;
+      const error = (res.error ?? "unknown error").slice(0, 300);
+      const key = `${jobs[k].channel}:${error}`;
+      const existing = failureCounts.get(key);
+      if (existing) existing.count++;
+      else {
+        failureCounts.set(key, {
+          channel: jobs[k].channel,
+          error,
+          count: 1,
+        });
+      }
     }
   }
-  return { email, sms, whatsapp, skipped, failed };
+  return { email, sms, whatsapp, skipped, failed, failureReasons: [...failureCounts.values()] };
 }
 
 export async function findDuplicates(campaignId: string) {

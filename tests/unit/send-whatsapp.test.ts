@@ -279,7 +279,7 @@ test("unsubscribed: refusal short-circuits AFTER the check but before write", as
 
 // ---- 3. planner failure: no template configured ------------------
 
-test("planner no_template: writes failed Invitation, no provider call, no EventLog", async () => {
+test("planner no_template: writes failed Invitation, no provider call, invite.failed EventLog", async () => {
   // Unlike unsubscribed, this represents a CAMPAIGN configuration bug
   // the operator needs to see in the send stats. Writing a failed row
   // surfaces it in the audit trail.
@@ -303,14 +303,21 @@ test("planner no_template: writes failed Invitation, no provider call, no EventL
     status: "failed",
     error: "no_template",
   });
-  // Provider never called, no EventLog.
+  // Provider never called, but the failure is now logged so operators
+  // can see the exact refusal reason in campaign activity and
+  // deliverability.
   assert.equal(effects.sendCalls.length, 0);
-  assert.equal(effects.eventLogs.length, 0);
+  assert.equal(effects.eventLogs.length, 1);
+  assert.equal(effects.eventLogs[0].kind, "invite.failed");
+  assert.deepEqual(JSON.parse(effects.eventLogs[0].data), {
+    channel: "whatsapp",
+    error: "no_template",
+  });
 });
 
 // ---- 4. planner failure: malformed variables JSON ----------------
 
-test("planner template_vars_malformed: writes failed row with structured error", async () => {
+test("planner template_vars_malformed: writes failed row with structured error and EventLog", async () => {
   const { deps, effects } = mkDeps();
   const r = await performWhatsAppSend(
     deps,
@@ -330,7 +337,12 @@ test("planner template_vars_malformed: writes failed row with structured error",
   assert.equal(effects.updateCalls[0].status, "failed");
   assert.equal(effects.updateCalls[0].error, "template_vars_malformed");
   assert.equal(effects.sendCalls.length, 0);
-  assert.equal(effects.eventLogs.length, 0);
+  assert.equal(effects.eventLogs.length, 1);
+  assert.equal(effects.eventLogs[0].kind, "invite.failed");
+  assert.deepEqual(JSON.parse(effects.eventLogs[0].data), {
+    channel: "whatsapp",
+    error: "template_vars_malformed",
+  });
 });
 
 // ---- 5. happy path: template -------------------------------------
@@ -433,7 +445,7 @@ test("happy path session text: sessionOpen=true + templateSms → kind:'text'", 
 
 // ---- 7. provider failure -----------------------------------------
 
-test("provider failure: row marked failed with provider error, no EventLog", async () => {
+test("provider failure: row marked failed with provider error and invite.failed EventLog", async () => {
   const { deps, effects } = mkDeps({
     sendResult: { ok: false, error: "provider_rate_limited" },
   });
@@ -457,9 +469,14 @@ test("provider failure: row marked failed with provider error, no EventLog", asy
     status: "failed",
     error: "provider_rate_limited",
   });
-  // Critically: no EventLog. `invite.sent` means the invite actually
-  // went out. Logging on provider failure would corrupt the audit.
-  assert.equal(effects.eventLogs.length, 0);
+  // Provider failure is distinct from `invite.sent`, so it emits its
+  // own failure log without corrupting the success audit trail.
+  assert.equal(effects.eventLogs.length, 1);
+  assert.equal(effects.eventLogs[0].kind, "invite.failed");
+  assert.deepEqual(JSON.parse(effects.eventLogs[0].data), {
+    channel: "whatsapp",
+    error: "provider_rate_limited",
+  });
 });
 
 // ---- 8. session text refused without sessionOpen -----------------

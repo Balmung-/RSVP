@@ -11,14 +11,9 @@ import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/admin
 
 export const dynamic = "force-dynamic";
 
-// Campaign-scoped activity. Takes advantage of the
-// EventLog(refType, refId, createdAt) index we added — fetches events
-// where the refType is {campaign, stage, invitee} and the refId
-// belongs to this campaign. Big campaigns (>2000 invitees) drop the
-// invitee scan to keep the query cheap and show a hint.
-
 const PAGE_SIZE = 50;
 const INVITEE_SCAN_CAP = 2000;
+const INVITATION_SCAN_CAP = 5000;
 
 export default async function CampaignActivity({
   params,
@@ -42,30 +37,38 @@ export default async function CampaignActivity({
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
 
-  // Scope by refType + refId sets we know belong to this campaign.
-  // Cheaper than adding campaignId to EventLog schema, and the
-  // (refType, refId, createdAt) index makes each OR branch indexed.
-  const [stageIds, inviteeCount] = await Promise.all([
+  const [stageIds, inviteeCount, invitationCount] = await Promise.all([
     prisma.campaignStage.findMany({ where: { campaignId: params.id }, select: { id: true } }),
     prisma.invitee.count({ where: { campaignId: params.id } }),
+    prisma.invitation.count({ where: { campaignId: params.id } }),
   ]);
-  const inviteeIds = inviteeCount <= INVITEE_SCAN_CAP
-    ? (await prisma.invitee.findMany({ where: { campaignId: params.id }, select: { id: true } })).map((i) => i.id)
-    : null;
-  const inviteeScanCapped = inviteeIds === null;
 
-  // Per-invitation events (invite.sent, delivery.webhook) use refId =
-  // invitation.id which is its own id-space, not the invitee.id — we
-  // skip them here to avoid a second large IN clause, and they're still
-  // reachable from the global /events audit view.
+  const inviteeIds = inviteeCount <= INVITEE_SCAN_CAP
+    ? (await prisma.invitee.findMany({
+        where: { campaignId: params.id },
+        select: { id: true },
+      })).map((invitee) => invitee.id)
+    : null;
+  const invitationIds = invitationCount <= INVITATION_SCAN_CAP
+    ? (await prisma.invitation.findMany({
+        where: { campaignId: params.id },
+        select: { id: true },
+      })).map((invitation) => invitation.id)
+    : null;
+
+  const inviteeScanCapped = inviteeIds === null;
+  const invitationScanCapped = invitationIds === null;
+
   const scopedOr = [
     { refType: "campaign", refId: params.id },
-    ...(stageIds.length > 0 ? [{ refType: "stage", refId: { in: stageIds.map((s) => s.id) } }] : []),
+    ...(stageIds.length > 0 ? [{ refType: "stage", refId: { in: stageIds.map((stage) => stage.id) } }] : []),
     ...(inviteeIds && inviteeIds.length > 0
       ? [{ refType: "invitee", refId: { in: inviteeIds } }]
       : []),
+    ...(invitationIds && invitationIds.length > 0
+      ? [{ refType: "invitation", refId: { in: invitationIds } }]
+      : []),
   ];
-
   const where = scopedOr.length === 1 ? scopedOr[0] : { OR: scopedOr };
 
   const [total, rows] = await Promise.all([
@@ -79,32 +82,32 @@ export default async function CampaignActivity({
     }),
   ]);
 
-  const hrefFor = (p: number) => `/campaigns/${params.id}/activity?page=${p}`;
+  const hrefFor = (nextPage: number) => `/campaigns/${params.id}/activity?page=${nextPage}`;
 
   return (
     <Shell
       title={locale === "ar" ? "سجل النشاط" : "Activity"}
-      crumb={
+      crumb={(
         <span>
-          <Link href="/campaigns" className="hover:text-ink-900 transition-colors">Campaigns</Link>
+          <Link href="/campaigns" className="transition-colors hover:text-ink-900">Campaigns</Link>
           <span className="mx-1.5 text-ink-300">/</span>
-          <Link href={`/campaigns/${campaign.id}`} className="hover:text-ink-900 transition-colors">
+          <Link href={`/campaigns/${campaign.id}`} className="transition-colors hover:text-ink-900">
             {campaign.name}
           </Link>
           <span className="mx-1.5 text-ink-300">/</span>
           <span>{locale === "ar" ? "السجل" : "Activity"}</span>
         </span>
-      }
+      )}
     >
-      <p className="text-mini text-ink-500 mb-6 max-w-2xl leading-relaxed">
+      <p className="mb-6 max-w-2xl text-mini leading-relaxed text-ink-500">
         {locale === "ar"
-          ? "كل حدث مرتبط بهذه الحملة — من التعديلات والإرسال إلى ردود المدعوين."
-          : "Every event tied to this campaign — from edits and sends to invitee replies. Per-invitation send logs stay in the global audit view."}
-        {inviteeScanCapped ? (
-          <span className="block mt-2 text-ink-400">
+          ? "كل حدث مرتبط بهذه الحملة — من التعديلات والإرسال إلى ردود المدعوين وحالة التسليم."
+          : "Every event tied to this campaign — from edits and sends to invitee replies and delivery updates."}
+        {inviteeScanCapped || invitationScanCapped ? (
+          <span className="mt-2 block text-ink-400">
             {locale === "ar"
-              ? "هذه الحملة كبيرة — تم إخفاء أحداث المدعوين الفردية."
-              : `Campaign has ${inviteeCount.toLocaleString()}+ invitees — per-invitee events hidden to keep this page fast.`}
+              ? "هذه الحملة كبيرة — تم إخفاء بعض السجلات الفردية لإبقاء الصفحة سريعة."
+              : "Campaign is large — some per-invitee or per-invitation events are hidden to keep this page fast."}
           </span>
         ) : null}
       </p>
@@ -117,14 +120,14 @@ export default async function CampaignActivity({
         </EmptyState>
       ) : (
         <>
-          <ol className="max-w-3xl relative border-s border-ink-100 ps-6 flex flex-col gap-5">
-            {rows.map((r) => {
+          <ol className="relative flex max-w-3xl flex-col gap-5 border-s border-ink-100 ps-6">
+            {rows.map((row) => {
               const { line, tone } = phrase({
-                ...r,
-                actor: r.actor as { email: string; fullName: string | null } | null,
+                ...row,
+                actor: row.actor as { email: string; fullName: string | null } | null,
               });
               return (
-                <li key={r.id} className="relative">
+                <li key={row.id} className="relative">
                   <span
                     className={`absolute -start-[1.72rem] top-1.5 h-2 w-2 rounded-full ${
                       tone === "success"
@@ -137,11 +140,11 @@ export default async function CampaignActivity({
                     }`}
                     aria-hidden
                   />
-                  <div className="text-body text-ink-900 leading-snug">{line}</div>
-                  <div className="text-mini text-ink-400 mt-0.5 tabular-nums">
-                    {formatAdminDate(r.createdAt, locale, calendar)}
+                  <div className="leading-snug text-body text-ink-900">{line}</div>
+                  <div className="mt-0.5 tabular-nums text-mini text-ink-400">
+                    {formatAdminDate(row.createdAt, locale, calendar)}
                     <span className="mx-1.5 text-ink-300">·</span>
-                    <span className="font-mono">{r.kind}</span>
+                    <span className="font-mono">{row.kind}</span>
                   </div>
                 </li>
               );

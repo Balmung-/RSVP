@@ -76,6 +76,14 @@ export async function sendEmail(campaign: Campaign, invitee: Invitee) {
     return { ok: true as const, invitationId: inv.id };
   }
   await prisma.invitation.update({ where: { id: inv.id }, data: { status: "failed", error: res.error } });
+  await prisma.eventLog.create({
+    data: {
+      kind: "invite.failed",
+      refType: "invitation",
+      refId: inv.id,
+      data: JSON.stringify({ channel: "email", error: res.error }),
+    },
+  });
   return { ok: false as const, error: res.error };
 }
 
@@ -106,6 +114,14 @@ export async function sendSms(campaign: Campaign, invitee: Invitee) {
     return { ok: true as const, invitationId: inv.id };
   }
   await prisma.invitation.update({ where: { id: inv.id }, data: { status: "failed", error: res.error } });
+  await prisma.eventLog.create({
+    data: {
+      kind: "invite.failed",
+      refType: "invitation",
+      refId: inv.id,
+      data: JSON.stringify({ channel: "sms", error: res.error }),
+    },
+  });
   return { ok: false as const, error: res.error };
 }
 
@@ -270,6 +286,12 @@ export async function performWhatsAppSend(
       status: "failed",
       error: plan.reason,
     });
+    await deps.createEventLog({
+      kind: "invite.failed",
+      refType: "invitation",
+      refId: inv.id,
+      data: JSON.stringify({ channel: "whatsapp", error: plan.reason }),
+    });
     return { ok: false, error: plan.reason };
   }
 
@@ -303,6 +325,12 @@ export async function performWhatsAppSend(
       await deps.updateInvitation(inv.id, {
         status: "failed",
         error: swap.error,
+      });
+      await deps.createEventLog({
+        kind: "invite.failed",
+        refType: "invitation",
+        refId: inv.id,
+        data: JSON.stringify({ channel: "whatsapp", error: swap.error }),
       });
       return { ok: false, error: swap.error };
     }
@@ -348,6 +376,12 @@ export async function performWhatsAppSend(
     return { ok: true, invitationId: inv.id };
   }
   await deps.updateInvitation(inv.id, { status: "failed", error: res.error });
+  await deps.createEventLog({
+    kind: "invite.failed",
+    refType: "invitation",
+    refId: inv.id,
+    data: JSON.stringify({ channel: "whatsapp", error: res.error }),
+  });
   return { ok: false, error: res.error };
 }
 

@@ -60,6 +60,7 @@ import { canSeeCampaignRow } from "@/lib/teams";
 import { buildArrivalsFeed } from "@/lib/arrivals";
 import { hasWhatsAppTemplate, isChannelProviderEnabled } from "@/lib/channel-availability";
 import { buildCampaignChannelReadiness } from "@/lib/channel-readiness";
+import { buildDispatchFlash } from "@/lib/campaign-send-feedback";
 
 export const dynamic = "force-dynamic";
 
@@ -146,7 +147,16 @@ async function sendAction(formData: FormData) {
     });
   }
 
-  await sendCampaign(id, { channel, onlyUnsent: true });
+  const result = await sendCampaign(id, { channel, onlyUnsent: true });
+  if (result.locked) {
+    setFlash({
+      kind: "warn",
+      text: "A send is already in flight for this campaign.",
+      detail: "Wait a moment, then try again.",
+    });
+    redirect(`/campaigns/${id}`);
+  }
+  setFlash(buildDispatchFlash({ kind: "send", result }));
   redirect(`/campaigns/${id}`);
 }
 
@@ -156,7 +166,12 @@ async function singleResend(campaignId: string, formData: FormData) {
   const inviteeId = String(formData.get("inviteeId"));
   const channel = String(formData.get("channel")) as "email" | "sms" | "whatsapp";
   if (channel !== "email" && channel !== "sms" && channel !== "whatsapp") redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
-  await resendSingle(campaignId, inviteeId, channel);
+  const result = await resendSingle(campaignId, inviteeId, channel);
+  setFlash(
+    result.ok
+      ? { kind: "success", text: `Resent ${channel}.` }
+      : { kind: "warn", text: `Could not resend ${channel}.`, detail: result.error ?? "unknown error" },
+  );
   redirect(`/campaigns/${campaignId}?invitee=${inviteeId}`);
 }
 
@@ -174,7 +189,8 @@ async function bulkResend(campaignId: string, formData: FormData) {
   const ids = formData.getAll("id").map(String).filter(Boolean);
   const channel = String(formData.get("channel")) as "email" | "sms" | "whatsapp";
   if (ids.length === 0 || (channel !== "email" && channel !== "sms" && channel !== "whatsapp")) redirect(`/campaigns/${campaignId}`);
-  await resendSelection(campaignId, ids, { channels: [channel], onlyUnsent: false });
+  const result = await resendSelection(campaignId, ids, { channels: [channel], onlyUnsent: false });
+  setFlash(buildDispatchFlash({ kind: "retry", result }));
   redirect(`/campaigns/${campaignId}`);
 }
 
