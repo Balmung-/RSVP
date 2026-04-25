@@ -37,6 +37,11 @@ export function buildInviteeChannelReadiness(args: {
     templateWhatsAppName: campaign.templateWhatsAppName,
     templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
   });
+  const whatsAppReason = describeWhatsAppConfigReason(
+    campaign.templateWhatsAppName,
+    campaign.templateWhatsAppLanguage,
+    "Campaign",
+  );
 
   return [
     {
@@ -74,7 +79,7 @@ export function buildInviteeChannelReadiness(args: {
         : !invitee.phoneE164
           ? "No phone on this invitee"
           : !whatsAppConfigured
-            ? "Campaign template name and language are missing"
+            ? whatsAppReason
             : "Ready to send",
       detail: whatsAppConfigured
         ? joinBits([
@@ -98,6 +103,11 @@ export function buildCampaignChannelReadiness(args: {
     templateWhatsAppName: campaign.templateWhatsAppName,
     templateWhatsAppLanguage: campaign.templateWhatsAppLanguage,
   });
+  const whatsAppReason = describeWhatsAppConfigReason(
+    campaign.templateWhatsAppName,
+    campaign.templateWhatsAppLanguage,
+    "Template",
+  );
 
   return [
     {
@@ -129,7 +139,7 @@ export function buildCampaignChannelReadiness(args: {
       reason: !providers.whatsappEnabled
         ? "Provider is off"
         : !whatsAppConfigured
-          ? "Template name and language are required"
+          ? whatsAppReason
           : "Ready",
       detail: joinBits([
         inviteesWithPhone > 0 ? `${inviteesWithPhone.toLocaleString()} invitees have phone` : "No invitees have phone yet",
@@ -139,6 +149,19 @@ export function buildCampaignChannelReadiness(args: {
       ]),
     },
   ];
+}
+
+function describeWhatsAppConfigReason(
+  name: string | null,
+  language: string | null,
+  subject: "Campaign" | "Template",
+): string {
+  const hasName = !!name && name.trim().length > 0;
+  const hasLanguage = !!language && language.trim().length > 0;
+  if (!hasName && !hasLanguage) return `${subject} name and language are required`;
+  if (!hasName) return `${subject} name is required`;
+  if (!hasLanguage) return `${subject} language is required`;
+  return "Ready";
 }
 
 function hasBody(value: string | null): boolean {

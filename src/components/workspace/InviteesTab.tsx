@@ -121,6 +121,9 @@ export function InviteesTab({
           </div>
         ) : null}
       </div>
+      <p className="text-mini text-ink-500">
+        Click an invitee row to open their RSVP details, delivery history, and resend actions.
+      </p>
 
       <InviteeTable
         invitees={rows}

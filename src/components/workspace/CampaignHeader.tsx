@@ -4,6 +4,7 @@ import { Menu, MenuItem, MenuSeparator } from "@/components/Menu";
 import { SendDialog } from "@/components/SendDialog";
 import { Icon, type IconName } from "@/components/Icon";
 import { readAdminLocale, readAdminCalendar, adminDict, formatAdminDate } from "@/lib/adminLocale";
+import type { ChannelReadiness } from "@/lib/channel-readiness";
 
 const statusColor: Record<string, string> = {
   draft: "bg-ink-300",
@@ -23,6 +24,7 @@ export async function CampaignHeader({
   headcount,
   invited,
   responded,
+  messageSetup,
 }: {
   campaign: Campaign;
   sendAction: (fd: FormData) => Promise<void>;
@@ -41,6 +43,7 @@ export async function CampaignHeader({
   headcount: number;
   invited: number;
   responded: number;
+  messageSetup: ChannelReadiness[];
 }) {
   const locale = readAdminLocale();
   const calendar = readAdminCalendar();
@@ -94,7 +97,12 @@ export async function CampaignHeader({
           status={campaign.status}
           action={sendAction}
           canWrite={canWrite}
+          setup={messageSetup}
+          editHref={`/campaigns/${campaign.id}/edit`}
         />
+        <Link href={`/campaigns/${campaign.id}/activity`} className="btn btn-ghost text-xs">
+          Activity log
+        </Link>
         <Menu
           label="More actions"
           trigger={<Icon name="more" size={16} className="text-ink-700" />}

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import clsx from "clsx";
 import { Badge } from "./Badge";
@@ -35,6 +36,7 @@ export function InviteeTable({
   resendBulkAction: (fd: FormData) => Promise<void> | void;
   deleteBulkAction: (fd: FormData) => Promise<void> | void;
 }) {
+  const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const allSelected = invitees.length > 0 && invitees.every((i) => selected.has(i.id));
   const someSelected = selected.size > 0;
@@ -99,8 +101,13 @@ export function InviteeTable({
                 const response = invitee.response;
                 const tone = response ? (response.attending ? "live" : "fail") : "wait";
                 const label = response ? (response.attending ? "attending" : "declined") : "pending";
+                const rowHref = `${baseHref}invitee=${invitee.id}`;
                 return (
-                  <tr key={invitee.id} className={clsx(isOpen && "bg-ink-50")}>
+                  <tr
+                    key={invitee.id}
+                    className={clsx("cursor-pointer hover:bg-ink-50", isOpen && "bg-ink-50")}
+                    onClick={() => router.push(rowHref)}
+                  >
                     <td onClick={(e) => e.stopPropagation()}>
                       <label className="sr-only" htmlFor={`sel-${invitee.id}`}>
                         Select {invitee.fullName}
@@ -114,7 +121,7 @@ export function InviteeTable({
                       />
                     </td>
                     <td>
-                      <Link href={`${baseHref}invitee=${invitee.id}`} className="block">
+                      <Link href={rowHref} className="block">
                         <div className="font-medium text-ink-900 hover:underline">{invitee.fullName}</div>
                         {invitee.title || invitee.organization ? (
                           <div className="mt-0.5 text-xs text-ink-400">

@@ -476,6 +476,7 @@ export default async function CampaignWorkspace({
         headcount={stats.headcount}
         invited={stats.total}
         responded={stats.responded}
+        messageSetup={messageSetup}
       />
       {/* Pulse + attention items live on one compressed band below the
           header: a continuous horizontal plane, no boxed banners. */}

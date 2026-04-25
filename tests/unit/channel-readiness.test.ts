@@ -83,6 +83,30 @@ test("invitee readiness explains missing WhatsApp template instead of hiding the
   assert.equal(channels.find((channel) => channel.channel === "whatsapp")?.ready, false);
   assert.equal(
     channels.find((channel) => channel.channel === "whatsapp")?.reason,
-    "Campaign template name and language are missing",
+    "Campaign name and language are required",
+  );
+});
+
+test("campaign readiness pinpoints a missing WhatsApp language when the template name exists", () => {
+  const channels = buildCampaignChannelReadiness({
+    campaign: {
+      templateEmail: null,
+      templateSms: null,
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: null,
+      whatsappDocumentUploadId: "file_123",
+    },
+    providers: {
+      emailEnabled: false,
+      smsEnabled: false,
+      whatsappEnabled: true,
+    },
+    inviteesWithEmail: 0,
+    inviteesWithPhone: 5,
+  });
+
+  assert.equal(
+    channels.find((channel) => channel.channel === "whatsapp")?.reason,
+    "Template language is required",
   );
 });
