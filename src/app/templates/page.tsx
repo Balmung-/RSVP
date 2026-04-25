@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/Badge";
 import { getCurrentUser, hasRole, requireActiveTenantId, requireRole } from "@/lib/auth";
 import { listTemplates, loadGovernmentTemplatePack, type TemplateKind } from "@/lib/templates";
+import { APPROVED_WHATSAPP_TEMPLATES } from "@/lib/whatsapp-template-catalog";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
 import { setFlash } from "@/lib/flash";
 import { logAction } from "@/lib/audit";
@@ -106,6 +107,27 @@ export default async function TemplatesPage({
         {(kind || locale) ? (
           <Link href="/templates" className="text-mini text-ink-500 hover:text-ink-900 ms-auto">Clear</Link>
         ) : null}
+      </div>
+
+      <div className="panel-quiet mb-6 max-w-5xl p-5">
+        <div className="text-sub text-ink-900 mb-2">Approved WhatsApp templates</div>
+        <p className="text-body text-ink-600 mb-3">
+          WhatsApp does not use this email/SMS copy library. It uses approved Taqnyat / Meta
+          templates selected per campaign in the campaign form.
+        </p>
+        <ul className="space-y-2 text-body text-ink-700">
+          {APPROVED_WHATSAPP_TEMPLATES.map((template) => (
+            <li key={template.id} className="flex items-start justify-between gap-4">
+              <div>
+                <div className="font-medium text-ink-900">{template.label}</div>
+                <div className="text-mini text-ink-500">
+                  {template.templateName} · {template.language} · {template.kind}
+                </div>
+              </div>
+              {template.note ? <div className="text-mini text-ink-500">{template.note}</div> : null}
+            </li>
+          ))}
+        </ul>
       </div>
 
       {templates.length === 0 ? (

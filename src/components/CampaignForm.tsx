@@ -4,6 +4,10 @@ import { toLocalInput } from "@/lib/time";
 import { FileInput } from "./FileInput";
 import { WhatsAppDocumentInput } from "./WhatsAppDocumentInput";
 import { Field } from "./Field";
+import {
+  APPROVED_WHATSAPP_TEMPLATES,
+  findApprovedWhatsAppTemplateByPair,
+} from "@/lib/whatsapp-template-catalog";
 
 // One form, two callers. "New" passes no campaign; "Edit" passes the row.
 // The submit action is whatever the caller binds - we just collect fields.
@@ -29,6 +33,15 @@ export function CampaignForm({
    */
   whatsappDocumentFilename?: string | null;
 }) {
+  const selectedWhatsAppTemplate = findApprovedWhatsAppTemplateByPair(
+    campaign?.templateWhatsAppName ?? null,
+    campaign?.templateWhatsAppLanguage ?? null,
+  );
+  const showWhatsAppAdvanced =
+    !!campaign?.templateWhatsAppVariables ||
+    (!!campaign?.templateWhatsAppName &&
+      !!campaign?.templateWhatsAppLanguage &&
+      !selectedWhatsAppTemplate);
   return (
     <form action={action} className="panel max-w-3xl p-10 grid grid-cols-2 gap-6">
       <Field label="Name" className="col-span-2">
@@ -190,9 +203,9 @@ export function CampaignForm({
         className="col-span-2 group"
         open={
           !!(
-            campaign?.templateWhatsAppName ||
-            campaign?.templateWhatsAppLanguage ||
+            selectedWhatsAppTemplate ||
             campaign?.templateWhatsAppVariables ||
+            showWhatsAppAdvanced ||
             campaign?.whatsappDocumentUploadId
           )
         }
@@ -201,44 +214,66 @@ export function CampaignForm({
           WhatsApp message setup
         </summary>
         <div className="mt-4 grid grid-cols-2 gap-6">
-          <Field label="Template name">
-            <input
-              name="templateWhatsAppName"
+          <Field label="Approved WhatsApp template" className="col-span-2">
+            <select
+              name="templateWhatsAppPreset"
               className="field"
-              maxLength={200}
-              defaultValue={campaign?.templateWhatsAppName ?? ""}
-              placeholder="moather2026_moather2026"
-            />
-          </Field>
-          <Field label="Language">
-            <input
-              name="templateWhatsAppLanguage"
-              className="field"
-              maxLength={10}
-              defaultValue={campaign?.templateWhatsAppLanguage ?? ""}
-              placeholder="ar"
-            />
-          </Field>
-          <Field label="Positional variables (JSON array)" className="col-span-2">
-            <textarea
-              name="templateWhatsAppVariables"
-              rows={2}
-              className="field font-mono text-xs"
-              maxLength={2000}
-              defaultValue={campaign?.templateWhatsAppVariables ?? ""}
-              placeholder={'["{{name}}", "{{venue}}"]'}
-            />
+              defaultValue={selectedWhatsAppTemplate?.id ?? ""}
+            >
+              <option value="">Select approved template</option>
+              {APPROVED_WHATSAPP_TEMPLATES.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.label}
+                </option>
+              ))}
+            </select>
           </Field>
           <p className="col-span-2 text-xs text-ink-400">
-            Template name must match a Meta-approved template
-            exactly. Language is a BCP-47 tag like <code>ar</code>,{" "}
-            <code>en_US</code>, or <code>fr_FR</code>. Variables are a
-            JSON array of expressions in the template's positional
-            order - each one is rendered with the standard tokens (
-            <code>{"{{name}}"}</code> <code>{"{{venue}}"}</code>{" "}
-            <code>{"{{eventAt}}"}</code> <code>{"{{rsvpUrl}}"}</code>
-            ). Leave variables empty for a zero-param template.
+            Taqnyat being enabled means WhatsApp can send. Each campaign
+            still chooses which approved WhatsApp template it should use.
+            The picker above fills the exact approved Meta name and language
+            for you.
           </p>
+          <details className="col-span-2 group" open={showWhatsAppAdvanced}>
+            <summary className="cursor-pointer text-xs text-ink-500 select-none py-1">
+              Advanced WhatsApp fields
+            </summary>
+            <div className="mt-3 grid grid-cols-2 gap-6">
+              <Field label="Template name">
+                <input
+                  name="templateWhatsAppName"
+                  className="field"
+                  maxLength={200}
+                  defaultValue={campaign?.templateWhatsAppName ?? ""}
+                  placeholder="moather2026_moather2026"
+                />
+              </Field>
+              <Field label="Language">
+                <input
+                  name="templateWhatsAppLanguage"
+                  className="field"
+                  maxLength={10}
+                  defaultValue={campaign?.templateWhatsAppLanguage ?? ""}
+                  placeholder="ar"
+                />
+              </Field>
+              <Field label="Positional variables (JSON array)" className="col-span-2">
+                <textarea
+                  name="templateWhatsAppVariables"
+                  rows={2}
+                  className="field font-mono text-xs"
+                  maxLength={2000}
+                  defaultValue={campaign?.templateWhatsAppVariables ?? ""}
+                  placeholder={'["{{name}}", "{{venue}}"]'}
+                />
+              </Field>
+              <p className="col-span-2 text-xs text-ink-400">
+                Only use the advanced fields if you need a template that is not
+                in the approved picker yet. Variables are a JSON array in the
+                template's positional order.
+              </p>
+            </div>
+          </details>
           <div className="col-span-2">
             <WhatsAppDocumentInput
               name="whatsappDocumentUploadId"

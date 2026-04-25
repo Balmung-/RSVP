@@ -83,6 +83,30 @@ test("happy path: all four fields trimmed + preserved", () => {
   assert.equal(out.whatsappDocumentUploadId, "clx12345abcde67890fghij");
 });
 
+test("approved preset fills template name and language without free-typing them", () => {
+  const out = parseWhatsAppCampaignFields(
+    fd({
+      templateWhatsAppPreset: "invite-pdf-ar",
+      whatsappDocumentUploadId: "clx12345abcde67890fghij",
+    }),
+  );
+  assert.equal(out.templateWhatsAppName, "moather2026_moather2026");
+  assert.equal(out.templateWhatsAppLanguage, "ar");
+  assert.equal(out.whatsappDocumentUploadId, "clx12345abcde67890fghij");
+});
+
+test("unknown preset falls back to raw typed fields instead of wiping them", () => {
+  const out = parseWhatsAppCampaignFields(
+    fd({
+      templateWhatsAppPreset: "unknown-template",
+      templateWhatsAppName: "manual_name",
+      templateWhatsAppLanguage: "ar",
+    }),
+  );
+  assert.equal(out.templateWhatsAppName, "manual_name");
+  assert.equal(out.templateWhatsAppLanguage, "ar");
+});
+
 test("permissive: name-only campaign allowed (both-or-neither not enforced)", () => {
   // Matches the existing `templateEmail` / `subjectEmail` discipline:
   // the form accepts partial config; `no_whatsapp_template` blocker

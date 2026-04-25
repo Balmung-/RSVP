@@ -54,6 +54,8 @@
 //   time. Matches the existing permissive pattern for
 //   templateEmail + subjectEmail.
 
+import { findApprovedWhatsAppTemplateById } from "@/lib/whatsapp-template-catalog";
+
 export type ParsedWhatsAppCampaignFields = {
   templateWhatsAppName: string | null;
   templateWhatsAppLanguage: string | null;
@@ -105,15 +107,16 @@ function clipNullIfEmpty(s: string, max: number): string | null {
 export function parseWhatsAppCampaignFields(
   fd: FormData,
 ): ParsedWhatsAppCampaignFields {
+  const selectedPreset = findApprovedWhatsAppTemplateById(
+    clipNullIfEmpty(readField(fd, "templateWhatsAppPreset"), NAME_MAX),
+  );
   return {
-    templateWhatsAppName: clipNullIfEmpty(
-      readField(fd, "templateWhatsAppName"),
-      NAME_MAX,
-    ),
-    templateWhatsAppLanguage: clipNullIfEmpty(
-      readField(fd, "templateWhatsAppLanguage"),
-      LANGUAGE_MAX,
-    ),
+    templateWhatsAppName:
+      selectedPreset?.templateName ??
+      clipNullIfEmpty(readField(fd, "templateWhatsAppName"), NAME_MAX),
+    templateWhatsAppLanguage:
+      selectedPreset?.language ??
+      clipNullIfEmpty(readField(fd, "templateWhatsAppLanguage"), LANGUAGE_MAX),
     templateWhatsAppVariables: clipNullIfEmpty(
       readField(fd, "templateWhatsAppVariables"),
       VARIABLES_MAX,

@@ -18,6 +18,10 @@ export function TemplateForm({
   const kind = template?.kind ?? defaultKind ?? "email";
   return (
     <form action={action} className="panel p-10 max-w-3xl grid grid-cols-2 gap-6">
+      <div className="col-span-2 rounded-xl border border-ink-100 bg-ink-50 px-4 py-3 text-body text-ink-600">
+        This library is for reusable email and SMS copy. WhatsApp approved templates are chosen
+        per campaign from the campaign form, not written here by hand.
+      </div>
       <Field label="Name" className="col-span-2">
         <input
           name="name"
