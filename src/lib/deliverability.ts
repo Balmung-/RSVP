@@ -38,6 +38,12 @@ export type LiveFailuresOptions = {
   take?: number;
 };
 
+export type LiveFailureReason = {
+  channel: "email" | "sms" | "whatsapp";
+  error: string;
+  count: number;
+};
+
 // Returns every failing/bounced Invitation row that has NOT been
 // superseded by a later sent/delivered on the same (invitee, channel).
 // The caller gets the raw Invitation subset so pages can include more
@@ -105,17 +111,36 @@ export async function liveFailureCount(campaignId: string): Promise<{
   email: number;
   sms: number;
   whatsapp: number;
+  topReasons: LiveFailureReason[];
 }> {
   const rows = await liveFailures({ campaignId });
   let email = 0;
   let sms = 0;
   let whatsapp = 0;
+  const reasonCounts = new Map<string, LiveFailureReason>();
   for (const f of rows) {
     if (f.channel === "email") email++;
     else if (f.channel === "sms") sms++;
     else if (f.channel === "whatsapp") whatsapp++;
+    const knownChannel =
+      f.channel === "email" || f.channel === "sms" || f.channel === "whatsapp" ? f.channel : null;
+    const error = f.error?.trim();
+    if (knownChannel && error) {
+      const key = `${knownChannel}:${error}`;
+      const existing = reasonCounts.get(key);
+      if (existing) existing.count++;
+      else reasonCounts.set(key, { channel: knownChannel, error, count: 1 });
+    }
   }
-  return { total: email + sms + whatsapp, email, sms, whatsapp };
+  return {
+    total: email + sms + whatsapp,
+    email,
+    sms,
+    whatsapp,
+    topReasons: [...reasonCounts.values()]
+      .sort((a, b) => b.count - a.count || a.channel.localeCompare(b.channel) || a.error.localeCompare(b.error))
+      .slice(0, 3),
+  };
 }
 
 // Variant for pages that already ran their own findMany with specific

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import { getCurrentUser, hasPlatformRole, hasTenantRole, hasRole, endSession } from "@/lib/auth";
-import { consumeFlash } from "@/lib/flash";
+import { readFlash } from "@/lib/flash";
 import { teamsEnabled } from "@/lib/teams";
 import { readAdminLocale, adminDict } from "@/lib/adminLocale";
 import { getNotifications } from "@/lib/notifications";
@@ -31,7 +31,7 @@ export async function Shell({
   const isWorkspaceAdmin = hasRole(me, "admin");
   const canManageWorkspacePeople = hasTenantRole(me, "admin");
   const canManageWorkspaceOps = hasTenantRole(me, "admin");
-  const flash = consumeFlash();
+  const flash = readFlash();
   const showTeams = teamsEnabled() && canManageWorkspaceOps;
   const locale = readAdminLocale();
   const T = adminDict(locale);

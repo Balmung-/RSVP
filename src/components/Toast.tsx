@@ -23,6 +23,10 @@ export function Toast({ flash }: { flash: Flash }) {
   const [shown, setShown] = useState(true);
 
   useEffect(() => {
+    void fetch("/api/flash", { method: "POST" }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     const ms = flash.kind === "error" ? 8000 : 4500;
     const id = setTimeout(() => setShown(false), ms);
     return () => clearTimeout(id);
