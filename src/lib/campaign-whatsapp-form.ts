@@ -110,6 +110,10 @@ export function parseWhatsAppCampaignFields(
   const selectedPreset = findApprovedWhatsAppTemplateById(
     clipNullIfEmpty(readField(fd, "templateWhatsAppPreset"), NAME_MAX),
   );
+  const rawVariables = clipNullIfEmpty(
+    readField(fd, "templateWhatsAppVariables"),
+    VARIABLES_MAX,
+  );
   return {
     templateWhatsAppName:
       selectedPreset?.templateName ??
@@ -117,10 +121,10 @@ export function parseWhatsAppCampaignFields(
     templateWhatsAppLanguage:
       selectedPreset?.language ??
       clipNullIfEmpty(readField(fd, "templateWhatsAppLanguage"), LANGUAGE_MAX),
-    templateWhatsAppVariables: clipNullIfEmpty(
-      readField(fd, "templateWhatsAppVariables"),
-      VARIABLES_MAX,
-    ),
+    // Approved templates with zero positional variables should not
+    // carry forward stale JSON from an older manual-config path.
+    templateWhatsAppVariables:
+      selectedPreset && selectedPreset.variableCount === 0 ? null : rawVariables,
     whatsappDocumentUploadId: clipNullIfEmpty(
       readField(fd, "whatsappDocumentUploadId"),
       UPLOAD_ID_MAX,

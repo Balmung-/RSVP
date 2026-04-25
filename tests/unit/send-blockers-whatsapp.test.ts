@@ -343,6 +343,20 @@ test("whatsapp: malformed JSON vars → template_vars_malformed blocker", () => 
   assert.ok(blockers.includes("template_vars_malformed"));
 });
 
+test("whatsapp: approved zero-var template ignores malformed stale vars", () => {
+  const blockers = computeBlockers({
+    campaign: mkCampaign({
+      templateWhatsAppName: "moather2026_moather2026",
+      templateWhatsAppLanguage: "ar",
+      templateWhatsAppVariables: "{stale-json",
+    }),
+    audience: mkAudience(),
+    channel: "whatsapp",
+    onlyUnsent: true,
+  });
+  assert.equal(blockers.includes("template_vars_malformed"), false);
+});
+
 test("whatsapp: JSON object (not array) vars → template_vars_malformed", () => {
   // Parses as JSON but isn't a string[]. The planner accepts only
   // `string[]`; any other JSON shape is malformed for our purposes.

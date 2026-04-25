@@ -217,6 +217,25 @@ test("variables: non-JSON string → reason:template_vars_malformed", async () =
   assert.equal(r.reason, "template_vars_malformed");
 });
 
+test("approved zero-var template: malformed stale vars are ignored", async () => {
+  const r = decideWhatsAppMessage(
+    mkInput({
+      campaign: mkCampaign({
+        templateWhatsAppName: "moather2026_moather2026",
+        templateWhatsAppLanguage: "ar",
+        templateWhatsAppVariables: "{stale-json",
+      }),
+    }),
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.message.kind, "template");
+  if (r.message.kind !== "template") return;
+  assert.equal(r.message.templateName, "moather2026_moather2026");
+  assert.equal(r.message.languageCode, "ar");
+  assert.equal(r.message.variables, undefined);
+});
+
 test("variables: JSON object (not array) → reason:template_vars_malformed", async () => {
   // Operator might have typed `{"name": "..."}` thinking it's a
   // named-map. Wrong shape — Meta needs a positional array. Refuse.
@@ -625,8 +644,8 @@ test("doc header: upload id + template + variables → headerDocument AND variab
   const r = decideWhatsAppMessage(
     mkInput({
       campaign: mkCampaign({
-        templateWhatsAppName: "moather2026_moather2026",
-        templateWhatsAppLanguage: "ar",
+        templateWhatsAppName: "doc_with_vars_v1",
+        templateWhatsAppLanguage: "en_US",
         templateWhatsAppVariables: JSON.stringify(["{{name}}", "{{venue}}"]),
         whatsappDocumentUploadId: "upl-xyz789",
       }),

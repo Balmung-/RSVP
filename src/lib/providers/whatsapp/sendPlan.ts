@@ -1,5 +1,6 @@
 import type { WhatsAppDocumentRef, WhatsAppMessage } from "../types";
 import { render } from "@/lib/template";
+import { findApprovedWhatsAppTemplateByPair } from "@/lib/whatsapp-template-catalog";
 
 // P13 — WhatsApp message-shape planner.
 //
@@ -106,8 +107,15 @@ export function decideWhatsAppMessage(
     campaign.templateWhatsAppLanguage !== null &&
     campaign.templateWhatsAppLanguage.length > 0
   ) {
+    const approvedTemplate = findApprovedWhatsAppTemplateByPair(
+      campaign.templateWhatsAppName,
+      campaign.templateWhatsAppLanguage,
+    );
     let variables: string[] | undefined;
-    if (campaign.templateWhatsAppVariables !== null) {
+    if (
+      campaign.templateWhatsAppVariables !== null &&
+      approvedTemplate?.variableCount !== 0
+    ) {
       const parsed = tryParseStringArray(campaign.templateWhatsAppVariables);
       if (!parsed.ok) {
         return { ok: false, reason: "template_vars_malformed" };

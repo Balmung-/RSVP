@@ -4,6 +4,7 @@ export type ApprovedWhatsAppTemplate = {
   templateName: string;
   language: string;
   kind: "document";
+  variableCount: number;
   note?: string;
 };
 
@@ -18,6 +19,7 @@ export const APPROVED_WHATSAPP_TEMPLATES: ApprovedWhatsAppTemplate[] = [
     templateName: "moather2026_moather2026",
     language: "ar",
     kind: "document",
+    variableCount: 0,
     note: "Approved Taqnyat / Meta template for invitation PDFs.",
   },
 ];

@@ -852,6 +852,8 @@ test("doc-header payload: post-swap update carries documentMediaId, filename, up
     mkCampaign({
       templateWhatsAppName: "moather2026_moather2026",
       templateWhatsAppLanguage: "ar",
+      // Deliberately malformed/stale vars should be ignored for the
+      // approved zero-variable template.
       templateWhatsAppVariables: JSON.stringify(["{{name}}", "{{venue}}"]),
       whatsappDocumentUploadId: UPLOAD_ID,
     }),
@@ -876,7 +878,7 @@ test("doc-header payload: post-swap update carries documentMediaId, filename, up
   const payload = JSON.parse(payloadUpdates[0].payload!);
   assert.equal(payload.template, "moather2026_moather2026");
   assert.equal(payload.language, "ar");
-  assert.deepEqual(payload.variables, ["Ahmed Faisal", "Four Seasons"]);
+  assert.deepEqual(payload.variables, []);
   assert.equal(payload.documentMediaId, MEDIA_ID);
   assert.equal(payload.documentFilename, "invitation.pdf");
   assert.equal(payload.documentUploadId, UPLOAD_ID);

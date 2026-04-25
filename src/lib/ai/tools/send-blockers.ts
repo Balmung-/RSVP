@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { channelSetFor, type SendCampaignChannel } from "@/lib/campaigns";
 import { campaignWantsWhatsAppDocument } from "@/lib/providers/whatsapp/sendPlan";
+import { findApprovedWhatsAppTemplateByPair } from "@/lib/whatsapp-template-catalog";
 
 // Shared blocker truth for the propose_send → ConfirmSend →
 // send_campaign path.
@@ -291,6 +292,12 @@ export function computeBlockers(args: {
   // getting a wall of failed Invitation rows after clicking.
   const whatsAppTemplateConfigured =
     !!campaign.templateWhatsAppName && !!campaign.templateWhatsAppLanguage;
+  const approvedWhatsAppTemplate = whatsAppTemplateConfigured
+    ? findApprovedWhatsAppTemplateByPair(
+        campaign.templateWhatsAppName,
+        campaign.templateWhatsAppLanguage,
+      )
+    : null;
   if (wantsWhatsApp && !whatsAppTemplateConfigured) {
     blockers.push("no_whatsapp_template");
   }
@@ -310,6 +317,7 @@ export function computeBlockers(args: {
   if (
     wantsWhatsApp &&
     whatsAppTemplateConfigured &&
+    approvedWhatsAppTemplate?.variableCount !== 0 &&
     campaign.templateWhatsAppVariables !== null &&
     !isParsableWhatsAppVars(campaign.templateWhatsAppVariables)
   ) {

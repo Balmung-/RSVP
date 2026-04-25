@@ -95,6 +95,18 @@ test("approved preset fills template name and language without free-typing them"
   assert.equal(out.whatsappDocumentUploadId, "clx12345abcde67890fghij");
 });
 
+test("approved zero-var preset drops stale advanced variables", () => {
+  const out = parseWhatsAppCampaignFields(
+    fd({
+      templateWhatsAppPreset: "invite-pdf-ar",
+      templateWhatsAppVariables: "{stale-json",
+    }),
+  );
+  assert.equal(out.templateWhatsAppName, "moather2026_moather2026");
+  assert.equal(out.templateWhatsAppLanguage, "ar");
+  assert.equal(out.templateWhatsAppVariables, null);
+});
+
 test("unknown preset falls back to raw typed fields instead of wiping them", () => {
   const out = parseWhatsAppCampaignFields(
     fd({
