@@ -11,7 +11,7 @@ import { setFlash } from "@/lib/flash";
 import { readAdminLocale, readAdminCalendar, formatAdminDate } from "@/lib/adminLocale";
 import { FilterPill, FilterLabel } from "@/components/FilterPill";
 import { InlineStat } from "@/components/Stat";
-import { CampaignScopeSelect } from "./CampaignScopeSelect";
+import { CampaignScopeSelect, buildDeliverabilityHref } from "./CampaignScopeSelect";
 import { scopedCampaignWhere, canSeeCampaign } from "@/lib/teams";
 import { filterLiveFailures } from "@/lib/deliverability";
 import { mapConcurrent } from "@/lib/concurrency";
@@ -210,13 +210,7 @@ export default async function Deliverability({
   const whatsappCount = live.filter((f) => f.channel === "whatsapp").length;
   const bouncedCount = live.filter((f) => f.status === "bounced").length;
 
-  const qs = (patch: Partial<SearchParams>) => {
-    const next = { ...searchParams, ...patch };
-    const entries = Object.entries(next).filter(([, v]) => v && v !== "all");
-    return entries.length
-      ? `/deliverability?${new URLSearchParams(entries as [string, string][]).toString()}`
-      : "/deliverability";
-  };
+  const qs = (patch: Partial<SearchParams>) => buildDeliverabilityHref(searchParams, patch);
 
   return (
     <Shell
@@ -255,7 +249,11 @@ export default async function Deliverability({
         {campaignNames.length > 0 ? (
           <>
             <FilterLabel>{locale === "ar" ? "الحملة" : "Campaign"}</FilterLabel>
-            <CampaignScopeSelect campaigns={campaignNames} selected={campaignId ?? "all"} qs={qs} />
+            <CampaignScopeSelect
+              campaigns={campaignNames}
+              selected={campaignId ?? "all"}
+              searchParams={searchParams}
+            />
           </>
         ) : null}
         {(channel !== "all" || statusFilter !== "all" || campaignId) ? (
