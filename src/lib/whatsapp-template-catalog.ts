@@ -41,3 +41,13 @@ export function findApprovedWhatsAppTemplateByPair(
     ) ?? null
   );
 }
+
+export function findApprovedWhatsAppTemplateByName(
+  templateName: string | null | undefined,
+): ApprovedWhatsAppTemplate | null {
+  if (!templateName) return null;
+  const matches = APPROVED_WHATSAPP_TEMPLATES.filter(
+    (template) => template.templateName === templateName,
+  );
+  return matches.length === 1 ? matches[0] : null;
+}

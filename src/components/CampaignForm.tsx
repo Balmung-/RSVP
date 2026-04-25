@@ -6,6 +6,7 @@ import { WhatsAppDocumentInput } from "./WhatsAppDocumentInput";
 import { Field } from "./Field";
 import {
   APPROVED_WHATSAPP_TEMPLATES,
+  findApprovedWhatsAppTemplateByName,
   findApprovedWhatsAppTemplateByPair,
 } from "@/lib/whatsapp-template-catalog";
 
@@ -37,11 +38,17 @@ export function CampaignForm({
     campaign?.templateWhatsAppName ?? null,
     campaign?.templateWhatsAppLanguage ?? null,
   );
+  const inferredWhatsAppTemplate =
+    selectedWhatsAppTemplate ??
+    findApprovedWhatsAppTemplateByName(campaign?.templateWhatsAppName ?? null);
+  const defaultWhatsAppTemplate =
+    inferredWhatsAppTemplate ??
+    (APPROVED_WHATSAPP_TEMPLATES.length === 1 ? APPROVED_WHATSAPP_TEMPLATES[0] : null);
   const showWhatsAppAdvanced =
     !!campaign?.templateWhatsAppVariables ||
     (!!campaign?.templateWhatsAppName &&
       !!campaign?.templateWhatsAppLanguage &&
-      !selectedWhatsAppTemplate);
+      !inferredWhatsAppTemplate);
   return (
     <form action={action} className="panel max-w-3xl p-10 grid grid-cols-2 gap-6">
       <Field label="Name" className="col-span-2">
@@ -218,7 +225,7 @@ export function CampaignForm({
             <select
               name="templateWhatsAppPreset"
               className="field"
-              defaultValue={selectedWhatsAppTemplate?.id ?? ""}
+              defaultValue={defaultWhatsAppTemplate?.id ?? ""}
             >
               <option value="">Select approved template</option>
               {APPROVED_WHATSAPP_TEMPLATES.map((template) => (
